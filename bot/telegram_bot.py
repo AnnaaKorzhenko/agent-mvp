@@ -5,7 +5,8 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
-from anthropic import AsyncAnthropic
+from google import genai
+from google.genai import types as genai_types
 from config import config, get_db
 
 logger = logging.getLogger(__name__)
@@ -18,7 +19,8 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-anthropic_client = AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
+# Initialize Gemini Client
+gemini_client = genai.Client(api_key=config.GEMINI_API_KEY)
 
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -84,15 +86,17 @@ Items:
 """
 
     try:
-        response = await anthropic_client.messages.create(
-            model="claude-3-5-sonnet-20241022",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": prompt}]
+        response = await gemini_client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                temperature=0.3
+            )
         )
-        briefing_body = response.content[0].text.strip()
+        briefing_body = response.text.strip()
         return f"<b>🛡️ Daily DefTech R&D Briefing</b>\n<i>{datetime.utcnow().strftime('%Y-%m-%d')}</i>\n\n{briefing_body}"
     except Exception as e:
-        logger.error(f"Error compiling briefing with Sonnet: {e}")
+        logger.error(f"Error compiling briefing with Gemini: {e}")
         return "<b>Error generating briefing summary. Please review raw posts in status.</b>"
 
 async def send_scheduled_morning_digest():
