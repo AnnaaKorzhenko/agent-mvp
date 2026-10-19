@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 import requests
 from bs4 import BeautifulSoup
 
-from cleaning import is_ad
-from db import posts_collection, sources_collection
+from scrapers.cleaning import is_ad
+from scrapers.db import posts_collection, sources_collection
 
 logger = logging.getLogger(__name__)
 
@@ -138,8 +138,34 @@ async def save_posts(channel_id, posts: list[dict], username: str) -> int:
     return saved
 
 
-async def run_tg_scraper() -> None:
-    channels = await sources_collection.find({"platform": "telegram"}).to_list(length=None)
+# async def run_tg_scraper() -> None:
+#     channels = await sources_collection.find({"platform": "telegram"}).to_list(length=None)
+#     if not channels:
+#         logger.warning("У колекції 'sources' не знайдено жодного Telegram-каналу!")
+#         return
+
+#     for channel in channels:
+#         username = channel.get("username", "")
+#         country = channel.get("country") or channel.get("source_country") or "Unknown"
+#         if not username:
+#             continue
+
+#         posts = await asyncio.to_thread(scrape_tg_web_channel, username)
+#         saved = await save_posts(channel["_id"], posts, username)
+
+#         logger.info(
+#             f"Канал {username} ({country}): знайдено постів: {len(posts)}, "
+#             f"нових збережено в 'raw_posts': {saved}."
+#         )
+#         await asyncio.sleep(random.randint(2, 5))
+
+async def run_tg_scraper(max_channels: int | None = None, max_posts_per_channel: int | None = None) -> None:
+    query = {"platform": "telegram"}
+    if max_channels:
+        channels = await sources_collection.find(query).limit(max_channels).to_list(length=max_channels)
+    else:
+        channels = await sources_collection.find(query).to_list(length=None)
+
     if not channels:
         logger.warning("У колекції 'sources' не знайдено жодного Telegram-каналу!")
         return
@@ -151,10 +177,15 @@ async def run_tg_scraper() -> None:
             continue
 
         posts = await asyncio.to_thread(scrape_tg_web_channel, username)
+        
+        # Limit parsed posts per channel if specified
+        if max_posts_per_channel and posts:
+            posts = posts[:max_posts_per_channel]
+
         saved = await save_posts(channel["_id"], posts, username)
 
         logger.info(
             f"Канал {username} ({country}): знайдено постів: {len(posts)}, "
             f"нових збережено в 'raw_posts': {saved}."
         )
-        await asyncio.sleep(random.randint(2, 5))
+        await asyncio.sleep(2)

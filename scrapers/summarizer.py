@@ -8,8 +8,8 @@ from datetime import datetime, timezone
 from openai import APIConnectionError, AsyncOpenAI
 from pymongo import UpdateOne
 
-from cleaning import clean_post_text, is_ad, learn_channel_footers, normalize_for_model
-from db import posts_collection, sources_collection
+from scrapers.cleaning import clean_post_text, is_ad, learn_channel_footers, normalize_for_model
+from scrapers.db import posts_collection, sources_collection
 
 logger = logging.getLogger(__name__)
 
@@ -264,8 +264,9 @@ async def ensure_indexes() -> None:
     await posts_collection.create_index([("source_side", 1), ("published_at", -1)])
 
 
-async def analyze_pending_posts(chunk: int = 20) -> None:
+# In scrapers/summarizer.py
 
+async def analyze_pending_posts(chunk: int = 20, max_posts: int | None = None) -> None:
     try:
         await client.models.list()
     except APIConnectionError:
@@ -283,7 +284,14 @@ async def analyze_pending_posts(chunk: int = 20) -> None:
     }
     done = 0
     while True:
-        posts = await posts_collection.find(query, {"raw_text": 1, "channel_id": 1}).limit(chunk).to_list(chunk)
+        limit_this_batch = chunk
+        if max_posts is not None:
+            remaining = max_posts - done
+            if remaining <= 0:
+                break
+            limit_this_batch = min(chunk, remaining)
+
+        posts = await posts_collection.find(query, {"raw_text": 1, "channel_id": 1}).limit(limit_this_batch).to_list(limit_this_batch)
         if not posts:
             break
         try:
@@ -294,4 +302,8 @@ async def analyze_pending_posts(chunk: int = 20) -> None:
         await posts_collection.bulk_write(ops)
         done += len(posts)
         logger.info(f"Проаналізовано {done}")
+        
+        if max_posts is not None and done >= max_posts:
+            break
+
     logger.info("Аналіз завершено" if done else "Нових постів для аналізу немає")

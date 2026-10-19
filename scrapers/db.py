@@ -10,7 +10,7 @@ if not MONGO_URI:
     raise RuntimeError("MONGO_URI не задано у файлі .env")
 
 client = AsyncIOMotorClient(MONGO_URI)
-db = client["News"]
+db = client["News-data"]
 
 sources_collection = db["sources"]
 posts_collection = db["raw_posts"]

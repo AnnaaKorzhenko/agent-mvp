@@ -5,7 +5,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from scrapers.scraper import run_tg_scraper
-from scrapers.summarizer import generate_missing_summaries
+from scrapers.summarizer import analyze_pending_posts
 from processing.evaluator import evaluate_unprocessed_posts
 from bot.telegram_bot import bot, dp, generate_daily_briefing
 from config import config
@@ -17,7 +17,7 @@ async def scheduled_pipeline_cycle():
     logger.info("=== STARTING PIPELINE CYCLE ===")
     try:
         await run_tg_scraper()
-        await generate_missing_summaries(batch_size=2)  # Low batch size prevents Railway OOM
+        await analyze_pending_posts()  
         await evaluate_unprocessed_posts(batch_size=10)
         logger.info("=== PIPELINE CYCLE COMPLETED SUCCESSFULLY ===")
     except Exception as e:
