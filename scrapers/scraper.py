@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 import requests
 from bs4 import BeautifulSoup
 
-from cleaning import clean_post_text, is_ad
-from db import posts_collection, sources_collection
+from scrapers.cleaning import clean_post_text, is_ad
+from scrapers.db import posts_collection, sources_collection
 
 logger = logging.getLogger(__name__)
 

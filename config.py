@@ -1,35 +1,22 @@
+# config.py
 import os
 from dotenv import load_dotenv
-from motor.motor_asyncio import AsyncIOMotorClient
 
 load_dotenv()
 
+def get_env_int(key: str, default: int = 0) -> int:
+    val = os.getenv(key, "").strip() if os.getenv(key) else ""
+    try:
+        return int(val) if val else default
+    except ValueError:
+        return default
+
 class Config:
-    MONGO_URI: str = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-    MONGO_DB_NAME: str = os.getenv("MONGO_DB_NAME", "deftech_intel")
-    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    MONGO_URI: str = os.getenv("MONGO_URI", "")
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    DIRECTOR_CHAT_ID: int = int(os.getenv("DIRECTOR_CHAT_ID", "0"))
-    SCRAPE_INTERVAL_MINUTES: int = int(os.getenv("SCRAPE_INTERVAL_MINUTES", "30"))
-
-    # Initial target sources for MVP
-    TARGET_TG_CHANNELS: list[str] = [
-        "milinfolive",
-        "serhii_flash",
-        "kiber_boroshno"
-    ]
-
-    TARGET_RSS_FEEDS: list[str] = [
-        "https://militarnyi.com/feed/",
-        "https://def-or.com/feed/"
-    ]
+    DIRECTOR_CHAT_ID: int = get_env_int("DIRECTOR_CHAT_ID", 0)
+    SCRAPE_INTERVAL_MINUTES: int = get_env_int("SCRAPE_INTERVAL_MINUTES", 30)
 
 config = Config()
-
-_mongo_client: AsyncIOMotorClient | None = None
-
-def get_db():
-    global _mongo_client
-    if _mongo_client is None:
-        _mongo_client = AsyncIOMotorClient(config.MONGO_URI)
-    return _mongo_client[config.MONGO_DB_NAME]

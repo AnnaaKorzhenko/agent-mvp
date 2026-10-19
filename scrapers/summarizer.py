@@ -5,8 +5,8 @@ import torch
 from pymongo import UpdateOne
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-from cleaning import normalize_for_model
-from db import posts_collection
+from scrapers.cleaning import normalize_for_model
+from scrapers.db import posts_collection
 
 logger = logging.getLogger(__name__)
 

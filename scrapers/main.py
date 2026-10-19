@@ -1,8 +1,8 @@
 import asyncio
 import logging
 
-from scraper import run_tg_scraper
-from summarizer import generate_missing_summaries
+from scrapers.scraper import run_tg_scraper
+from scrapers.summarizer import generate_missing_summaries
 
 
 async def main() -> None:
