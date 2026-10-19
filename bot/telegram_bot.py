@@ -25,10 +25,12 @@ router = Router()
 dp.include_router(router)
 
 TG_LIMIT = 4000
-NO_DIGEST_TEXT = "No digest available for this selection yet."
+NO_DIGEST_TEXT = "<b>No digest available for this selection yet.</b>"
+EMPTY_DIGEST_TEXT = "<b>Digest document found, but 'parts_html' content is empty.</b>"
 
-# Sides that count as the "overall" digest for /day and /week.
+# Side lookup order for /day and /week: an overall digest, then the UA digest.
 OVERALL_SIDES = ["all", "overall", None]
+DEFAULT_SIDES = ["ua"]
 
 # key -> (period, side, button label)
 # Telegram command names only allow [a-z0-9_], so /day_ua is the canonical form;
@@ -130,28 +132,35 @@ def _strip_tags(text: str) -> str:
     return text.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"').replace("&amp;", "&")
 
 
-async def fetch_latest_digest(period: str, side: Optional[str] = None) -> Optional[dict]:
-    """Returns the newest digest for the given period/side, or None."""
+async def fetch_latest_digest(period: str, side: Optional[str] = None,
+                              exact: bool = False) -> Optional[dict]:
+    """Returns the newest digest for the given period/side, or None.
+
+    Unless exact=True, falls back to the newest digest of any side for the period.
+    """
     sort = [("created_at", -1), ("timestamp", -1), ("_id", -1)]
 
     if side:
-        return await digests_collection.find_one({"period": period, "side": side}, sort=sort)
+        doc = await digests_collection.find_one({"period": period, "side": side}, sort=sort)
+        if doc or exact:
+            return doc
+    else:
+        # No side requested: overall digest first, then UA. The pipeline writes RU after UA,
+        # so "newest of any side" alone would always serve the RU source review.
+        for preferred in (OVERALL_SIDES, DEFAULT_SIDES):
+            doc = await digests_collection.find_one(
+                {"period": period, "side": {"$in": preferred}}, sort=sort
+            )
+            if doc:
+                return doc
 
-    # No side requested: prefer the overall digest, otherwise the newest of any side.
-    doc = await digests_collection.find_one(
-        {"period": period, "side": {"$in": OVERALL_SIDES}}, sort=sort
-    )
-    if doc is None:
-        doc = await digests_collection.find_one({"period": period}, sort=sort)
-    return doc
+    return await digests_collection.find_one({"period": period}, sort=sort)
 
 
-async def get_latest_digest(period: str = "day", side: Optional[str] = None) -> str:
-    """Returns the newest digest as one sanitized HTML string (may exceed Telegram's limit)."""
+async def get_latest_digest_parts(period: str = "day", side: Optional[str] = None) -> List[str]:
+    """Returns the newest digest as sanitized, Telegram-sized HTML messages."""
     doc = await fetch_latest_digest(period, side)
-    if not doc:
-        return f"<b>{NO_DIGEST_TEXT}</b>"
-    return "\n\n".join(render_digest(doc))
+    return render_digest(doc, requested_side=side)
 
 
 def _digest_date(doc: dict) -> str:
@@ -166,12 +175,13 @@ def _digest_date(doc: dict) -> str:
     return "unknown date"
 
 
-def render_digest(doc: Optional[dict]) -> List[str]:
+def render_digest(doc: Optional[dict], requested_side: Optional[str] = None) -> List[str]:
     """Turns a digest document into sanitized, Telegram-sized HTML messages."""
     if not doc:
         return [NO_DIGEST_TEXT]
 
-    content = doc.get("content") or doc.get("text") or ""
+    # parts_html is the pipeline's pre-split list of message chunks; text/content are legacy.
+    content = doc.get("parts_html") or doc.get("content") or doc.get("text") or []
     blocks = content if isinstance(content, list) else [content]
 
     messages = []
@@ -179,7 +189,15 @@ def render_digest(doc: Optional[dict]) -> List[str]:
         clean = sanitize_telegram_html(str(block))
         if clean:
             messages.extend(_split(clean))
-    return messages or [NO_DIGEST_TEXT]
+    if not messages:
+        return [EMPTY_DIGEST_TEXT]
+
+    if requested_side and doc.get("side") != requested_side:
+        messages.insert(0, (
+            f"<i>No {requested_side.upper()} digest yet — showing the latest "
+            f"{doc.get('period')} digest ({str(doc.get('side')).upper()}).</i>"
+        ))
+    return messages
 
 
 def digest_keyboard() -> InlineKeyboardMarkup:
@@ -200,17 +218,17 @@ async def send_html(chat_id: int, text: str, reply_markup: Optional[InlineKeyboa
                                reply_markup=reply_markup, parse_mode=None)
 
 
-async def send_digest(chat_id: int, key: str, with_keyboard: bool = True) -> bool:
-    """Sends the latest digest for a selection. Returns False if none was found."""
+async def send_digest(chat_id: int, key: str, with_keyboard: bool = True) -> int:
+    """Sends each part of the latest digest for a selection. Returns the number of messages."""
     period, side, _ = SELECTIONS[key]
-    doc = await fetch_latest_digest(period, side)
-    messages = render_digest(doc)
+    messages = await get_latest_digest_parts(period, side)
     markup = digest_keyboard() if with_keyboard else None
 
+    # The keyboard goes under the last part only, so a multi-part digest isn't interleaved with buttons.
     for idx, text in enumerate(messages):
         is_last = idx == len(messages) - 1
         await send_html(chat_id, text, reply_markup=markup if is_last else None)
-    return doc is not None
+    return len(messages)
 
 
 @router.message(Command("start", "help"))
@@ -247,8 +265,9 @@ async def cb_digest(callback: types.CallbackQuery):
 async def cmd_status(message: types.Message):
     lines = ["<b>Latest available digests:</b>"]
     for key, (period, side, label) in SELECTIONS.items():
-        doc = await fetch_latest_digest(period, side)
-        lines.append(f"• {label}: <b>{_digest_date(doc) if doc else 'none'}</b>")
+        doc = await fetch_latest_digest(period, side, exact=bool(side))
+        status = f"{_digest_date(doc)} ({doc.get('side')})" if doc else "none"
+        lines.append(f"• {label}: <b>{status}</b>")
     await message.answer("\n".join(lines), reply_markup=digest_keyboard())
 
 

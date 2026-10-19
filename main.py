@@ -18,8 +18,8 @@ async def proactive_morning_briefing():
         logger.info("DIRECTOR_CHAT_ID not set; skipping proactive briefing.")
         return
     try:
-        found = await send_digest(config.DIRECTOR_CHAT_ID, "day")
-        logger.info(f"Proactive briefing delivered (digest found: {found}).")
+        sent = await send_digest(config.DIRECTOR_CHAT_ID, "day")
+        logger.info(f"Proactive briefing delivered ({sent} message(s)).")
     except Exception as e:
         logger.error(f"Failed to deliver proactive briefing: {e}")
 
