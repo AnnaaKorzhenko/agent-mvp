@@ -1,60 +1,55 @@
-# proactive attempt
+# main.py
 import asyncio
 import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+
+from scrapers.scraper import run_tg_scraper
+from scrapers.summarizer import generate_missing_summaries
+from processing.evaluator import evaluate_unprocessed_posts
 from bot.telegram_bot import bot, dp, generate_daily_briefing
 from config import config
-from scrapers.tg_web_scraper import run_tg_scraper
-from processing.evaluator import evaluate_unprocessed_posts
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-async def scheduled_ingestion():
-    """Periodic job to keep the database fresh."""
-    logger.info("Starting background ingestion cycle...")
+async def scheduled_pipeline_cycle():
+    logger.info("=== STARTING PIPELINE CYCLE ===")
     try:
-        await run_tg_scraper(max_sources=50)  # Adjust source batch size as needed
-        await evaluate_unprocessed_posts(limit=10)
-        logger.info("Background ingestion cycle complete.")
+        await run_tg_scraper()
+        await generate_missing_summaries(batch_size=2)  # Low batch size prevents Railway OOM
+        await evaluate_unprocessed_posts(batch_size=10)
+        logger.info("=== PIPELINE CYCLE COMPLETED SUCCESSFULLY ===")
     except Exception as e:
-        logger.error(f"Error in background ingestion: {e}")
+        logger.error(f"Error during scheduled pipeline execution: {e}")
 
-async def send_proactive_briefing():
-    """Proactive push job that sends the morning briefing directly to Telegram."""
+async def proactive_morning_briefing():
     if not config.DIRECTOR_CHAT_ID:
-        logger.warning("DIRECTOR_CHAT_ID not configured. Skipping proactive push.")
         return
-
-    logger.info("Generating proactive morning briefing...")
     try:
-        briefing = await generate_daily_briefing()
-        await bot.send_message(chat_id=config.DIRECTOR_CHAT_ID, text=briefing)
-        logger.info("Proactive morning briefing sent successfully to Director.")
+        briefing_text = await generate_daily_briefing()
+        await bot.send_message(chat_id=config.DIRECTOR_CHAT_ID, text=briefing_text)
     except Exception as e:
         logger.error(f"Failed to deliver proactive briefing: {e}")
 
-async def main():
+async def main() -> None:
     scheduler = AsyncIOScheduler()
-
-    # Task 1: Scrape and evaluate every 30 minutes
+    
     scheduler.add_job(
-        scheduled_ingestion, 
-        'interval', 
+        scheduled_pipeline_cycle,
+        'interval',
         minutes=config.SCRAPE_INTERVAL_MINUTES
     )
-
-    # Task 2: Proactive push briefing every morning at 08:00 AM local time
+    
     scheduler.add_job(
-        send_proactive_briefing,
-        CronTrigger(hour=7, minute=30)
+        proactive_morning_briefing,
+        CronTrigger(hour=8, minute=0)
     )
 
     scheduler.start()
-    logger.info("Proactive Agent Engine initialized and running.")
+    logger.info("Proactive DefTech Intelligence Agent Engine is online.")
 
-    # Start bot listener (allows manual /digest triggers if needed)
+    asyncio.create_task(scheduled_pipeline_cycle())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
