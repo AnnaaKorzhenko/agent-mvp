@@ -1,56 +1,47 @@
 # main.py
+# Railway entrypoint: serves pre-computed digests from MongoDB.
+# Scraping and LLM summarization run externally (e.g. Kaggle) and write to News-data.digests.
 import asyncio
 import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from scrapers.scraper import run_tg_scraper
-from scrapers.summarizer import analyze_pending_posts
-from processing.evaluator import evaluate_unprocessed_posts
-from bot.telegram_bot import bot, dp, generate_daily_briefing
+from bot.telegram_bot import bot, dp, send_digest, setup_bot_commands
 from config import config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-async def scheduled_pipeline_cycle():
-    logger.info("=== STARTING PIPELINE CYCLE ===")
-    try:
-        await run_tg_scraper()
-        await analyze_pending_posts()  
-        await evaluate_unprocessed_posts(batch_size=10)
-        logger.info("=== PIPELINE CYCLE COMPLETED SUCCESSFULLY ===")
-    except Exception as e:
-        logger.error(f"Error during scheduled pipeline execution: {e}")
 
 async def proactive_morning_briefing():
     if not config.DIRECTOR_CHAT_ID:
+        logger.info("DIRECTOR_CHAT_ID not set; skipping proactive briefing.")
         return
     try:
-        briefing_text = await generate_daily_briefing()
-        await bot.send_message(chat_id=config.DIRECTOR_CHAT_ID, text=briefing_text)
+        found = await send_digest(config.DIRECTOR_CHAT_ID, "day")
+        logger.info(f"Proactive briefing delivered (digest found: {found}).")
     except Exception as e:
         logger.error(f"Failed to deliver proactive briefing: {e}")
 
+
 async def main() -> None:
-    scheduler = AsyncIOScheduler()
-    
-    scheduler.add_job(
-        scheduled_pipeline_cycle,
-        'interval',
-        minutes=config.SCRAPE_INTERVAL_MINUTES
-    )
-    
+    config.validate()
+
+    scheduler = AsyncIOScheduler(timezone=config.TIMEZONE)
     scheduler.add_job(
         proactive_morning_briefing,
-        CronTrigger(hour=8, minute=0)
+        CronTrigger(hour=config.DAILY_PUSH_HOUR, minute=config.DAILY_PUSH_MINUTE,
+                    timezone=config.TIMEZONE)
+    )
+    scheduler.start()
+    logger.info(
+        f"DefTech digest bot is online (daily push at "
+        f"{config.DAILY_PUSH_HOUR:02d}:{config.DAILY_PUSH_MINUTE:02d} {config.TIMEZONE})."
     )
 
-    scheduler.start()
-    logger.info("Proactive DefTech Intelligence Agent Engine is online.")
-
-    asyncio.create_task(scheduled_pipeline_cycle())
+    await setup_bot_commands()
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
