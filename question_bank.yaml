@@ -1,0 +1,160 @@
+# Feedback question bank v1
+# The agent asks these to learn what "good" and "bad" mean for each user.
+# Each question: when it fires, what it asks, quick-reply options, and which profile field the answer updates.
+
+version: 1
+
+questions:
+
+  # --- Onboarding: asked once, spread over the first days (max 2 per session) ---
+  - id: on01
+    trigger: onboarding
+    text: "Для чого ви переважно користуватиметеся аналітиком?"
+    options: ["Оперативна обстановка", "Технології й озброєння", "Інвестиції й оборонний бізнес", "Рос. наративи й інформаційна війна", "Інше"]
+    multi: true
+    updates: users.goals
+  - id: on02
+    trigger: onboarding
+    text: "Які напрямки фронту або регіони вам найважливіші?"
+    options: ["Схід", "Південь", "Північ", "Тил і енергетика", "Увесь фронт"]
+    multi: true
+    updates: users.interests.regions
+  - id: on03
+    trigger: onboarding
+    text: "Який формат відповіді вам зручніший?"
+    options: ["Коротко: 3–5 пунктів", "Детально з обґрунтуванням", "Спершу висновок, деталі за запитом"]
+    updates: users.memory.format
+  - id: on04
+    trigger: onboarding
+    text: "Що для вас важливіше у відповіді?"
+    options: ["Перевірені факти", "Оцінка й прогноз", "Наступні кроки та індикатори", "Все однаково"]
+    updates: users.memory.priority
+  - id: on05
+    trigger: onboarding
+    text: "Які рішення ви ухвалюєте на основі цієї інформації? Напишіть своїми словами."
+    options: []
+    free_text: true
+    updates: users.goals
+
+  # --- After 👍 (relevant) ---
+  - id: up01
+    trigger: verdict_up
+    text: "Що в цій відповіді було найціннішим?"
+    options: ["Факти", "Оцінка", "Прогноз", "Наступні кроки", "Джерела"]
+    multi: true
+    updates: feedback.important_aspects
+  - id: up02
+    trigger: verdict_up
+    when: answer_has_forecast
+    text: "Як ви використаєте цей висновок?"
+    options: ["Для рішення", "Для звіту чи брифінгу", "Просто для розуміння", "Перевірю додатково"]
+    updates: feedback.use_case
+  - id: up03
+    trigger: verdict_up
+    when: topic_not_in_interests
+    text: "Стежити за цією темою й надсилати оновлення?"
+    options: ["Так, одразу при новинах", "Так, у зведенні", "Ні"]
+    updates: users.interests
+  - id: up04
+    trigger: verdict_up
+    when: single_source_heavy
+    text: "Більшість фактів тут з одного джерела. Ви йому довіряєте?"
+    options: ["Так", "Частково", "Ні", "Не знаю цього джерела"]
+    updates: users.memory.source_trust
+
+  # --- After 👎 (not useful) ---
+  - id: dn01
+    trigger: verdict_down
+    text: "Що було не так?"
+    options: ["Неточні факти", "Поверхово", "Не про те", "Я це вже знав", "Задовго або закоротко"]
+    multi: true
+    updates: feedback.reasons
+  - id: dn02
+    trigger: verdict_down
+    when: reason == "Неточні факти"
+    text: "Яке саме твердження неправильне і як ви це знаєте?"
+    options: []
+    free_text: true
+    updates: feedback.correction   # flagged for review; never auto-added as fact
+  - id: dn03
+    trigger: verdict_down
+    when: reason == "Поверхово"
+    text: "Чого бракувало для глибини?"
+    options: ["Порівняння з минулим", "Альтернативних пояснень", "Конкретних цифр", "Наслідків і наступних кроків", "Більше джерел"]
+    multi: true
+    updates: users.memory.analysis_style
+  - id: dn04
+    trigger: verdict_down
+    when: reason == "Не про те"
+    text: "Що ви насправді хотіли дізнатися? Сформулюйте одним реченням."
+    options: []
+    free_text: true
+    updates: feedback.intent   # also re-run the question with the clarified intent
+
+  # --- After "partly" ---
+  - id: pt01
+    trigger: verdict_partly
+    text: "Яка частина була корисною, а яка зайвою?"
+    options: ["Корисні факти, слабкий висновок", "Добрий висновок, мало доказів", "Корисне лише одне з пунктів", "Інше"]
+    updates: feedback.reasons
+  - id: pt02
+    trigger: verdict_partly
+    text: "Що додати чи прибрати, щоб наступного разу було 👍?"
+    options: []
+    free_text: true
+    updates: users.memory.analysis_style
+
+  # --- Analysis-specific: fire for forecasts and assessments ---
+  - id: an01
+    trigger: verdict_any
+    when: answer_has_confidence
+    text: "Рівень впевненості в цій відповіді здався вам адекватним?"
+    options: ["Так", "Завищений", "Занижений"]
+    updates: users.memory.calibration
+  - id: an02
+    trigger: verdict_any
+    when: answer_has_ru_claims
+    text: "Як подавати твердження рос. джерел?"
+    options: ["Як зараз", "Більше деталей про наратив", "Менше, лише головне", "Не показувати без підтвердження"]
+    updates: users.memory.ru_claims_style
+
+  # --- Periodic calibration: proactive, not tied to one answer ---
+  - id: pc01
+    trigger: periodic   # every ~7 days of activity
+    text: "Ось що я про вас запам'ятав: {memory_summary}. Усе правильно?"
+    options: ["Так", "Дещо змінилося", "Видалити частину"]
+    updates: users.memory   # "Дещо змінилося" opens /memory editing
+  - id: pc02
+    trigger: periodic
+    when: new_topic_trending AND topic_not_in_interests
+    text: "Тема «{topic}» різко зросла в джерелах. Вам це цікаво?"
+    options: ["Так, стежити", "Разово показати", "Ні"]
+    updates: users.interests   # exploration: finds interests the user never stated
+
+# --- Adaptation rules: how the agent decides what to ask ---
+selection:
+  # 1. Candidates = questions whose trigger and `when` condition match this answer.
+  # 2. Skip a question if its target field is already known with high confidence
+  #    (answered the same way 3+ times, or confirmed in the last 30 days).
+  # 3. Score the rest; ask the highest first:
+  #      score = info_gain + gap_bonus - fatigue_penalty
+  #    info_gain:       higher when the profile field is empty or answers contradict each other
+  #    gap_bonus:       +1 if the answer was on a topic or type with no feedback yet
+  #    fatigue_penalty: grows with questions already asked today and with recent skips
+  max_questions_per_feedback: 2      # one follow-up, a second only if the first was answered
+  max_questions_per_day: 10          # the user can change this
+  quiet_hours: "22:00-08:00"
+  skip_option: "Пропустити"          # always shown; 3 skips in a row → pause questions for 24 h
+
+  # 4. Turn answers into memory:
+  #    - A cheap model converts the answer into one candidate fact, e.g.
+  #      "віддає перевагу конкретним індикаторам замість загальних висновків".
+  #    - The bot asks "Запам'ятати це?" Only "Так" writes users.memory.
+  #    - Corrections from dn02 are never written as facts; they are logged for review
+  #      and lower trust in the cited post's channel only after a human confirms.
+
+  # 5. Evolve over time:
+  #    - Repeated "Інше" or free text on the same question → a cheap model proposes a new
+  #      option for that question. Review it weekly before adding.
+  #    - Questions nobody answers for 2 weeks are retired or reworded.
+  #    - Contradictions (e.g. format "коротко" but 👎 for "поверхово") trigger pc01 early.
