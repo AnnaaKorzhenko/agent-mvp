@@ -1,13 +1,13 @@
 import asyncio
 import logging
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 from bs4 import BeautifulSoup
 
-from scrapers.cleaning import is_ad
-from scrapers.db import posts_collection, sources_collection
+from cleaning import is_ad
+from db import digests_collection, posts_collection, sources_collection
 
 logger = logging.getLogger(__name__)
 
@@ -18,14 +18,41 @@ HEADERS = {
     )
 }
 
+MAX_PAGES = 10
+
+SINCE_BUFFER = timedelta(hours=1)
+
+DEFAULT_LOOKBACK = timedelta(days=1)
+
+MAX_LOOKBACK = timedelta(days=3)
+
+
+async def collect_since() -> datetime:
+
+    now = datetime.now(timezone.utc)
+    last = await digests_collection.find_one(
+        {"period": "day", "trigger": "scheduled"}, sort=[("created_at", -1)])
+    since = now - DEFAULT_LOOKBACK
+    if last and last.get("period_end"):
+        try:
+            prev_end = datetime.fromisoformat(last["period_end"])
+            if prev_end.tzinfo is None:
+                prev_end = prev_end.replace(tzinfo=timezone.utc)
+            since = prev_end - SINCE_BUFFER
+        except (TypeError, ValueError):
+            pass
+    return max(since, now - MAX_LOOKBACK)
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def fetch_channel_html(channel_username: str) -> str | None:
+def fetch_channel_html(channel_username: str, before: int | None = None) -> str | None:
     username = channel_username.replace("@", "")
     url = f"https://t.me/s/{username}"
+    if before:
+        url += f"?before={before}"
     try:
         response = requests.get(url, headers=HEADERS, timeout=15)
     except requests.RequestException as e:
@@ -62,11 +89,27 @@ def _parse_views(msg) -> int | None:
         return None
 
 
-def parse_posts(html: str) -> list[dict]:
+def parse_page(html: str) -> tuple[list[dict], int | None, datetime | None]:
+
     soup = BeautifulSoup(html, "html.parser")
     posts = []
+    min_id: int | None = None
+    oldest: datetime | None = None
 
     for msg in soup.find_all("div", class_="tgme_widget_message"):
+        data_post = msg.get("data-post", "")
+        tail = data_post.rsplit("/", 1)[-1]
+        if tail.isdigit():
+            min_id = int(tail) if min_id is None else min(min_id, int(tail))
+
+        time_node = msg.find("time", attrs={"datetime": True})
+        if time_node:
+            try:
+                dt = datetime.fromisoformat(time_node["datetime"])
+                oldest = dt if oldest is None else min(oldest, dt)
+            except ValueError:
+                pass
+
         text_node = msg.find("div", class_="tgme_widget_message_text")
         link_node = msg.find("a", class_="tgme_widget_message_date")
         if not text_node or not link_node:
@@ -76,8 +119,7 @@ def parse_posts(html: str) -> list[dict]:
         if not raw_text or is_ad(raw_text):
             continue
 
-
-        time_node = link_node.find("time", attrs={"datetime": True}) or msg.find("time", attrs={"datetime": True})
+        time_node = link_node.find("time", attrs={"datetime": True}) or time_node
         published_at = time_node["datetime"] if time_node else None
 
         post_url = link_node.get("href", "")
@@ -89,18 +131,27 @@ def parse_posts(html: str) -> list[dict]:
             "views": _parse_views(msg),
         })
 
-    return posts
+    return posts, min_id, oldest
+
+
+def parse_posts(html: str) -> list[dict]:
+    return parse_page(html)[0]
+
+
+def scrape_tg_web_page(channel_username: str, before: int | None = None):
+    html = fetch_channel_html(channel_username, before)
+    if html is None:
+        return [], None, None
+    try:
+        return parse_page(html)
+    except Exception as e:
+        logger.error(f"Помилка парсингу {channel_username}: {e}")
+        return [], None, None
 
 
 def scrape_tg_web_channel(channel_username: str) -> list[dict]:
-    html = fetch_channel_html(channel_username)
-    if html is None:
-        return []
-    try:
-        return parse_posts(html)
-    except Exception as e:
-        logger.error(f"Помилка парсингу {channel_username}: {e}")
-        return []
+
+    return scrape_tg_web_page(channel_username)[0]
 
 
 async def save_posts(channel_id, posts: list[dict], username: str) -> int:
@@ -138,34 +189,46 @@ async def save_posts(channel_id, posts: list[dict], username: str) -> int:
     return saved
 
 
-# async def run_tg_scraper() -> None:
-#     channels = await sources_collection.find({"platform": "telegram"}).to_list(length=None)
-#     if not channels:
-#         logger.warning("У колекції 'sources' не знайдено жодного Telegram-каналу!")
-#         return
+def _is_fresh(published_at: str | None, stop_at: datetime) -> bool:
+    if not published_at:
+        return True
+    try:
+        return datetime.fromisoformat(published_at) >= stop_at
+    except ValueError:
+        return True
 
-#     for channel in channels:
-#         username = channel.get("username", "")
-#         country = channel.get("country") or channel.get("source_country") or "Unknown"
-#         if not username:
-#             continue
 
-#         posts = await asyncio.to_thread(scrape_tg_web_channel, username)
-#         saved = await save_posts(channel["_id"], posts, username)
+async def scrape_channel_new(channel_id, username: str, stop_at: datetime) -> tuple[int, int]:
 
-#         logger.info(
-#             f"Канал {username} ({country}): знайдено постів: {len(posts)}, "
-#             f"нових збережено в 'raw_posts': {saved}."
-#         )
-#         await asyncio.sleep(random.randint(2, 5))
+    before = None
+    found_total = saved_total = 0
 
-async def run_tg_scraper(max_channels: int | None = None, max_posts_per_channel: int | None = None) -> None:
-    query = {"platform": "telegram"}
-    if max_channels:
-        channels = await sources_collection.find(query).limit(max_channels).to_list(length=max_channels)
+    for page in range(MAX_PAGES):
+        posts, min_id, oldest = await asyncio.to_thread(scrape_tg_web_page, username, before)
+
+        fresh = [p for p in posts if _is_fresh(p["published_at"], stop_at)]
+        saved = await save_posts(channel_id, fresh, username)
+        found_total += len(fresh)
+        saved_total += saved
+
+        reached_known = saved < len([p for p in fresh if p["post_url"]])
+        too_old = oldest is not None and oldest < stop_at
+        if reached_known or too_old or min_id is None or min_id <= 1:
+            break
+        if before is not None and min_id >= before:
+            break
+        before = min_id
+        await asyncio.sleep(random.uniform(1, 2))
     else:
-        channels = await sources_collection.find(query).to_list(length=None)
+        logger.warning(f"Канал {username}: досягнуто MAX_PAGES={MAX_PAGES}, частина старих постів могла не зібратись")
 
+    return found_total, saved_total
+
+
+async def run_tg_scraper() -> None:
+    stop_at = await collect_since()
+    logger.info(f"Збираємо пости, опубліковані після {stop_at:%d.%m %H:%M} UTC")
+    channels = await sources_collection.find({"platform": "telegram"}).to_list(length=None)
     if not channels:
         logger.warning("У колекції 'sources' не знайдено жодного Telegram-каналу!")
         return
@@ -176,16 +239,10 @@ async def run_tg_scraper(max_channels: int | None = None, max_posts_per_channel:
         if not username:
             continue
 
-        posts = await asyncio.to_thread(scrape_tg_web_channel, username)
-        
-        # Limit parsed posts per channel if specified
-        if max_posts_per_channel and posts:
-            posts = posts[:max_posts_per_channel]
-
-        saved = await save_posts(channel["_id"], posts, username)
+        found, saved = await scrape_channel_new(channel["_id"], username, stop_at)
 
         logger.info(
-            f"Канал {username} ({country}): знайдено постів: {len(posts)}, "
-            f"нових збережено в 'raw_posts': {saved}."
+            f"Канал {username} ({country}): знайдено постів: {found}, "
+            f"нових збережено: {saved}."
         )
-        await asyncio.sleep(2)
+        await asyncio.sleep(random.randint(2, 5))
