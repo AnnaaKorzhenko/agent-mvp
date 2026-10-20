@@ -8,8 +8,8 @@ from datetime import datetime, timezone
 from openai import APIConnectionError, AsyncOpenAI
 from pymongo import UpdateOne
 
-from scrapers.cleaning import clean_post_text, is_ad, learn_channel_footers, normalize_for_model
-from scrapers.db import posts_collection, sources_collection
+from cleaning import clean_post_text, is_ad, learn_channel_footers, normalize_for_model
+from db import posts_collection, sources_collection
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ CONCURRENCY = int(os.getenv("LLM_CONCURRENCY", "4"))
 MIN_LEN = 30
 MAX_INPUT_CHARS = 6000
 MAX_ERRORS = 3
-PROMPT_VERSION = 4
+PROMPT_VERSION = 6  # 5: рос. підсумки російською; 6: промпти англійською
 
 
 COUNTRY_FIELDS = ("country", "source_country")
@@ -34,22 +34,22 @@ SIDE_BY_COUNTRY = {
 
 
 CATEGORIES_UA = {
-    "front": "Події на фронті: бойові дії, зміни лінії фронту, удари, обстріли, втрати",
-    "defense_tech": "Інновації та технології: дрони, РЕБ, ППО, роботизовані системи, ПЗ, нові розробки та їх застосування на фронті",
-    "investments": "Інвестиції та фінансування: раунди, гранти, фонди, контракти, оборонні стартапи",
-    "industry": "Оборонна промисловість: виробництво, локалізація, спільні підприємства, експорт",
-    "policy": "Держполітика й закупівлі: рішення Міноборони, Кабміну, ВР, кодифікація, регулювання",
-    "international": "Міжнародна підтримка: пакети допомоги, угоди з партнерами, позиції союзників",
-    "sanctions": "Санкції та економіка рф: експорт нафти, обхід санкцій, удари по НПЗ, ВПК противника",
-    "other": "Інше, що не підпадає під категорії вище",
+    "front": "Frontline events: combat, changes to the front line, strikes, shelling, losses",
+    "defense_tech": "Innovation and technology: drones, EW, air defense, robotic systems, software, new developments and their use at the front",
+    "investments": "Investment and funding: rounds, grants, funds, contracts, defense startups",
+    "industry": "Defense industry: production, localization, joint ventures, exports",
+    "policy": "Government policy and procurement: decisions of the Ministry of Defense, Cabinet, Parliament, codification, regulation",
+    "international": "International support: aid packages, agreements with partners, allies' positions",
+    "sanctions": "Sanctions and the Russian economy: oil exports, sanctions evasion, strikes on refineries, the enemy's defense industry",
+    "other": "Anything that does not fit the categories above",
 }
 
 
 CATEGORIES_RU = {
-    "ru_front": "Їхні заяви про фронт: бойові дії, просування, удари, втрати",
-    "ru_tech": "Їхні інновації та озброєння: нові дрони, РЕБ, ракети, розробки, виробництво",
-    "ru_about_ua": "Що думають про Україну: оцінки, прогнози, пропаганда щодо української влади, армії, суспільства",
-    "ru_other": "Інше: внутрішні події рф, економіка, політика",
+    "ru_front": "Their claims about the front: combat, advances, strikes, losses",
+    "ru_tech": "Their innovation and weapons: new drones, EW, missiles, developments, production",
+    "ru_about_ua": "What they think about Ukraine: assessments, forecasts, propaganda about Ukraine's government, army, society",
+    "ru_other": "Other: Russia's domestic events, economy, politics",
 }
 
 CATEGORIES = {**CATEGORIES_UA, **CATEGORIES_RU}
@@ -59,50 +59,55 @@ def _cats(cats: dict) -> str:
     return "\n".join(f"- {k}: {v}" for k, v in cats.items())
 
 
-SYSTEM_UA = f"""Ти аналітик оборонного сектору. Аналізуєш пост з українського Telegram-каналу і повертаєш ЛИШЕ JSON.
+SYSTEM_UA = f"""You are a defense-sector analyst. You read ONE post from a Ukrainian Telegram channel and return ONLY a JSON object.
 
-Категорії (поле category — рівно один ключ):
+Categories (field "category" is exactly one key):
 {_cats(CATEGORIES_UA)}
 
-Важливість (importance, ціле 1–5):
-5 — подія, що суттєво змінює ситуацію: великий прорив/втрата позицій, масована атака, нова технологія вперше в бою, великий контракт чи пакет допомоги
-4 — значуща новина з конкретикою: цифри, назви систем, суми, учасники, дати
-3 — корисна, але рядова новина
-2 — малоінформативно: загальні заяви без фактів, повтори, емоційні пости, думки
-1 — шум: реклама, збори без контексту, анонси ефірів, меми, привітання
+Importance (field "importance", integer 1-5):
+5 - an event that substantially changes the situation: a major breakthrough or loss of positions, a massive attack, a new technology used in combat for the first time, a large contract or aid package
+4 - significant news with specifics: numbers, system names, amounts, participants, dates
+3 - useful but routine news
+2 - low information: general statements without facts, repeats, emotional posts, opinions
+1 - noise: ads, fundraising without context, stream announcements, memes, greetings
 
-Формат відповіді:
-{{"summary": "1–2 речення українською, лише факти з тексту, з ключовими цифрами й назвами",
- "category": "ключ категорії",
- "tags": ["до 5 коротких тегів, напр. дрони, РЕБ, ППО, Brave1"],
- "importance": 3,
- "is_ad": false}}
+Response format:
+{{"summary": "...", "category": "category key", "tags": ["..."], "importance": 3, "is_ad": false}}
 
-Якщо пост переказує заяви російської сторони (МО рф, рос. медіа, рос. посадовців), обов'язково зберігай атрибуцію
-(«за словами МО рф…», «рос. пропаганда поширює…») і не подавай їх як факт.
+Rules:
+- "summary": 1-2 sentences IN UKRAINIAN. Only facts from the post; keep key numbers, names, places and weapon systems.
+- If the post relays claims of the Russian side (Russian MoD, Russian media or officials), keep the attribution and do not present them as fact, e.g. «за словами МО рф…», «рос. пропаганда поширює…».
+- "tags": up to 5 short tags IN UKRAINIAN, e.g. дрони, РЕБ, ППО, Brave1.
+- Do not invent anything and do not add facts that are not in the post.
 
-Нічого не вигадуй і не додавай фактів, яких немає в тексті."""
+Answer language: summary and tags in Ukrainian. Keys and category values exactly as given above."""
 
-SYSTEM_RU = f"""Ти аналітик, який переглядає російські Telegram-канали, щоб коротко знати, що нового у противника і що там думають про Україну.
-Пост написано російською. Повертаєш ЛИШЕ JSON, усі тексти — УКРАЇНСЬКОЮ.
+SYSTEM_RU = f"""You are an analyst monitoring Russian Telegram channels to know briefly what is new on the enemy side and what they think about Ukraine.
+The post is written in Russian. You return ONLY a JSON object.
 
-summary — 1 речення у формі твердження джерела («рос. канал стверджує…», «рос. джерела пишуть…»),
-без пропагандистських евфемізмів (не «СВО», а «війна»; не «киевский режим», а «українська влада»).
-
-Категорії (поле category — рівно один ключ):
+Categories (field "category" is exactly one key):
 {_cats(CATEGORIES_RU)}
 
-Важливість (importance, ціле 1–5):
-5 — заяви про захоплення населених пунктів, нове озброєння, офіційні заяви керівництва рф
-4 — конкретика: місця, цифри, назви техніки; помітна нова думка про Україну
-3 — рядові пости по темі
-2 — емоції без конкретики, повтори
-1 — шум: реклама, збори, анонси, меми
+Importance (field "importance", integer 1-5):
+5 - claims of capturing settlements, new weapons, official statements by Russia's leadership
+4 - specifics: places, numbers, names of equipment; a notable new opinion about Ukraine
+3 - routine posts on topic
+2 - emotions without specifics, repeats
+1 - noise: ads, fundraising, announcements, memes
 
-Формат відповіді:
-{{"summary": "...", "category": "ключ категорії", "tags": ["до 5 тегів"], "importance": 3, "is_ad": false}}
+Response format:
+{{"summary": "...", "category": "category key", "tags": ["..."], "importance": 3, "is_ad": false}}
 
-Нічого не вигадуй і не додавай фактів, яких немає в тексті."""
+Rules:
+- "summary": 1-2 sentences IN RUSSIAN, the language of the post. Do NOT translate into Ukrainian or English.
+  Only facts from the post; keep key numbers, places and equipment names.
+  Phrase it as a claim of the source, not as fact, e.g. «Канал утверждает, что…», «По данным российских источников…», «Канал распространяет тезис, что…».
+  Replace propaganda euphemisms with neutral words: «война» instead of «СВО», «власти Украины» instead of «киевский режим».
+- "tags": up to 5 short tags IN UKRAINIAN, e.g. дрони, РЕБ, Покровськ (so search works the same for both sides).
+- Do not invent anything and do not add facts that are not in the post.
+
+Answer language: summary in Russian, tags in Ukrainian. Keys and category values exactly as given above."""
+
 
 
 
@@ -154,9 +159,10 @@ def _parse(raw: str, side: str) -> dict:
     }
 
 
-async def analyze_text(text: str, side: str, sem: asyncio.Semaphore, attempts: int = 2) -> dict:
+async def analyze_text(text: str, side: str, sem: asyncio.Semaphore, attempts: int = 2,
+                       system: str | None = None) -> dict:
     messages = [
-        {"role": "system", "content": SYSTEM_RU if side == "ru" else SYSTEM_UA},
+        {"role": "system", "content": system or (SYSTEM_RU if side == "ru" else SYSTEM_UA)},
         {"role": "user", "content": normalize_for_model(text)[:MAX_INPUT_CHARS]},
     ]
     last_error: Exception | None = None
@@ -188,7 +194,7 @@ async def _channel_footers(channel_id) -> set[str]:
         return set()
     if channel_id not in _footer_cache:
         docs = await (
-            posts_collection.find({"channel_id": channel_id}, {"raw_text": 1})
+            posts_collection.find({"channel_id": channel_id, "raw_text": {"$nin": [None, ""]}}, {"raw_text": 1})
             .sort("published_at", -1)
             .limit(50)
             .to_list(50)
@@ -262,11 +268,12 @@ async def ensure_indexes() -> None:
     await posts_collection.create_index([("processed", 1)])
     await posts_collection.create_index([("category", 1), ("published_at", -1)])
     await posts_collection.create_index([("source_side", 1), ("published_at", -1)])
+    await posts_collection.create_index([("post_url", 1)])
+    await posts_collection.create_index([("channel_id", 1), ("published_at", -1)])
 
 
-# In scrapers/summarizer.py
+async def analyze_pending_posts(chunk: int = 20) -> None:
 
-async def analyze_pending_posts(chunk: int = 20, max_posts: int | None = None) -> None:
     try:
         await client.models.list()
     except APIConnectionError:
@@ -284,14 +291,7 @@ async def analyze_pending_posts(chunk: int = 20, max_posts: int | None = None) -
     }
     done = 0
     while True:
-        limit_this_batch = chunk
-        if max_posts is not None:
-            remaining = max_posts - done
-            if remaining <= 0:
-                break
-            limit_this_batch = min(chunk, remaining)
-
-        posts = await posts_collection.find(query, {"raw_text": 1, "channel_id": 1}).limit(limit_this_batch).to_list(limit_this_batch)
+        posts = await posts_collection.find(query, {"raw_text": 1, "channel_id": 1}).limit(chunk).to_list(chunk)
         if not posts:
             break
         try:
@@ -302,8 +302,4 @@ async def analyze_pending_posts(chunk: int = 20, max_posts: int | None = None) -
         await posts_collection.bulk_write(ops)
         done += len(posts)
         logger.info(f"Проаналізовано {done}")
-        
-        if max_posts is not None and done >= max_posts:
-            break
-
     logger.info("Аналіз завершено" if done else "Нових постів для аналізу немає")
