@@ -109,7 +109,7 @@ def find_item(doc: dict, n: int) -> dict | None:
         if num == n:
             item = sections[i]["items"][j]
             return {"digest_id": doc["_id"], "n": n, "side": doc.get("side"),
-                    "category": sections[i]["category"], "post_ids": item.get("source_post_ids", []),
+                    "category": sections[i]["category"], "source_post_ids": item.get("source_post_ids", []),
                     "text": item.get("text", ""), "source_urls": item.get("source_urls", [])}
     return None
 

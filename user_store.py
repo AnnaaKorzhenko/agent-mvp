@@ -39,7 +39,7 @@ def _key(tag: str) -> str:
 
 
 async def ensure_indexes() -> None:
-    await users_collection.create_index([("feedback.post_ids", 1)])
+    await users_collection.create_index([("feedback.post_id", 1)])
     await conversations.create_index([("user_id", 1), ("status", 1), ("updated_at", -1)])
 
 
@@ -99,7 +99,7 @@ async def get_reaction(user_id: int, digest_id, item_n: int) -> str | None:
 async def set_reaction(user_id: int, item: dict, reaction: str | None) -> None:
     """Зберігає реакцію (like / dislike / skip) на новину або знімає її (None).
 
-    item: digest_id, n, side, category, post_ids, text.
+    item: digest_id, n, side, category, source_post_ids, text.
     Попередня реакція на ту саму новину замінюється, її бали відкочуються.
     """
     user = await users_collection.find_one(
@@ -118,12 +118,12 @@ async def set_reaction(user_id: int, item: dict, reaction: str | None) -> None:
 
     update: dict = {}
     if reaction:
-        post_ids = list(item.get("post_ids") or [])
+        source_ids = list(item.get("source_post_ids") or [])
         tags: list[str] = []
-        if post_ids:
-            async for p in posts_collection.find({"_id": {"$in": post_ids}}, {"tags": 1}):
+        if source_ids:
+            async for p in posts_collection.find({"_id": {"$in": source_ids}}, {"tags": 1}):
                 tags.extend(t for t in p.get("tags", []) if t not in tags)
-        entry = {"post_id": post_ids[0] if post_ids else None, "post_ids": post_ids, "reaction": reaction,
+        entry = {"post_id": source_ids[0] if source_ids else None, "reaction": reaction,
                  "text": (item.get("text") or "")[:TEXT_SNIPPET], "digest_id": item["digest_id"],
                  "item_n": item["n"], "side": item.get("side"), "category": item.get("category"),
                  "tags": tags[:10], "at": _now()}
@@ -145,7 +145,7 @@ async def feedback_report(limit: int = 50) -> list[dict]:
         {"$unwind": "$feedback"},
         {"$group": {"_id": {"digest_id": "$feedback.digest_id", "item_n": "$feedback.item_n"},
                     "text": {"$first": "$feedback.text"}, "category": {"$first": "$feedback.category"},
-                    "post_ids": {"$first": "$feedback.post_ids"},
+                    "post_id": {"$first": "$feedback.post_id"},
                     "likes": count("like"), "dislikes": count("dislike"), "skips": count("skip")}},
         {"$sort": {"dislikes": -1, "skips": -1, "likes": 1}},
         {"$limit": limit},
