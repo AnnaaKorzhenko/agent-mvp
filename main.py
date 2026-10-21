@@ -230,7 +230,7 @@ async def send_all_at_once(bot: Bot, user: dict, docs: list, today: dict | None 
             continue
         items = ordered_items(doc, user, today.get(doc.get("side"), []))
         header = doc["parts_html"][0].split("\n\n")[0] if doc.get("parts_html") else ""
-        blocks = [f"<b>{SIDE_TITLES.get(doc.get('side'), '')}</b>\n{header}\nНовин: {len(items)}"]
+        blocks = [f"<b>{SIDE_TITLES.get(doc.get('side'), '')}</b>"]
         current_cat, lines = None, []
         for item in items:
             if item["category"] != current_cat:
