@@ -1,3 +1,22 @@
+import os
+import threading
+from http.server import SimpleHTTPRequestHandler, HTTPServer
+
+def run_keep_alive_server():
+    # Render automatically injects a $PORT environment variable
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
+    print(f"Keep-alive server online on port {port}")
+    server.serve_forever()
+
+# Launch the server in the background so your bot loop below still runs
+threading.Thread(target=run_keep_alive_server, daemon=True).start()
+
+# ==========================================
+# YOUR EXACT EXISTNG BOT CODE CONTINUES HERE
+# ==========================================
+
+
 import asyncio
 import html
 import logging
