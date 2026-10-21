@@ -25,8 +25,12 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ALLOWED = {int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").replace(" ", "").split(",") if x}
 DAILY_PUSH = os.environ.get("DAILY_PUSH", "1") == "1"
 PUSH_CHECK_SECONDS = 300
-ASK_TIMEOUT_HOURS = 3     
-SEND_PAUSE = 0.4          
+ASK_TIMEOUT_HOURS = 3
+PUSH_TIME = os.environ.get("PUSH_TIME", "08:00")
+DAILY_ASK = os.environ.get("DAILY_ASK", "1") == "1"
+SEND_PAUSE = 0.4
+
+
 
 dp = Dispatcher()
 
@@ -53,16 +57,17 @@ SIDE_TITLES = {"ua": "🇺🇦 Українські джерела", "ru": "🇷
 HELP = (
     "<b>Зведення новин</b>\n\n"
     "Щоранку я питаю, які категорії вам цікаві сьогодні, і надсилаю новини — "
-    "кожну окремо з кнопками 👍 / 👎 / ⏭. З ваших виборів і оцінок я вчуся, що вам важливо.\n\n"
+    "<b>усі одразу</b> одним списком або <b>по одній</b> з кнопками 👍 / 👎 / ⏭ "
+    "(наступна приходить після вашої оцінки). З ваших виборів і оцінок я вчуся, що вам важливо.\n\n"
     "/all_day — усе за добу (UA + RU)\n"
-    "/day — українські джерела за добу\n"
+    "/ua_day — українські джерела за добу\n"
     "/ru_day — російські джерела за добу\n"
     "/all_week, /week, /ru_week — те саме за тиждень\n\n"
     "/today — обрати категорії й отримати зведення зараз\n"
-    "/goals — ваші цілі\n"
-    "/id — ваш Telegram ID"
-)
+    "/mode — як надсилати новини: усі одразу чи по одній\n"
+    "/goals — ваші цілі"
 
+)
 
 
 def _is_allowed(user_id: int | None) -> bool:
@@ -92,9 +97,7 @@ def _kyiv_date() -> str:
     return datetime.now(KYIV).strftime("%Y-%m-%d")
 
 
-
 def _original_numbers(sections: list[dict]) -> dict[tuple[int, int], int]:
-   
     numbers, c = {}, 0
     for i, section in enumerate(sections):
         for j, item in enumerate(section.get("items", [])):
@@ -139,14 +142,21 @@ def _news_text(item: dict) -> str:
     return f"<i>{star}{label}</i>\n{html.escape(item['text'], quote=False)}{src}"
 
 
+
+REACTION_STYLES = {"like": "success", "dislike": "danger", "skip": "primary"}
+
+
+def _btn(text: str, callback_data: str, selected: bool, style: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data=callback_data, style=style if selected else None)
+
+
 def _news_keyboard(item: dict, reaction: str | None) -> InlineKeyboardMarkup:
     base = f"r:{item['digest_id']}:{item['n']}"
-    mark = lambda r, text: f"✅ {text}" if reaction == r else text  # noqa: E731
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=mark("like", "👍"), callback_data=f"{base}:l"),
-        InlineKeyboardButton(text=mark("dislike", "👎"), callback_data=f"{base}:d"),
-        InlineKeyboardButton(text=mark("skip", "⏭ Пропустити"), callback_data=f"{base}:s"),
-    ]])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_btn("👍 Корисно", f"{base}:l", reaction == "like", REACTION_STYLES["like"]),
+         _btn("👎 Не цікаво", f"{base}:d", reaction == "dislike", REACTION_STYLES["dislike"])],
+        [_btn("⏭ Пропустити", f"{base}:s", reaction == "skip", REACTION_STYLES["skip"])],
+    ])
 
 
 async def _send(bot: Bot, chat_id: int, text: str, reply_markup=None) -> None:
@@ -163,6 +173,73 @@ async def _send(bot: Bot, chat_id: int, text: str, reply_markup=None) -> None:
 
 END_TEXT = "На сьогодні все ✅"
 
+MODE_ONE, MODE_ALL = "one", "all"
+TG_LIMIT = 4000
+
+
+def _mode(user: dict) -> str:
+    return user.get("delivery_mode") if user.get("delivery_mode") in (MODE_ONE, MODE_ALL) else MODE_ONE
+
+
+async def _set_mode(uid: int, mode: str) -> None:
+    await users_collection.update_one({"_id": uid}, {"$set": {"delivery_mode": mode}})
+
+
+def _split_blocks(blocks: list[str], limit: int = TG_LIMIT) -> list[str]:
+    parts, cur = [], ""
+    for b in blocks:
+        if cur and len(cur) + len(b) + 2 > limit:
+            parts.append(cur)
+            cur = b
+        else:
+            cur = f"{cur}\n\n{b}" if cur else b
+    return parts + ([cur] if cur else [])
+
+
+async def send_all_at_once(bot: Bot, user: dict, docs: list, today: dict | None = None,
+                           goals_hint: bool = False) -> None:
+
+    today = today or {"ua": [], "ru": []}
+    uid = user["_id"]
+
+    await news_sessions.update_one({"_id": uid, "status": "active"},
+                                   {"$set": {"status": "finished", "current": None,
+                                             "updated_at": datetime.now(timezone.utc)}})
+    for doc in docs:
+        if not isinstance(doc, dict):
+            await _send(bot, uid, doc)
+            continue
+        items = ordered_items(doc, user, today.get(doc.get("side"), []))
+        header = doc["parts_html"][0].split("\n\n")[0] if doc.get("parts_html") else ""
+        blocks = [f"<b>{SIDE_TITLES.get(doc.get('side'), '')}</b>\n{header}\nНовин: {len(items)}"]
+        current_cat, lines = None, []
+        for item in items:
+            if item["category"] != current_cat:
+                if lines:
+                    blocks.append("\n".join(lines))
+                current_cat = item["category"]
+                label = CATEGORY_LABELS.get(item["side"], {}).get(current_cat, current_cat)
+                lines = [f"<b>{'⭐ ' if item.get('starred') else ''}{label}</b>"]
+            links = [f'<a href="{u}">{i}</a>' for i, u in enumerate(item.get("source_urls", []), 1)]
+            lines.append(f"• {html.escape(item['text'], quote=False)}" + (f" [{', '.join(links)}]" if links else ""))
+        if lines:
+            blocks.append("\n".join(lines))
+        for part in _split_blocks(blocks):
+            await _send(bot, uid, part)
+            await asyncio.sleep(SEND_PAUSE)
+    await _send(bot, uid, END_TEXT)
+    if goals_hint:
+        await _send(bot, uid, GOALS_HINT)
+
+
+async def deliver(bot: Bot, user: dict, docs: list, today: dict | None = None,
+                  goals_hint: bool = False, mode: str | None = None) -> None:
+
+    if (mode or _mode(user)) == MODE_ALL:
+        await send_all_at_once(bot, user, docs, today, goals_hint)
+    else:
+        await send_news(bot, user, docs, today, goals_hint)
+
 
 def _item_key(digest_id, n) -> str:
     return f"{digest_id}:{n}"
@@ -170,11 +247,7 @@ def _item_key(digest_id, n) -> str:
 
 async def send_news(bot: Bot, user: dict, docs: list, today: dict | None = None,
                     goals_hint: bool = False) -> None:
-    """Починає показ зведення: по одній новині, наступна — після 👍 / 👎 / ⏭ на поточній.
 
-    docs — документи зведень з бази або текст «зведення немає». Прогрес зберігається в news_sessions,
-    тож перезапуск бота його не губить. Нове зведення замінює незавершену сесію.
-    """
     today = today or {"ua": [], "ru": []}
     uid = user["_id"]
     queue = []
@@ -203,7 +276,7 @@ async def send_news(bot: Bot, user: dict, docs: list, today: dict | None = None,
 
 
 async def _send_current(bot: Bot, session: dict) -> None:
-    """Надсилає новину на позиції pos (або завершальне повідомлення, якщо новини скінчилися)."""
+
     uid, sid = session["_id"], session["session_id"]
     queue, pos = session["queue"], session["pos"]
     now = datetime.now(timezone.utc)
@@ -219,14 +292,14 @@ async def _send_current(bot: Bot, session: dict) -> None:
     entry = queue[pos]
     doc = await digests_collection.find_one({"_id": entry["digest_id"]}, {"sections": 1, "side": 1})
     item = find_item(doc, entry["n"]) if doc else None
-    if not item:                                            # зведення видалили — переходимо до наступної
+    if not item:
         session = await news_sessions.find_one_and_update(
             {"_id": uid, "session_id": sid, "pos": pos}, {"$inc": {"pos": 1}, "$set": {"updated_at": now}},
             return_document=True)
         return await _send_current(bot, session) if session else None
     item["starred"] = entry["starred"]
     key = _item_key(item["digest_id"], item["n"])
-    # current ставимо до надсилання, щоб натискання одразу після появи новини вже приймалося
+
     await news_sessions.update_one({"_id": uid, "session_id": sid},
                                    {"$set": {"current": key, "updated_at": now}})
     if entry.get("header"):
@@ -237,7 +310,7 @@ async def _send_current(bot: Bot, session: dict) -> None:
 
 
 async def resume_sessions(bot: Bot) -> None:
-    """Після перезапуску: якщо бот упав між оцінкою і надсиланням наступної новини — надсилаємо її."""
+
     async for session in news_sessions.find({"status": "active"}):
         if session.get("current") is None or session["current"] not in session.get("sent", []):
             try:
@@ -255,41 +328,45 @@ async def on_reaction(cq: CallbackQuery) -> None:
     if not item:
         return await cq.answer("Новину не знайдено")
     uid = cq.from_user.id
-    # Приймаємо лише поточну новину й лише один раз: повторне чи старе натискання сюди не пройде.
+    labels = {"like": "👍 Корисно", "dislike": "👎 Не цікаво", "skip": "⏭ Пропущено", None: "Оцінку знято"}
+
+
     session = await news_sessions.find_one_and_update(
         {"_id": uid, "status": "active", "current": _item_key(item["digest_id"], item["n"])},
         {"$inc": {"pos": 1}, "$set": {"current": None, "updated_at": datetime.now(timezone.utc)}},
         return_document=True)
-    if not session:
-        return await cq.answer()
-    prev = await store.get_reaction(uid, item["digest_id"], item["n"])
-    new = None if prev == reaction else reaction           # повторне натискання знімає оцінку
+    if session:
+        new = reaction
+    else:
+
+        prev = await store.get_reaction(uid, item["digest_id"], item["n"])
+        new = None if prev == reaction else reaction
+
     await store.set_reaction(uid, item, new)
-    await cq.answer({"like": "👍 Корисно", "dislike": "👎 Не цікаво", "skip": "⏭ Пропущено",
-                     None: "Оцінку знято"}[new])
+    await cq.answer(labels[new])
     try:
         await cq.message.edit_reply_markup(reply_markup=_news_keyboard(item, new))
     except TelegramBadRequest:
         pass
-    await _send_current(cq.bot, session)
+    if session:
+        await _send_current(cq.bot, session)
 
-
-# ---------------------------------------------------------------------------
-# Щоденне питання про категорії
-# ---------------------------------------------------------------------------
 
 DAILY_QUESTION = ("<b>Що вас сьогодні цікавить найбільше?</b>\n"
-                  "Позначте категорії — новини з них будуть першими. Потім натисніть «Показати новини».")
+                  "Позначте категорії — новини з них будуть першими (обрані підсвічуються). "
+                  "Потім оберіть, як показати новини.")
+
+MODE_BUTTONS = {MODE_ALL: "📋 Усі одразу", MODE_ONE: "👆 По одній з оцінкою"}
 
 
-def _daily_keyboard(selected: dict) -> InlineKeyboardMarkup:
+def _daily_keyboard(selected: dict, mode: str = MODE_ONE) -> InlineKeyboardMarkup:
     rows = []
     for side, title in (("ua", "— Українські джерела —"), ("ru", "— Російські джерела —")):
         rows.append([InlineKeyboardButton(text=title, callback_data="noop")])
         for key, label in CATEGORY_LABELS[side].items():
-            mark = "✅ " if key in selected.get(side, []) else "▫️ "
-            rows.append([InlineKeyboardButton(text=mark + label, callback_data=f"dc:{side}:{key}")])
-    rows.append([InlineKeyboardButton(text="📰 Показати новини", callback_data="dcgo")])
+            rows.append([_btn(label, f"dc:{side}:{key}", key in selected.get(side, []), "primary")])
+
+    rows.append([_btn(MODE_BUTTONS[m], f"dcgo:{m}", m == mode, "success") for m in (MODE_ALL, MODE_ONE)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -304,11 +381,11 @@ async def latest_daily_docs() -> list[dict]:
 
 
 async def ask_today(bot: Bot, user: dict, docs: list[dict]) -> None:
-    """Ставить ранкове питання. Вибір зберігається в users.daily."""
+
     await users_collection.update_one({"_id": user["_id"]}, {"$set": {"daily": {
         "date": _kyiv_date(), "digest_ids": [d["_id"] for d in docs],
         "selected": {"ua": [], "ru": []}, "status": "asked", "asked_at": datetime.now(timezone.utc)}}})
-    await _send(bot, user["_id"], DAILY_QUESTION, reply_markup=_daily_keyboard({"ua": [], "ru": []}))
+    await _send(bot, user["_id"], DAILY_QUESTION, reply_markup=_daily_keyboard({"ua": [], "ru": []}, _mode(user)))
 
 
 @dp.callback_query(F.data == "noop")
@@ -319,7 +396,7 @@ async def on_noop(cq: CallbackQuery) -> None:
 @dp.callback_query(F.data.startswith("dc:"))
 async def on_daily_toggle(cq: CallbackQuery) -> None:
     _, side, key = cq.data.split(":", 2)
-    user = await users_collection.find_one({"_id": cq.from_user.id}, {"daily": 1})
+    user = await users_collection.find_one({"_id": cq.from_user.id}, {"daily": 1, "delivery_mode": 1})
     daily = (user or {}).get("daily") or {}
     if daily.get("status") != "asked":
         return await cq.answer("Це питання вже неактуальне")
@@ -328,12 +405,15 @@ async def on_daily_toggle(cq: CallbackQuery) -> None:
     lst.remove(key) if key in lst else lst.append(key)
     await users_collection.update_one({"_id": cq.from_user.id}, {"$set": {"daily.selected": selected}})
     await cq.answer()
-    await cq.message.edit_reply_markup(reply_markup=_daily_keyboard(selected))
+    await cq.message.edit_reply_markup(reply_markup=_daily_keyboard(selected, _mode(user or {})))
 
 
-@dp.callback_query(F.data == "dcgo")
+@dp.callback_query(F.data.startswith("dcgo"))
 async def on_daily_go(cq: CallbackQuery) -> None:
     uid = cq.from_user.id
+    mode = cq.data.split(":", 1)[1] if ":" in cq.data else None   # старі кнопки «dcgo» — режим людини
+    if mode in (MODE_ONE, MODE_ALL):
+        await _set_mode(uid, mode)                                 # запам'ятовуємо вибір на наступні рази
     user = await users_collection.find_one({"_id": uid})
     daily = (user or {}).get("daily") or {}
     if daily.get("status") != "asked":
@@ -341,7 +421,7 @@ async def on_daily_go(cq: CallbackQuery) -> None:
     selected = daily.get("selected", {"ua": [], "ru": []})
     await users_collection.update_one({"_id": uid}, {"$set": {
         "daily.status": "sent", "daily.sent_at": datetime.now(timezone.utc), "onboarded": True}})
-    await store.add_category_choice(uid, selected)          # +1 кожній обраній категорії
+    await store.add_category_choice(uid, selected)  # +1 кожній обраній категорії
     await cq.answer()
     chosen = [CATEGORY_LABELS[s][k] for s in ("ua", "ru") for k in selected.get(s, [])]
     await cq.message.edit_text("Сьогодні першими: " + (", ".join(chosen) if chosen else "за вашими балами"))
@@ -351,14 +431,12 @@ async def on_daily_go(cq: CallbackQuery) -> None:
     if not docs:
         await cq.message.answer("Свіжого зведення ще немає — воно з'являється щоранку близько 6:30.")
         return
-    await send_news(cq.bot, user, docs, today=selected, goals_hint=not store.active_goals(user))
-
+    await deliver(cq.bot, user, docs, today=selected, goals_hint=not store.active_goals(user))
 
 
 async def push_new_digests(bot: Bot) -> None:
     now = datetime.now(timezone.utc)
 
-  
     timeout = now - timedelta(hours=ASK_TIMEOUT_HOURS)
     async for user in users_collection.find({"daily.status": "asked", "daily.asked_at": {"$lt": timeout}}):
         await users_collection.update_one({"_id": user["_id"]}, {"$set": {
@@ -366,13 +444,12 @@ async def push_new_digests(bot: Bot) -> None:
         docs = [d async for d in digests_collection.find({"_id": {"$in": user["daily"]["digest_ids"]}})]
         docs.sort(key=lambda d: 0 if d.get("side") == "ua" else 1)
         try:
-            await send_news(bot, user, docs)
+            await deliver(bot, user, docs)
         except TelegramForbiddenError:
             await users_collection.update_one({"_id": user["_id"]}, {"$set": {"daily_push": False}})
         except Exception:
             logger.exception(f"Не вдалося надіслати зведення {user['_id']}")
 
-   
     docs = [d for d in await latest_daily_docs() if d["created_at"] >= now - timedelta(hours=20)]
     if not docs:
         return
@@ -397,7 +474,6 @@ async def daily_push_loop(bot: Bot) -> None:
         except Exception:
             logger.exception("Помилка щоденної розсилки")
         await asyncio.sleep(PUSH_CHECK_SECONDS)
-
 
 
 GOALS_HINT = ("<b>Що ви найбільше хочете зробити?</b>\n"
@@ -435,7 +511,8 @@ async def cmd_goal(message: Message, command: CommandObject) -> None:
         text, kb = _goals_view(store.active_goals(user))
         await message.answer("Ціль збережено ✅\n\n" + text, reply_markup=kb)
     else:
-        await message.answer(f"Не вдалося додати: така ціль уже є або їх уже {store.MAX_GOALS}. Видаліть зайву в /goals.")
+        await message.answer(
+            f"Не вдалося додати: така ціль уже є або їх уже {store.MAX_GOALS}. Видаліть зайву в /goals.")
 
 
 @dp.callback_query(F.data.startswith("goaldel:"))
@@ -445,7 +522,6 @@ async def on_goal_delete(cq: CallbackQuery) -> None:
     text, kb = _goals_view(store.active_goals(user))
     await cq.answer("Ціль видалено")
     await cq.message.edit_text(text, reply_markup=kb)
-
 
 
 async def _get_digest(period: str, side: str):
@@ -465,7 +541,7 @@ async def _cmd_digest(message: Message, period: str, sides: list[str]) -> None:
         return await _deny(message)
     user = await touch_user(message.from_user)
     docs = [await _get_digest(period, side) for side in sides]
-    await send_news(message.bot, user, docs)
+    await deliver(message.bot, user, docs)
 
 
 @dp.message(CommandStart())
@@ -484,6 +560,37 @@ async def cmd_today(message: Message) -> None:
         return await _deny(message)
     user = await touch_user(message.from_user)
     await ask_today(message.bot, user, await latest_daily_docs())
+
+
+def _mode_keyboard(mode: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [_btn(MODE_BUTTONS[m], f"mode:{m}", m == mode, "success") for m in (MODE_ALL, MODE_ONE)]])
+
+
+MODE_TEXT = ("<b>Як надсилати новини?</b>\n"
+             "📋 <b>Усі одразу</b> — одним списком, без оцінок.\n"
+             "👆 <b>По одній</b> — з кнопками 👍 / 👎 / ⏭; наступна приходить після оцінки.")
+
+
+@dp.message(Command("mode"))
+async def cmd_mode(message: Message) -> None:
+    if not _is_allowed(message.from_user.id):
+        return await _deny(message)
+    user = await touch_user(message.from_user)
+    await message.answer(MODE_TEXT, reply_markup=_mode_keyboard(_mode(user)))
+
+
+@dp.callback_query(F.data.startswith("mode:"))
+async def on_mode(cq: CallbackQuery) -> None:
+    mode = cq.data.split(":", 1)[1]
+    if mode not in (MODE_ONE, MODE_ALL):
+        return await cq.answer()
+    await _set_mode(cq.from_user.id, mode)
+    await cq.answer("Збережено")
+    try:
+        await cq.message.edit_reply_markup(reply_markup=_mode_keyboard(mode))
+    except TelegramBadRequest:
+        pass
 
 
 @dp.message(Command("help"))
@@ -537,11 +644,12 @@ async def main() -> None:
     await bot.set_my_commands([
         BotCommand(command="today", description="Обрати категорії й отримати новини"),
         BotCommand(command="all_day", description="Усе за добу (UA + RU)"),
-        BotCommand(command="day", description="Українські джерела за добу"),
+        BotCommand(command="ua_day", description="Українські джерела за добу"),
         BotCommand(command="ru_day", description="Російські джерела за добу"),
-        BotCommand(command="all_week", description="Усе за тиждень"),
+        # BotCommand(command="all_week", description="Усе за тиждень"),
+        BotCommand(command="mode", description="Усі новини одразу чи по одній"),
         BotCommand(command="goals", description="Мої цілі"),
-        BotCommand(command="id", description="Мій Telegram ID"),
+        # BotCommand(command="id", description="Мій Telegram ID"),
     ])
     await resume_sessions(bot)
     if DAILY_PUSH:
