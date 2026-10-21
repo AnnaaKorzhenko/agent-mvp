@@ -276,7 +276,7 @@ async def send_news(bot: Bot, user: dict, docs: list, today: dict | None = None,
             continue
         items = ordered_items(doc, user, today.get(doc.get("side"), []))
         header = doc["parts_html"][0].split("\n\n")[0] if doc.get("parts_html") else ""
-        header = f"<b>{SIDE_TITLES.get(doc.get('side'), '')}</b>\n{header}\nНовин: {len(items)}"
+        header = f"<b>{SIDE_TITLES.get(doc.get('side'), '')}</b>"
         for k, item in enumerate(items):
             queue.append({"digest_id": item["digest_id"], "n": item["n"], "starred": item["starred"],
                           "header": header if k == 0 else None})
