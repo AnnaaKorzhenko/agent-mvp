@@ -48,6 +48,7 @@ PUSH_TIME = os.environ.get("PUSH_TIME", "08:00")
 DAILY_ASK = os.environ.get("DAILY_ASK", "1") == "1"
 ASK_TIMEOUT_HOURS = 3
 SEND_PAUSE = 0.4
+COMMENT_TIMEOUT_MINUTES = int(os.environ.get("COMMENT_TIMEOUT_MINUTES", "120"))  # скільки чекати коментар
 
 dp = Dispatcher()
 
@@ -189,16 +190,16 @@ def _news_keyboard(item: dict, reaction: str | None) -> InlineKeyboardMarkup:
     ])
 
 
-async def _send(bot: Bot, chat_id: int, text: str, reply_markup=None) -> None:
+async def _send(bot: Bot, chat_id: int, text: str, reply_markup=None) -> Message | None:
     for _ in range(3):
         try:
-            await bot.send_message(chat_id, text, reply_markup=reply_markup)
-            return
+            return await bot.send_message(chat_id, text, reply_markup=reply_markup)
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after + 1)
         except TelegramBadRequest:
-            await bot.send_message(chat_id, re.sub(r"<[^>]+>", "", text), parse_mode=None, reply_markup=reply_markup)
-            return
+            return await bot.send_message(chat_id, re.sub(r"<[^>]+>", "", text), parse_mode=None,
+                                          reply_markup=reply_markup)
+    return None
 
 
 END_TEXT = "На сьогодні все ✅"
@@ -232,6 +233,7 @@ async def send_all_at_once(bot: Bot, user: dict, docs: list, today: dict | None 
     today = today or {"ua": [], "ru": []}
     uid = user["_id"]
 
+    await _close_open_comment(uid)
     await news_sessions.update_one({"_id": uid, "status": "active"},
                                    {"$set": {"status": "finished", "current": None,
                                              "updated_at": datetime.now(timezone.utc)}})
@@ -301,6 +303,7 @@ async def send_news(bot: Bot, user: dict, docs: list, today: dict | None = None,
                "digest_ids": [d["_id"] for d in docs if isinstance(d, dict)], "queue": queue,
                "pos": 0, "current": None, "sent": [], "goals_hint": goals_hint,
                "created_at": now, "updated_at": now}
+    await _close_open_comment(uid)
     await news_sessions.replace_one({"_id": uid}, session, upsert=True)
     await _send_current(bot, session)
 
@@ -342,6 +345,14 @@ async def _send_current(bot: Bot, session: dict) -> None:
 async def resume_sessions(bot: Bot) -> None:
 
     async for session in news_sessions.find({"status": "active"}):
+        aw = session.get("awaiting_comment")
+        if aw:                                  # чекаємо коментар — наступну новину не шлемо
+            if not aw.get("prompt_sent"):
+                try:
+                    await _send_comment_prompt(bot, session["_id"], aw)
+                except Exception:
+                    logger.exception(f"Не вдалося надіслати питання про коментар {session['_id']}")
+            continue
         if session.get("current") is None or session["current"] not in session.get("sent", []):
             try:
                 await _send_current(bot, session)
@@ -379,7 +390,156 @@ async def on_reaction(cq: CallbackQuery) -> None:
     except TelegramBadRequest:
         pass
     if session:
+        if new in ("like", "dislike"):
+            await _start_comment(cq.bot, session, item, new)
+        else:
+            await _send_current(cq.bot, session)
+
+
+# ---------------------------------------------------------------------------
+# Коментар до оцінки: після 👍 / 👎 — «💬 Прокоментувати» або «Без коментаря»
+# ---------------------------------------------------------------------------
+
+COMMENT_OFFER = "Хочете пояснити, чому?"
+COMMENT_ASK = {"like": "Напишіть, чому ця новина вам сподобалась",
+               "dislike": "Напишіть, чому ця новина вам не сподобалась"}
+COMMENT_NOT_TEXT = "Будь ласка, напишіть коментар текстом або натисніть «Без коментаря»"
+
+
+def _comment_keyboard(aw: dict) -> InlineKeyboardMarkup:
+    base = f"{aw['digest_id']}:{aw['item_n']}"
+    no = InlineKeyboardButton(text="Без коментаря", callback_data=f"cm:n:{base}")
+    if aw["stage"] == "offer":
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💬 Прокоментувати", callback_data=f"cm:c:{base}"), no]])
+    return InlineKeyboardMarkup(inline_keyboard=[[no]])
+
+
+async def _send_comment_prompt(bot: Bot, uid: int, aw: dict) -> None:
+    text = COMMENT_OFFER if aw["stage"] == "offer" else COMMENT_ASK[aw["reaction"]]
+    msg = await _send(bot, uid, text, reply_markup=_comment_keyboard(aw))
+    update = {"awaiting_comment.prompt_sent": True}
+    if msg:   # id потрібен, щоб видалити це питання, якщо людина натисне «Без коментаря»
+        update[f"awaiting_comment.{'offer' if aw['stage'] == 'offer' else 'ask'}_message_id"] = msg.message_id
+    await news_sessions.update_one(
+        {"_id": uid, "awaiting_comment.digest_id": aw["digest_id"], "awaiting_comment.item_n": aw["item_n"],
+         "awaiting_comment.stage": aw["stage"]}, {"$set": update})
+
+
+async def _start_comment(bot: Bot, session: dict, item: dict, reaction: str) -> None:
+    """Сесія вже на наступній позиції; наступну новину надішлемо, коли людина закінчить з коментарем."""
+    now = datetime.now(timezone.utc)
+    aw = {"digest_id": item["digest_id"], "item_n": item["n"], "reaction": reaction, "stage": "offer",
+          "awaiting_since": now, "prompt_sent": False}
+    await news_sessions.update_one({"_id": session["_id"], "session_id": session["session_id"]},
+                                   {"$set": {"awaiting_comment": aw, "updated_at": now}})
+    await _send_comment_prompt(bot, session["_id"], aw)
+
+
+async def _close_comment(query: dict, uid: int, fields: dict) -> dict | None:
+    """Атомарно закриває очікування й пише fields у запис feedback. Повертає сесію (до закриття) або None."""
+    session = await news_sessions.find_one_and_update(
+        query, {"$unset": {"awaiting_comment": ""}, "$set": {"updated_at": datetime.now(timezone.utc)}})
+    if session:
+        aw = session["awaiting_comment"]
+        await store.set_comment(uid, aw["digest_id"], aw["item_n"], fields)
+    return session
+
+
+async def _close_open_comment(uid: int) -> None:
+    """Нове зведення, а коментар ще чекаємо — закриваємо як timeout."""
+    await _close_comment({"_id": uid, "awaiting_comment": {"$exists": True}}, uid, {"comment_status": "timeout"})
+
+
+async def _drop_buttons(cq: CallbackQuery) -> None:
+    try:
+        await cq.message.edit_reply_markup(reply_markup=None)
+    except TelegramBadRequest:
+        pass
+
+
+async def _delete_prompts(bot: Bot, uid: int, aw: dict, pressed_id: int | None) -> None:
+    """«Без коментаря»: прибирає з чату питання про коментар (і нагадування). Новину й повідомлення людини не чіпає."""
+    ids = [aw.get("offer_message_id"), aw.get("ask_message_id"), *aw.get("reminder_message_ids", []), pressed_id]
+    for mid in dict.fromkeys(i for i in ids if i):
+        try:
+            await bot.delete_message(uid, mid)
+        except Exception as e:      # уже видалено, застаре тощо — наступну новину все одно надсилаємо
+            logger.warning(f"Не вдалося видалити повідомлення {mid} у {uid}: {e}")
+
+
+@dp.callback_query(F.data.startswith("cm:"))
+async def on_comment_button(cq: CallbackQuery) -> None:
+    _, code, did, n = cq.data.split(":")
+    uid, did, n = cq.from_user.id, ObjectId(did), int(n)
+    now = datetime.now(timezone.utc)
+    current = {"_id": uid, "awaiting_comment.digest_id": did, "awaiting_comment.item_n": n}
+    if code == "c":
+        session = await news_sessions.find_one_and_update(
+            {**current, "awaiting_comment.stage": "offer"},
+            {"$set": {"awaiting_comment.stage": "waiting", "awaiting_comment.awaiting_since": now,
+                      "awaiting_comment.prompt_sent": False, "updated_at": now}}, return_document=True)
+        await cq.answer()
+        if session:
+            await _drop_buttons(cq)
+            await _send_comment_prompt(cq.bot, uid, session["awaiting_comment"])
+        return
+    session = await _close_comment(current, uid, {"comment_status": "no_comment"})
+    await cq.answer()
+    if session:
+        await _delete_prompts(cq.bot, uid, session["awaiting_comment"], cq.message.message_id if cq.message else None)
         await _send_current(cq.bot, session)
+
+
+async def _waiting_for_comment(message: Message) -> bool:
+    return bool(message.from_user and await news_sessions.find_one(
+        {"_id": message.from_user.id, "awaiting_comment.stage": "waiting"}, {"_id": 1}))
+
+
+@dp.message(F.text & ~F.text.startswith("/"), _waiting_for_comment)
+async def on_comment_text(message: Message) -> None:
+    if not _is_allowed(message.from_user.id):
+        return await _deny(message)
+    uid = message.from_user.id
+    session = await _close_comment({"_id": uid, "awaiting_comment.stage": "waiting"}, uid, {
+        "text": message.text.strip(), "text_at": datetime.now(timezone.utc), "comment_status": "commented"})
+    if session:
+        await _send_current(message.bot, session)
+
+
+@dp.message(~F.text, _waiting_for_comment)
+async def on_comment_not_text(message: Message) -> None:
+    session = await news_sessions.find_one({"_id": message.from_user.id}, {"awaiting_comment": 1})
+    if session and session.get("awaiting_comment"):
+        msg = await message.answer(COMMENT_NOT_TEXT, reply_markup=_comment_keyboard(session["awaiting_comment"]))
+        await news_sessions.update_one({"_id": message.from_user.id, "awaiting_comment": {"$exists": True}},
+                                       {"$push": {"awaiting_comment.reminder_message_ids": msg.message_id}})
+
+
+async def comment_timeout_middleware(handler, event, data):
+    """Ліниво закриває прострочене очікування коментаря перед будь-якою взаємодією людини.
+
+    Сама взаємодія обробляється як звичайно (пізній текст іде аналітику, а не в старий коментар),
+    а після неї надсилаємо наступну новину старої сесії — якщо обробник не почав нову.
+    """
+    user = data.get("event_from_user")
+    expired = None
+    if user:
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=COMMENT_TIMEOUT_MINUTES)
+        expired = await _close_comment({"_id": user.id, "awaiting_comment.awaiting_since": {"$lt": cutoff}},
+                                       user.id, {"comment_status": "timeout"})
+    try:
+        return await handler(event, data)
+    finally:
+        if expired:
+            s = await news_sessions.find_one({"_id": user.id})
+            if (s and s.get("session_id") == expired["session_id"] and s.get("status") == "active"
+                    and s.get("current") is None and not s.get("awaiting_comment")):
+                await _send_current(data["bot"], s)
+
+
+dp.message.outer_middleware(comment_timeout_middleware)
+dp.callback_query.outer_middleware(comment_timeout_middleware)
 
 
 _ask_locks: dict[int, asyncio.Lock] = {}
