@@ -190,16 +190,16 @@ def _news_keyboard(item: dict, reaction: str | None) -> InlineKeyboardMarkup:
     ])
 
 
-async def _send(bot: Bot, chat_id: int, text: str, reply_markup=None) -> None:
+async def _send(bot: Bot, chat_id: int, text: str, reply_markup=None) -> Message | None:
     for _ in range(3):
         try:
-            await bot.send_message(chat_id, text, reply_markup=reply_markup)
-            return
+            return await bot.send_message(chat_id, text, reply_markup=reply_markup)
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after + 1)
         except TelegramBadRequest:
-            await bot.send_message(chat_id, re.sub(r"<[^>]+>", "", text), parse_mode=None, reply_markup=reply_markup)
-            return
+            return await bot.send_message(chat_id, re.sub(r"<[^>]+>", "", text), parse_mode=None,
+                                          reply_markup=reply_markup)
+    return None
 
 
 END_TEXT = "На сьогодні все ✅"
@@ -417,10 +417,13 @@ def _comment_keyboard(aw: dict) -> InlineKeyboardMarkup:
 
 async def _send_comment_prompt(bot: Bot, uid: int, aw: dict) -> None:
     text = COMMENT_OFFER if aw["stage"] == "offer" else COMMENT_ASK[aw["reaction"]]
-    await _send(bot, uid, text, reply_markup=_comment_keyboard(aw))
+    msg = await _send(bot, uid, text, reply_markup=_comment_keyboard(aw))
+    update = {"awaiting_comment.prompt_sent": True}
+    if msg:   # id потрібен, щоб видалити це питання, якщо людина натисне «Без коментаря»
+        update[f"awaiting_comment.{'offer' if aw['stage'] == 'offer' else 'ask'}_message_id"] = msg.message_id
     await news_sessions.update_one(
         {"_id": uid, "awaiting_comment.digest_id": aw["digest_id"], "awaiting_comment.item_n": aw["item_n"],
-         "awaiting_comment.stage": aw["stage"]}, {"$set": {"awaiting_comment.prompt_sent": True}})
+         "awaiting_comment.stage": aw["stage"]}, {"$set": update})
 
 
 async def _start_comment(bot: Bot, session: dict, item: dict, reaction: str) -> None:
@@ -455,6 +458,16 @@ async def _drop_buttons(cq: CallbackQuery) -> None:
         pass
 
 
+async def _delete_prompts(bot: Bot, uid: int, aw: dict, pressed_id: int | None) -> None:
+    """«Без коментаря»: прибирає з чату питання про коментар (і нагадування). Новину й повідомлення людини не чіпає."""
+    ids = [aw.get("offer_message_id"), aw.get("ask_message_id"), *aw.get("reminder_message_ids", []), pressed_id]
+    for mid in dict.fromkeys(i for i in ids if i):
+        try:
+            await bot.delete_message(uid, mid)
+        except Exception as e:      # уже видалено, застаре тощо — наступну новину все одно надсилаємо
+            logger.warning(f"Не вдалося видалити повідомлення {mid} у {uid}: {e}")
+
+
 @dp.callback_query(F.data.startswith("cm:"))
 async def on_comment_button(cq: CallbackQuery) -> None:
     _, code, did, n = cq.data.split(":")
@@ -474,7 +487,7 @@ async def on_comment_button(cq: CallbackQuery) -> None:
     session = await _close_comment(current, uid, {"comment_status": "no_comment"})
     await cq.answer()
     if session:
-        await _drop_buttons(cq)
+        await _delete_prompts(cq.bot, uid, session["awaiting_comment"], cq.message.message_id if cq.message else None)
         await _send_current(cq.bot, session)
 
 
@@ -498,7 +511,9 @@ async def on_comment_text(message: Message) -> None:
 async def on_comment_not_text(message: Message) -> None:
     session = await news_sessions.find_one({"_id": message.from_user.id}, {"awaiting_comment": 1})
     if session and session.get("awaiting_comment"):
-        await message.answer(COMMENT_NOT_TEXT, reply_markup=_comment_keyboard(session["awaiting_comment"]))
+        msg = await message.answer(COMMENT_NOT_TEXT, reply_markup=_comment_keyboard(session["awaiting_comment"]))
+        await news_sessions.update_one({"_id": message.from_user.id, "awaiting_comment": {"$exists": True}},
+                                       {"$push": {"awaiting_comment.reminder_message_ids": msg.message_id}})
 
 
 async def comment_timeout_middleware(handler, event, data):
