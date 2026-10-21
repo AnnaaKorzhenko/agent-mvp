@@ -1,22 +1,3 @@
-import os
-import threading
-from http.server import SimpleHTTPRequestHandler, HTTPServer
-
-def run_keep_alive_server():
-    # Render automatically injects a $PORT environment variable
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
-    print(f"Keep-alive server online on port {port}")
-    server.serve_forever()
-
-# Launch the server in the background so your bot loop below still runs
-threading.Thread(target=run_keep_alive_server, daemon=True).start()
-
-# ==========================================
-# YOUR EXACT EXISTNG BOT CODE CONTINUES HERE
-# ==========================================
-
-
 import asyncio
 import html
 import logging
@@ -27,15 +8,32 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram.enums import ChatAction, ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (BotCommand, CallbackQuery, InlineKeyboardButton,
                            InlineKeyboardMarkup, Message, User)
 from bson import ObjectId
 
+import analyst
 import user_store as store
 from user_store import digests_collection, news_sessions, users_collection
+
+
+import threading
+from http.server import SimpleHTTPRequestHandler, HTTPServer
+
+def run_keep_alive_server():
+
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
+    print(f"Keep-alive server online on port {port}")
+    server.serve_forever()
+
+
+threading.Thread(target=run_keep_alive_server, daemon=True).start()
+
+
 
 logger = logging.getLogger("bot")
 KYIV = ZoneInfo("Europe/Kyiv")
@@ -44,12 +42,12 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ALLOWED = {int(x) for x in os.environ.get("ALLOWED_USER_IDS", "").replace(" ", "").split(",") if x}
 DAILY_PUSH = os.environ.get("DAILY_PUSH", "1") == "1"
 PUSH_CHECK_SECONDS = 300
-ASK_TIMEOUT_HOURS = 3
+
 PUSH_TIME = os.environ.get("PUSH_TIME", "08:00")
+
 DAILY_ASK = os.environ.get("DAILY_ASK", "1") == "1"
+ASK_TIMEOUT_HOURS = 3
 SEND_PAUSE = 0.4
-
-
 
 dp = Dispatcher()
 
@@ -79,13 +77,19 @@ HELP = (
     "<b>усі одразу</b> одним списком або <b>по одній</b> з кнопками 👍 / 👎 / ⏭ "
     "(наступна приходить після вашої оцінки). З ваших виборів і оцінок я вчуся, що вам важливо.\n\n"
     "/all_day — усе за добу (UA + RU)\n"
-    "/ua_day — українські джерела за добу\n"
+    "/day — українські джерела за добу\n"
     "/ru_day — російські джерела за добу\n"
     "/all_week, /week, /ru_week — те саме за тиждень\n\n"
+    "<b>Питайте мене звичайними словами</b> — я аналітик по цих новинах:\n"
+    "• що сьогодні найважливіше для мене?\n"
+    "• чому ти порадив цю новину? (можна відповісти Reply на саму новину)\n"
+    "• що зараз набирає обертів і що буде актуально?\n"
+    "• що було про інвестиції в дрони за тиждень?\n\n"
+    "/new — почати нову розмову\n"
     "/today — обрати категорії й отримати зведення зараз\n"
     "/mode — як надсилати новини: усі одразу чи по одній\n"
-    "/goals — ваші цілі"
-
+    "/goals — ваші цілі\n"
+    "/id — ваш Telegram ID"
 )
 
 
@@ -137,7 +141,7 @@ def find_item(doc: dict, n: int) -> dict | None:
 
 
 def ordered_items(doc: dict, user: dict, today: list[str]) -> list[dict]:
-    """Новини зведення: спершу сьогоднішні категорії, далі решта за балами людини."""
+
     sections = doc.get("sections") or []
     side = doc.get("side")
     order = store.category_order(user, side, first=today)
@@ -153,11 +157,18 @@ def ordered_items(doc: dict, user: dict, today: list[str]) -> list[dict]:
     return items
 
 
+
+def source_links(urls: list[str]) -> str:
+
+    return ", ".join(f'<a href="{u}">Джерело{"" if i == 1 else f" {i}"}</a>'
+                     for i, u in enumerate(urls or [], 1))
+
+
 def _news_text(item: dict) -> str:
     label = CATEGORY_LABELS.get(item["side"], {}).get(item["category"], item["category"])
     star = "⭐ " if item.get("starred") else ""
-    links = [f'<a href="{u}">{i}</a>' for i, u in enumerate(item.get("source_urls", []), 1)]
-    src = f"\nДжерела: {', '.join(links)}" if links else ""
+    links = source_links(item.get("source_urls", []))
+    src = f"\n{links}" if links else ""
     return f"<i>{star}{label}</i>\n{html.escape(item['text'], quote=False)}{src}"
 
 
@@ -230,7 +241,7 @@ async def send_all_at_once(bot: Bot, user: dict, docs: list, today: dict | None 
             continue
         items = ordered_items(doc, user, today.get(doc.get("side"), []))
         header = doc["parts_html"][0].split("\n\n")[0] if doc.get("parts_html") else ""
-        blocks = [f"<b>{SIDE_TITLES.get(doc.get('side'), '')}</b>"]
+        blocks = [f"<b>{SIDE_TITLES.get(doc.get('side'), '')}</b>\n{header}\nНовин: {len(items)}"]
         current_cat, lines = None, []
         for item in items:
             if item["category"] != current_cat:
@@ -239,8 +250,8 @@ async def send_all_at_once(bot: Bot, user: dict, docs: list, today: dict | None 
                 current_cat = item["category"]
                 label = CATEGORY_LABELS.get(item["side"], {}).get(current_cat, current_cat)
                 lines = [f"<b>{'⭐ ' if item.get('starred') else ''}{label}</b>"]
-            links = [f'<a href="{u}">{i}</a>' for i, u in enumerate(item.get("source_urls", []), 1)]
-            lines.append(f"• {html.escape(item['text'], quote=False)}" + (f" [{', '.join(links)}]" if links else ""))
+            links = source_links(item.get("source_urls", []))
+            lines.append(f"• {html.escape(item['text'], quote=False)}" + (f" ({links})" if links else ""))
         if lines:
             blocks.append("\n".join(lines))
         for part in _split_blocks(blocks):
@@ -276,7 +287,7 @@ async def send_news(bot: Bot, user: dict, docs: list, today: dict | None = None,
             continue
         items = ordered_items(doc, user, today.get(doc.get("side"), []))
         header = doc["parts_html"][0].split("\n\n")[0] if doc.get("parts_html") else ""
-        header = f"<b>{SIDE_TITLES.get(doc.get('side'), '')}</b>"
+        header = f"<b>{SIDE_TITLES.get(doc.get('side'), '')}</b>\n{header}\nНовин: {len(items)}"
         for k, item in enumerate(items):
             queue.append({"digest_id": item["digest_id"], "n": item["n"], "starred": item["starred"],
                           "header": header if k == 0 else None})
@@ -369,6 +380,84 @@ async def on_reaction(cq: CallbackQuery) -> None:
         pass
     if session:
         await _send_current(cq.bot, session)
+
+
+_ask_locks: dict[int, asyncio.Lock] = {}
+
+
+def _answer_keyboard(conv_id, msg_id, reaction: str | None) -> InlineKeyboardMarkup:
+    base = f"ar:{conv_id}:{msg_id}"
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        _btn("👍 Корисна відповідь", f"{base}:l", reaction == "like", "success"),
+        _btn("👎 Не те", f"{base}:d", reaction == "dislike", "danger"),
+    ]])
+
+
+def _split_plain(text: str, limit: int = TG_LIMIT) -> list[str]:
+    parts, cur = [], ""
+    for para in text.split("\n"):
+        if cur and len(cur) + len(para) + 1 > limit:
+            parts.append(cur)
+            cur = para
+        else:
+            cur = f"{cur}\n{para}" if cur else para
+    return parts + ([cur] if cur else [])
+
+
+@dp.message(F.text & ~F.text.startswith("/"))
+async def on_question(message: Message) -> None:
+    if not _is_allowed(message.from_user.id):
+        return await _deny(message)
+    await touch_user(message.from_user)
+    uid = message.from_user.id
+    lock = _ask_locks.setdefault(uid, asyncio.Lock())
+    if lock.locked():
+        return await message.answer("Ще думаю над попереднім питанням — хвилинку…")
+    reply_to = None
+    if message.reply_to_message and message.reply_to_message.from_user \
+            and message.reply_to_message.from_user.is_bot:
+        reply_to = message.reply_to_message.text or message.reply_to_message.caption
+    async with lock:
+        status = await message.answer("🤔 Аналізую…")
+        await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+        try:
+            res = await analyst.answer(uid, message.text, reply_to=reply_to)
+        except Exception as e:
+            logger.exception("Помилка аналітика")
+            if "connect" in type(e).__name__.lower() or "connection" in str(e).lower():
+                logger.error(f"Модель недоступна: {analyst.client.base_url} — запущена Ollama "
+                             f"або правильно задано ASSISTANT_LLM_BASE_URL у .env?")
+            await status.edit_text("Не вдалося отримати відповідь від моделі. Спробуйте трохи пізніше.")
+            return
+        try:
+            await status.delete()
+        except TelegramBadRequest:
+            pass
+        parts = _split_plain(res["text"])
+        for i, part in enumerate(parts):
+            kb = _answer_keyboard(res["conversation_id"], res["message_id"], None) if i == len(parts) - 1 else None
+            await message.answer(part, parse_mode=None, reply_markup=kb)
+
+
+@dp.callback_query(F.data.startswith("ar:"))
+async def on_answer_rating(cq: CallbackQuery) -> None:
+    _, conv_id, msg_id, code = cq.data.split(":")
+    reaction = {"l": "like", "d": "dislike"}[code]
+    await store.set_message_reaction(ObjectId(conv_id), ObjectId(msg_id), cq.from_user.id, reaction)
+    await cq.answer("Дякую, врахую")
+    try:
+        await cq.message.edit_reply_markup(reply_markup=_answer_keyboard(conv_id, msg_id, reaction))
+    except TelegramBadRequest:
+        pass
+
+
+@dp.message(Command("new"))
+async def cmd_new(message: Message) -> None:
+    if not _is_allowed(message.from_user.id):
+        return await _deny(message)
+    await store.close_conversation(message.from_user.id)
+    await message.answer("Почали нову розмову. Питайте 🙂")
+
 
 
 DAILY_QUESTION = ("<b>Що вас сьогодні цікавить найбільше?</b>\n"
@@ -469,7 +558,15 @@ async def push_new_digests(bot: Bot) -> None:
         except Exception:
             logger.exception(f"Не вдалося надіслати зведення {user['_id']}")
 
-    docs = [d for d in await latest_daily_docs() if d["created_at"] >= now - timedelta(hours=20)]
+
+    hh, mm = (int(x) for x in PUSH_TIME.split(":"))
+    kyiv_now = datetime.now(KYIV)
+    push_at = kyiv_now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    if kyiv_now < push_at:
+        return
+
+    day_start = kyiv_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    docs = [d for d in await latest_daily_docs() if d["created_at"] >= day_start]
     if not docs:
         return
     async for user in users_collection.find({"onboarded": True, "daily_push": {"$ne": False}}):
@@ -477,8 +574,16 @@ async def push_new_digests(bot: Bot) -> None:
         if not _is_allowed(uid) or docs[0]["_id"] in ((user.get("daily") or {}).get("digest_ids") or []):
             continue
         try:
-            await ask_today(bot, user, docs)
-            logger.info(f"Ранкове питання надіслано {uid}")
+            if DAILY_ASK:
+                await ask_today(bot, user, docs)
+                logger.info(f"Ранкове питання надіслано {uid}")
+            else:
+
+                await users_collection.update_one({"_id": uid}, {"$set": {"daily": {
+                    "date": _kyiv_date(), "digest_ids": [d["_id"] for d in docs],
+                    "selected": {"ua": [], "ru": []}, "status": "sent", "sent_at": now}}})
+                await deliver(bot, user, docs)
+                logger.info(f"Ранкове зведення надіслано {uid}")
         except TelegramForbiddenError:
             await users_collection.update_one({"_id": uid}, {"$set": {"daily_push": False}})
         except Exception:
@@ -659,22 +764,25 @@ async def main() -> None:
     if not TOKEN:
         raise SystemExit("Не задано TELEGRAM_BOT_TOKEN у .env")
     await store.ensure_indexes()
+    analyst.CATEGORY_LABELS = CATEGORY_LABELS
+    logger.info(f"Аналітик: модель {analyst.MODEL} за адресою {analyst.client.base_url}")
     bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True))
     await bot.set_my_commands([
         BotCommand(command="today", description="Обрати категорії й отримати новини"),
         BotCommand(command="all_day", description="Усе за добу (UA + RU)"),
-        BotCommand(command="ua_day", description="Українські джерела за добу"),
+        BotCommand(command="day", description="Українські джерела за добу"),
         BotCommand(command="ru_day", description="Російські джерела за добу"),
-        # BotCommand(command="all_week", description="Усе за тиждень"),
+        BotCommand(command="all_week", description="Усе за тиждень"),
+        BotCommand(command="new", description="Нова розмова з аналітиком"),
         BotCommand(command="mode", description="Усі новини одразу чи по одній"),
         BotCommand(command="goals", description="Мої цілі"),
-        # BotCommand(command="id", description="Мій Telegram ID"),
+        BotCommand(command="id", description="Мій Telegram ID"),
     ])
     await resume_sessions(bot)
     if DAILY_PUSH:
         asyncio.create_task(daily_push_loop(bot))
     logger.info("Бот запущено: " + (f"доступ для {len(ALLOWED)} користувачів" if ALLOWED else "відкритий доступ")
-                + (", щоденна розсилка увімкнена" if DAILY_PUSH else ""))
+                + (f", щоденна розсилка о {PUSH_TIME} (Київ)" if DAILY_PUSH else ""))
     await dp.start_polling(bot)
 
 
