@@ -15,7 +15,7 @@ db = AsyncIOMotorClient(MONGO_URI, tz_aware=True)["News"]
 users_collection = db["users"]
 conversations = db["conversations"]
 digests_collection = db["digests"]
-posts_collection = db["ru_posts"]
+posts_collection = db["posts"]
 news_sessions = db["news_sessions"]   # хто на якій новині зараз (одна сесія на людину, _id = user_id)
 
 CHOICE_POINTS = 1
@@ -125,7 +125,7 @@ async def set_reaction(user_id: int, item: dict, reaction: str | None) -> None:
             async for p in posts_collection.find({"_id": {"$in": source_ids}}, {"tags": 1}):
                 tags.extend(t for t in p.get("tags", []) if t not in tags)
         entry = {"post_id": source_ids[0] if source_ids else None, "reaction": reaction,
-                 "text": (item.get("text") or "")[:TEXT_SNIPPET], "digest_id": item["digest_id"],
+                 "text": "", "digest_id": item["digest_id"],   # text — коментар людини, див. set_comment()
                  "item_n": item["n"], "side": item.get("side"), "category": item.get("category"),
                  "tags": tags[:10], "at": _now()}
         for k, v in _points_inc(entry, +1).items():
@@ -137,6 +137,13 @@ async def set_reaction(user_id: int, item: dict, reaction: str | None) -> None:
         update["$inc"] = inc
     if update:
         await users_collection.update_one({"_id": user_id}, update)
+
+
+async def set_comment(user_id: int, digest_id, item_n: int, fields: dict) -> None:
+    """Оновлює поля коментаря (text, text_at, comment_status) у записі feedback цієї новини."""
+    await users_collection.update_one(
+        {"_id": user_id}, {"$set": {f"feedback.$[f].{k}": v for k, v in fields.items()}},
+        array_filters=[{"f.digest_id": digest_id, "f.item_n": item_n}])
 
 
 async def feedback_report(limit: int = 50) -> list[dict]:
@@ -209,13 +216,47 @@ async def llm_user_profile(user_id: int, category_labels: dict | None = None, ex
         lines.append("Теми, що цікавлять: " + ", ".join(t["tag"] for t in tags))
 
     fb = sorted(user.get("feedback", []), key=lambda f: f["at"], reverse=True)
-    liked = [f["text"] for f in fb if f["reaction"] == "like" and f.get("text")][:examples]
-    disliked = [f["text"] for f in fb if f["reaction"] == "dislike" and f.get("text")][:examples]
-    if liked:
-        lines.append("Новини, які він оцінив як корисні:\n" + "\n".join(f"  + {t}" for t in liked))
-    if disliked:
-        lines.append("Новини, які він оцінив як нецікаві:\n" + "\n".join(f"  - {t}" for t in disliked))
+    picked = {r: [f for f in fb if f["reaction"] == r][:examples] for r in ("like", "dislike")}
+    news = await _feedback_news_texts(picked["like"] + picked["dislike"])
+    for r, mark, title in (("like", "+", "Новини, які він оцінив як корисні:"),
+                           ("dislike", "-", "Новини, які він оцінив як нецікаві:")):
+        rows = []
+        for f in picked[r]:
+            text = news.get((f.get("digest_id"), f.get("item_n")))
+            if not text:
+                continue
+            row = f"  {mark} {text[:TEXT_SNIPPET]}"
+            if f.get("text"):
+                row += f"\n    Його коментар: «{f['text'][:TEXT_SNIPPET]}»"
+            rows.append(row)
+        if rows:
+            lines.append(title + "\n" + "\n".join(rows))
     return "\n".join(lines)
+
+
+async def _feedback_news_texts(entries: list[dict]) -> dict:
+    """Текст новин для записів feedback: summary поста за post_id; якщо пост уже видалено — текст пункту зведення."""
+    texts = {}
+    post_ids = [f["post_id"] for f in entries if f.get("post_id")]
+    summaries = {p["_id"]: p.get("summary") for p in
+                 await posts_collection.find({"_id": {"$in": post_ids}}, {"summary": 1}).to_list(None)}
+    missing = []
+    for f in entries:
+        key = (f.get("digest_id"), f.get("item_n"))
+        if summaries.get(f.get("post_id")):
+            texts[key] = summaries[f["post_id"]]
+        else:
+            missing.append(key)
+    if missing:
+        async for d in digests_collection.find({"_id": {"$in": list({k[0] for k in missing})}}, {"sections.items": 1}):
+            c = 0
+            for s in d.get("sections", []):
+                for it in s.get("items", []):
+                    c += 1
+                    key = (d["_id"], it.get("n", c))
+                    if key in missing:
+                        texts[key] = it.get("text")
+    return texts
 
 
 async def get_or_start_conversation(user_id: int, title: str | None = None) -> dict:
