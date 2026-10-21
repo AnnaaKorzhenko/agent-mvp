@@ -16,6 +16,7 @@ users_collection = db["users"]
 conversations = db["conversations"]
 digests_collection = db["digests"]
 posts_collection = db["ru_posts"]
+news_sessions = db["news_sessions"]   # хто на якій новині зараз (одна сесія на людину, _id = user_id)
 
 CHOICE_POINTS = 1
 LIKE_POINTS = 1        # 👍

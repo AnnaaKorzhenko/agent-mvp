@@ -38,3 +38,5 @@ ENV/
 
 # Logs
 *.log
+# Database backups (contain user data)
+backups/

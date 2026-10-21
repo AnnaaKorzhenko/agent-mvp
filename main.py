@@ -16,7 +16,7 @@ from aiogram.types import (BotCommand, CallbackQuery, InlineKeyboardButton,
 from bson import ObjectId
 
 import user_store as store
-from user_store import digests_collection, users_collection
+from user_store import digests_collection, news_sessions, users_collection
 
 logger = logging.getLogger("bot")
 KYIV = ZoneInfo("Europe/Kyiv")
@@ -161,21 +161,89 @@ async def _send(bot: Bot, chat_id: int, text: str, reply_markup=None) -> None:
             return
 
 
-async def send_news(bot: Bot, user: dict, docs: list, today: dict | None = None) -> None:
-    """Надсилає зведення новина за новиною. docs — документи зведень з бази або текст «зведення немає»."""
+END_TEXT = "На сьогодні все ✅"
+
+
+def _item_key(digest_id, n) -> str:
+    return f"{digest_id}:{n}"
+
+
+async def send_news(bot: Bot, user: dict, docs: list, today: dict | None = None,
+                    goals_hint: bool = False) -> None:
+    """Починає показ зведення: по одній новині, наступна — після 👍 / 👎 / ⏭ на поточній.
+
+    docs — документи зведень з бази або текст «зведення немає». Прогрес зберігається в news_sessions,
+    тож перезапуск бота його не губить. Нове зведення замінює незавершену сесію.
+    """
     today = today or {"ua": [], "ru": []}
     uid = user["_id"]
+    queue = []
     for doc in docs:
         if not isinstance(doc, dict):
             await _send(bot, uid, doc)
             continue
         items = ordered_items(doc, user, today.get(doc.get("side"), []))
         header = doc["parts_html"][0].split("\n\n")[0] if doc.get("parts_html") else ""
-        await _send(bot, uid, f"<b>{SIDE_TITLES.get(doc.get('side'), '')}</b>\n{header}\nНовин: {len(items)}")
-        for item in items:
-            reaction = await store.get_reaction(uid, item["digest_id"], item["n"])
-            await _send(bot, uid, _news_text(item), reply_markup=_news_keyboard(item, reaction))
-            await asyncio.sleep(SEND_PAUSE)
+        header = f"<b>{SIDE_TITLES.get(doc.get('side'), '')}</b>\n{header}\nНовин: {len(items)}"
+        for k, item in enumerate(items):
+            queue.append({"digest_id": item["digest_id"], "n": item["n"], "starred": item["starred"],
+                          "header": header if k == 0 else None})
+    if not queue:
+        if goals_hint:
+            await _send(bot, uid, GOALS_HINT)
+        return
+
+    now = datetime.now(timezone.utc)
+    session = {"_id": uid, "user_id": uid, "session_id": ObjectId(), "status": "active",
+               "digest_ids": [d["_id"] for d in docs if isinstance(d, dict)], "queue": queue,
+               "pos": 0, "current": None, "sent": [], "goals_hint": goals_hint,
+               "created_at": now, "updated_at": now}
+    await news_sessions.replace_one({"_id": uid}, session, upsert=True)
+    await _send_current(bot, session)
+
+
+async def _send_current(bot: Bot, session: dict) -> None:
+    """Надсилає новину на позиції pos (або завершальне повідомлення, якщо новини скінчилися)."""
+    uid, sid = session["_id"], session["session_id"]
+    queue, pos = session["queue"], session["pos"]
+    now = datetime.now(timezone.utc)
+    if pos >= len(queue):
+        done = await news_sessions.update_one({"_id": uid, "session_id": sid, "status": "active"},
+                                              {"$set": {"status": "finished", "current": None, "updated_at": now}})
+        if done.modified_count:
+            await _send(bot, uid, END_TEXT)
+            if session.get("goals_hint"):
+                await _send(bot, uid, GOALS_HINT)
+        return
+
+    entry = queue[pos]
+    doc = await digests_collection.find_one({"_id": entry["digest_id"]}, {"sections": 1, "side": 1})
+    item = find_item(doc, entry["n"]) if doc else None
+    if not item:                                            # зведення видалили — переходимо до наступної
+        session = await news_sessions.find_one_and_update(
+            {"_id": uid, "session_id": sid, "pos": pos}, {"$inc": {"pos": 1}, "$set": {"updated_at": now}},
+            return_document=True)
+        return await _send_current(bot, session) if session else None
+    item["starred"] = entry["starred"]
+    key = _item_key(item["digest_id"], item["n"])
+    # current ставимо до надсилання, щоб натискання одразу після появи новини вже приймалося
+    await news_sessions.update_one({"_id": uid, "session_id": sid},
+                                   {"$set": {"current": key, "updated_at": now}})
+    if entry.get("header"):
+        await _send(bot, uid, entry["header"])
+    reaction = await store.get_reaction(uid, item["digest_id"], item["n"])
+    await _send(bot, uid, _news_text(item), reply_markup=_news_keyboard(item, reaction))
+    await news_sessions.update_one({"_id": uid, "session_id": sid}, {"$addToSet": {"sent": key}})
+
+
+async def resume_sessions(bot: Bot) -> None:
+    """Після перезапуску: якщо бот упав між оцінкою і надсиланням наступної новини — надсилаємо її."""
+    async for session in news_sessions.find({"status": "active"}):
+        if session.get("current") is None or session["current"] not in session.get("sent", []):
+            try:
+                await _send_current(bot, session)
+            except Exception:
+                logger.exception(f"Не вдалося продовжити сесію {session['_id']}")
 
 
 @dp.callback_query(F.data.startswith("r:"))
@@ -187,6 +255,13 @@ async def on_reaction(cq: CallbackQuery) -> None:
     if not item:
         return await cq.answer("Новину не знайдено")
     uid = cq.from_user.id
+    # Приймаємо лише поточну новину й лише один раз: повторне чи старе натискання сюди не пройде.
+    session = await news_sessions.find_one_and_update(
+        {"_id": uid, "status": "active", "current": _item_key(item["digest_id"], item["n"])},
+        {"$inc": {"pos": 1}, "$set": {"current": None, "updated_at": datetime.now(timezone.utc)}},
+        return_document=True)
+    if not session:
+        return await cq.answer()
     prev = await store.get_reaction(uid, item["digest_id"], item["n"])
     new = None if prev == reaction else reaction           # повторне натискання знімає оцінку
     await store.set_reaction(uid, item, new)
@@ -196,6 +271,7 @@ async def on_reaction(cq: CallbackQuery) -> None:
         await cq.message.edit_reply_markup(reply_markup=_news_keyboard(item, new))
     except TelegramBadRequest:
         pass
+    await _send_current(cq.bot, session)
 
 
 # ---------------------------------------------------------------------------
@@ -275,9 +351,7 @@ async def on_daily_go(cq: CallbackQuery) -> None:
     if not docs:
         await cq.message.answer("Свіжого зведення ще немає — воно з'являється щоранку близько 6:30.")
         return
-    await send_news(cq.bot, user, docs, today=selected)
-    if not store.active_goals(user):
-        await cq.message.answer(GOALS_HINT)
+    await send_news(cq.bot, user, docs, today=selected, goals_hint=not store.active_goals(user))
 
 
 
@@ -469,6 +543,7 @@ async def main() -> None:
         BotCommand(command="goals", description="Мої цілі"),
         BotCommand(command="id", description="Мій Telegram ID"),
     ])
+    await resume_sessions(bot)
     if DAILY_PUSH:
         asyncio.create_task(daily_push_loop(bot))
     logger.info("Бот запущено: " + (f"доступ для {len(ALLOWED)} користувачів" if ALLOWED else "відкритий доступ")
