@@ -12,6 +12,6 @@ if not MONGO_URI:
 client = AsyncIOMotorClient(MONGO_URI, tz_aware=True)
 db = client["News"]
 
-sources_collection = db["ru-tg"]
-posts_collection = db["ru_posts"]
+sources_collection = db["sources"]
+posts_collection = db["posts"]
 digests_collection = db["digests"]

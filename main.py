@@ -17,7 +17,7 @@ from bson import ObjectId
 
 import analyst
 import user_store as store
-from user_store import digests_collection, news_sessions, users_collection
+from user_store import conversations, digests_collection, users_collection
 
 
 import threading
@@ -247,9 +247,7 @@ async def send_all_at_once(bot: Bot, user: dict, docs: list, today: dict | None 
     uid = user["_id"]
 
     await _close_open_comment(uid)
-    await news_sessions.update_one({"_id": uid, "status": "active"},
-                                   {"$set": {"status": "finished", "current": None,
-                                             "updated_at": datetime.now(timezone.utc)}})
+    await conversations.update_one(_ns_query(uid, status="active"), {"$set": _ns({"status": "finished", "current": None})})
     for doc in docs:
         if not isinstance(doc, dict):
             await _send(bot, uid, doc)
@@ -290,6 +288,33 @@ def _item_key(digest_id, n) -> str:
     return f"{digest_id}:{n}"
 
 
+# Стан стрічки «по одній» живе в conversations.news_state (один документ на людину, ключ user_id).
+# Код нижче працює зі «сесією» — news_state + _id = user_id.
+_NS_PROJECTION = {"user_id": 1, "news_state": 1}
+
+
+def _ns(fields: dict) -> dict:
+    """{"pos": 1, "awaiting_comment.stage": "offer"} -> {"news_state.pos": 1, "news_state.awaiting_comment.stage": "offer"}"""
+    return {f"news_state.{k}": v for k, v in fields.items()}
+
+
+def _ns_query(uid: int, **conds) -> dict:
+    return {"user_id": uid, **_ns(conds)}
+
+
+def _session(doc: dict | None) -> dict | None:
+    return {**doc["news_state"], "_id": doc["user_id"]} if doc and doc.get("news_state") else None
+
+
+async def _ns_find(query: dict) -> dict | None:
+    return _session(await conversations.find_one(query, _NS_PROJECTION))
+
+
+async def _ns_find_and_update(query: dict, update: dict, after: bool = False) -> dict | None:
+    return _session(await conversations.find_one_and_update(query, update, projection=_NS_PROJECTION,
+                                                            return_document=after))
+
+
 async def send_news(bot: Bot, user: dict, docs: list, today: dict | None = None,
                     goals_hint: bool = False) -> None:
 
@@ -311,24 +336,22 @@ async def send_news(bot: Bot, user: dict, docs: list, today: dict | None = None,
             await _send(bot, uid, GOALS_HINT)
         return
 
-    now = datetime.now(timezone.utc)
-    session = {"_id": uid, "user_id": uid, "session_id": ObjectId(), "status": "active",
-               "digest_ids": [d["_id"] for d in docs if isinstance(d, dict)], "queue": queue,
-               "pos": 0, "current": None, "sent": [], "goals_hint": goals_hint,
-               "created_at": now, "updated_at": now}
+    state = {"session_id": ObjectId(), "status": "active", "queue": queue, "pos": 0, "current": None,
+             "sent": [], "goals_hint": goals_hint}
     await _close_open_comment(uid)
-    await news_sessions.replace_one({"_id": uid}, session, upsert=True)
-    await _send_current(bot, session)
+    await conversations.update_one({"user_id": uid}, {"$set": {"news_state": state},
+                                                      "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
+                                   upsert=True)
+    await _send_current(bot, {**state, "_id": uid})
 
 
 async def _send_current(bot: Bot, session: dict, with_header: bool = True) -> None:
 
     uid, sid = session["_id"], session["session_id"]
     queue, pos = session["queue"], session["pos"]
-    now = datetime.now(timezone.utc)
     if pos >= len(queue):
-        done = await news_sessions.update_one({"_id": uid, "session_id": sid, "status": "active"},
-                                              {"$set": {"status": "finished", "current": None, "updated_at": now}})
+        done = await conversations.update_one(_ns_query(uid, session_id=sid, status="active"),
+                                              {"$set": _ns({"status": "finished", "current": None})})
         if done.modified_count:
             await _send(bot, uid, END_TEXT)
             if session.get("goals_hint"):
@@ -339,25 +362,24 @@ async def _send_current(bot: Bot, session: dict, with_header: bool = True) -> No
     doc = await digests_collection.find_one({"_id": entry["digest_id"]}, {"sections": 1, "side": 1})
     item = find_item(doc, entry["n"]) if doc else None
     if not item:
-        session = await news_sessions.find_one_and_update(
-            {"_id": uid, "session_id": sid, "pos": pos}, {"$inc": {"pos": 1}, "$set": {"updated_at": now}},
-            return_document=True)
+        session = await _ns_find_and_update(_ns_query(uid, session_id=sid, pos=pos),
+                                            {"$inc": _ns({"pos": 1})}, after=True)
         return await _send_current(bot, session, with_header) if session else None
     item["starred"] = entry["starred"]
     key = _item_key(item["digest_id"], item["n"])
 
-    await news_sessions.update_one({"_id": uid, "session_id": sid},
-                                   {"$set": {"current": key, "updated_at": now}})
+    await conversations.update_one(_ns_query(uid, session_id=sid), {"$set": _ns({"current": key})})
     if with_header and entry.get("header"):
         await _send(bot, uid, entry["header"])
     reaction = await store.get_reaction(uid, item["digest_id"], item["n"])
     await _send(bot, uid, _news_text(item), reply_markup=_news_keyboard(item, reaction))
-    await news_sessions.update_one({"_id": uid, "session_id": sid}, {"$addToSet": {"sent": key}})
+    await conversations.update_one(_ns_query(uid, session_id=sid), {"$addToSet": _ns({"sent": key})})
 
 
 async def resume_sessions(bot: Bot) -> None:
 
-    async for session in news_sessions.find({"status": "active"}):
+    async for doc in conversations.find({"news_state.status": "active"}, _NS_PROJECTION):
+        session = _session(doc)
         aw = session.get("awaiting_comment")
         if aw:                                  # чекаємо коментар — наступну новину не шлемо
             if not aw.get("prompt_sent"):
@@ -385,10 +407,9 @@ async def on_reaction(cq: CallbackQuery) -> None:
     labels = {"like": "👍 Корисно", "dislike": "👎 Не цікаво", "skip": "⏭ Пропущено", None: "Оцінку знято"}
 
 
-    session = await news_sessions.find_one_and_update(
-        {"_id": uid, "status": "active", "current": _item_key(item["digest_id"], item["n"])},
-        {"$inc": {"pos": 1}, "$set": {"current": None, "updated_at": datetime.now(timezone.utc)}},
-        return_document=True)
+    session = await _ns_find_and_update(
+        _ns_query(uid, status="active", current=_item_key(item["digest_id"], item["n"])),
+        {"$inc": _ns({"pos": 1}), "$set": _ns({"current": None})}, after=True)
     if session:
         new = reaction
     else:
@@ -434,25 +455,26 @@ async def _send_comment_prompt(bot: Bot, uid: int, aw: dict) -> None:
     update = {"awaiting_comment.prompt_sent": True}
     if msg:   # id потрібен, щоб видалити це питання, якщо людина натисне «Без коментаря»
         update[f"awaiting_comment.{'offer' if aw['stage'] == 'offer' else 'ask'}_message_id"] = msg.message_id
-    await news_sessions.update_one(
-        {"_id": uid, "awaiting_comment.digest_id": aw["digest_id"], "awaiting_comment.item_n": aw["item_n"],
-         "awaiting_comment.stage": aw["stage"]}, {"$set": update})
+    await conversations.update_one(
+        _ns_query(uid, **{"awaiting_comment.digest_id": aw["digest_id"], "awaiting_comment.item_n": aw["item_n"],
+                          "awaiting_comment.stage": aw["stage"]}), {"$set": _ns(update)})
 
 
 async def _start_comment(bot: Bot, session: dict, item: dict, reaction: str) -> None:
     """Сесія вже на наступній позиції; наступну новину надішлемо, коли людина закінчить з коментарем."""
-    now = datetime.now(timezone.utc)
     aw = {"digest_id": item["digest_id"], "item_n": item["n"], "reaction": reaction, "stage": "offer",
-          "awaiting_since": now, "prompt_sent": False}
-    await news_sessions.update_one({"_id": session["_id"], "session_id": session["session_id"]},
-                                   {"$set": {"awaiting_comment": aw, "updated_at": now}})
+          "awaiting_since": datetime.now(timezone.utc), "prompt_sent": False}
+    await conversations.update_one(_ns_query(session["_id"], session_id=session["session_id"]),
+                                   {"$set": _ns({"awaiting_comment": aw})})
     await _send_comment_prompt(bot, session["_id"], aw)
 
 
 async def _close_comment(query: dict, uid: int, fields: dict) -> dict | None:
-    """Атомарно закриває очікування й пише fields у запис feedback. Повертає сесію (до закриття) або None."""
-    session = await news_sessions.find_one_and_update(
-        query, {"$unset": {"awaiting_comment": ""}, "$set": {"updated_at": datetime.now(timezone.utc)}})
+    """Атомарно закриває очікування й пише fields у запис feedback. Повертає сесію (до закриття) або None.
+
+    query — умови на news_state (без префікса), напр. {"awaiting_comment.stage": "waiting"}.
+    """
+    session = await _ns_find_and_update(_ns_query(uid, **query), {"$unset": _ns({"awaiting_comment": ""})})
     if session:
         aw = session["awaiting_comment"]
         await store.set_comment(uid, aw["digest_id"], aw["item_n"], fields)
@@ -461,7 +483,7 @@ async def _close_comment(query: dict, uid: int, fields: dict) -> dict | None:
 
 async def _close_open_comment(uid: int) -> None:
     """Нове зведення, а коментар ще чекаємо — закриваємо як timeout."""
-    await _close_comment({"_id": uid, "awaiting_comment": {"$exists": True}}, uid, {"comment_status": "timeout"})
+    await _close_comment({"awaiting_comment": {"$exists": True}}, uid, {"comment_status": "timeout"})
 
 
 async def _drop_buttons(cq: CallbackQuery) -> None:
@@ -486,12 +508,12 @@ async def on_comment_button(cq: CallbackQuery) -> None:
     _, code, did, n = cq.data.split(":")
     uid, did, n = cq.from_user.id, ObjectId(did), int(n)
     now = datetime.now(timezone.utc)
-    current = {"_id": uid, "awaiting_comment.digest_id": did, "awaiting_comment.item_n": n}
+    current = {"awaiting_comment.digest_id": did, "awaiting_comment.item_n": n}
     if code == "c":
-        session = await news_sessions.find_one_and_update(
-            {**current, "awaiting_comment.stage": "offer"},
-            {"$set": {"awaiting_comment.stage": "waiting", "awaiting_comment.awaiting_since": now,
-                      "awaiting_comment.prompt_sent": False, "updated_at": now}}, return_document=True)
+        session = await _ns_find_and_update(
+            _ns_query(uid, **current, **{"awaiting_comment.stage": "offer"}),
+            {"$set": _ns({"awaiting_comment.stage": "waiting", "awaiting_comment.awaiting_since": now,
+                          "awaiting_comment.prompt_sent": False})}, after=True)
         await cq.answer()
         if session:
             await _drop_buttons(cq)
@@ -505,8 +527,8 @@ async def on_comment_button(cq: CallbackQuery) -> None:
 
 
 async def _waiting_for_comment(message: Message) -> bool:
-    return bool(message.from_user and await news_sessions.find_one(
-        {"_id": message.from_user.id, "awaiting_comment.stage": "waiting"}, {"_id": 1}))
+    return bool(message.from_user and await conversations.find_one(
+        _ns_query(message.from_user.id, **{"awaiting_comment.stage": "waiting"}), {"_id": 1}))
 
 
 @dp.message(F.text & ~F.text.startswith("/"), _waiting_for_comment)
@@ -514,7 +536,7 @@ async def on_comment_text(message: Message) -> None:
     if not _is_allowed(message.from_user.id):
         return await _deny(message)
     uid = message.from_user.id
-    session = await _close_comment({"_id": uid, "awaiting_comment.stage": "waiting"}, uid, {
+    session = await _close_comment({"awaiting_comment.stage": "waiting"}, uid, {
         "text": message.text.strip(), "text_at": datetime.now(timezone.utc), "comment_status": "commented"})
     if session:
         await _send_current(message.bot, session)
@@ -522,11 +544,12 @@ async def on_comment_text(message: Message) -> None:
 
 @dp.message(~F.text, _waiting_for_comment)
 async def on_comment_not_text(message: Message) -> None:
-    session = await news_sessions.find_one({"_id": message.from_user.id}, {"awaiting_comment": 1})
+    uid = message.from_user.id
+    session = await _ns_find({"user_id": uid})
     if session and session.get("awaiting_comment"):
         msg = await message.answer(COMMENT_NOT_TEXT, reply_markup=_comment_keyboard(session["awaiting_comment"]))
-        await news_sessions.update_one({"_id": message.from_user.id, "awaiting_comment": {"$exists": True}},
-                                       {"$push": {"awaiting_comment.reminder_message_ids": msg.message_id}})
+        await conversations.update_one(_ns_query(uid, awaiting_comment={"$exists": True}),
+                                       {"$push": _ns({"awaiting_comment.reminder_message_ids": msg.message_id})})
 
 
 async def comment_timeout_middleware(handler, event, data):
@@ -535,13 +558,13 @@ async def comment_timeout_middleware(handler, event, data):
     expired = None
     if user:
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=COMMENT_TIMEOUT_MINUTES)
-        expired = await _close_comment({"_id": user.id, "awaiting_comment.awaiting_since": {"$lt": cutoff}},
+        expired = await _close_comment({"awaiting_comment.awaiting_since": {"$lt": cutoff}},
                                        user.id, {"comment_status": "timeout"})
     try:
         return await handler(event, data)
     finally:
         if expired:
-            s = await news_sessions.find_one({"_id": user.id})
+            s = await _ns_find({"user_id": user.id})
             if (s and s.get("session_id") == expired["session_id"] and s.get("status") == "active"
                     and s.get("current") is None and not s.get("awaiting_comment")):
                 await _send_current(data["bot"], s)
@@ -607,7 +630,7 @@ async def on_question(message: Message) -> None:
         reply_to = message.reply_to_message.text or message.reply_to_message.caption
 
 
-    closed = await _close_comment({"_id": uid, "awaiting_comment.stage": "offer"}, uid, {"comment_status": "no_comment"})
+    closed = await _close_comment({"awaiting_comment.stage": "offer"}, uid, {"comment_status": "no_comment"})
     if closed:
         await _delete_prompts(message.bot, uid, closed["awaiting_comment"], None)
 
@@ -639,7 +662,7 @@ async def on_question(message: Message) -> None:
 async def _resume_news(bot: Bot, uid: int) -> None:
 
     try:
-        s = await news_sessions.find_one({"_id": uid, "status": "active", "awaiting_comment": {"$exists": False}})
+        s = await _ns_find(_ns_query(uid, status="active", awaiting_comment={"$exists": False}))
         if not s or len(s["queue"]) - s["pos"] <= 0:
             return
         await _send(bot, uid, f"↩️ Повертаємось до новин — залишилось {len(s['queue']) - s['pos']}")
