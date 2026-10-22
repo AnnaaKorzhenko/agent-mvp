@@ -26,18 +26,48 @@ ORG_CONTEXT = os.getenv("ORG_CONTEXT") or (
 
 MAX_TOOL_ROUNDS = 4
 
-# Параметри генерації. Новіші моделі OpenAI (gpt-5*, o*) не приймають temperature і max_tokens
-# (замість нього — max_completion_tokens). Підбираємо за назвою і ще й підлаштовуємось за помилкою API.
+# Ліміт вихідних токенів — фіксований на кожен виклик. У reasoning-моделей (gpt-5*, o*) він спільний
+# для міркувань і тексту: з 4000 міркування інколи забирали все, і відповідь виходила порожньою.
+MAX_OUTPUT_TOKENS = int(os.getenv("ASSISTANT_MAX_OUTPUT_TOKENS", "8000"))            # звичайна розмова
+MAX_OUTPUT_TOKENS_FEED = int(os.getenv("ASSISTANT_MAX_OUTPUT_TOKENS_FEED", "5000"))  # питання про поточну новину
+REASONING_EFFORT = os.getenv("ASSISTANT_REASONING_EFFORT", "low")
+HISTORY_TURNS = int(os.getenv("ASSISTANT_HISTORY_TURNS", "10"))   # останні N пар «питання — відповідь»
+RETRY_HISTORY_MESSAGES = 4
+
+# Новіші моделі OpenAI (gpt-5*, o*) не приймають temperature і max_tokens (замість нього —
+# max_completion_tokens), зате приймають reasoning_effort. Підбираємо за назвою і підлаштовуємось за помилкою API.
 _NEW_STYLE = MODEL.lower().startswith(("gpt-5", "o1", "o3", "o4"))
-GEN_PARAMS: dict = ({"max_completion_tokens": 4000} if _NEW_STYLE
-                    else {"temperature": 0.3, "max_tokens": 900})
-HISTORY_MESSAGES = 10
+GEN_STYLE: dict = {"tokens_key": "max_completion_tokens" if _NEW_STYLE else "max_tokens",
+                   "temperature": None if _NEW_STYLE else 0.3,
+                   "reasoning_effort": REASONING_EFFORT if _NEW_STYLE else None}
 TODAY_CONTEXT_CHARS = 6000
+POST_CONTEXT_CHARS = 2500
 CATEGORY_LABELS: dict = {}   # бот підставляє свої назви категорій при старті
+FAILED_ANSWER_PREFIXES = ("Не вдалося сформулювати відповідь", "Не встиг зібрати відповідь")
+
+
+class EmptyAnswer(Exception):
+    """Модель не дала тексту (навіть після повтору з коротшою історією)."""
+
+    def __init__(self, reason: str, tokens: dict):
+        super().__init__(reason)
+        self.tokens = tokens
+
+
+def _gen_params(limit: int) -> dict:
+    p = {GEN_STYLE["tokens_key"]: limit}
+    if GEN_STYLE["temperature"] is not None:
+        p["temperature"] = GEN_STYLE["temperature"]
+    if GEN_STYLE["reasoning_effort"]:
+        p["reasoning_effort"] = GEN_STYLE["reasoning_effort"]
+    return p
 
 SYSTEM_PROMPT = """Ти — аналітик-співрозмовник для команди в оборонному секторі України.
 Про команду: {org}
 Сьогодні: {today} (Київ).
+
+НОВИНА, ЯКУ ЛЮДИНА ЗАРАЗ ДИВИТЬСЯ
+{current_post}
 
 ПРО ЦЮ ЛЮДИНУ
 {profile}
@@ -45,7 +75,12 @@ SYSTEM_PROMPT = """Ти — аналітик-співрозмовник для �
 ЩО ЇЙ СЬОГОДНІ НАДІСЛАНО І ЧОМУ
 {today_items}
 
+РАНІШЕ В ЦІЙ РОЗМОВІ
+{summary}
+
 ЯК ПРАЦЮВАТИ
+- Якщо людина пише «це», «про це», «детальніше» чи «а які ризики» без уточнення — йдеться про новину,
+  яку вона зараз дивиться (розділ вище), або про попередню відповідь. Цілі людини — лише додатковий контекст.
 - Відповідай українською, по суті, до 250 слів (якщо не просять докладніше). Без markdown-розмітки.
 - Факти бери лише з даних вище або з інструментів. Якщо для відповіді потрібні новини поза сьогоднішнім
   переліком — виклич search_news / get_digest / get_trends. Не вигадуй фактів, цифр, назв.
@@ -212,46 +247,134 @@ def _clean(answer: str) -> str:
     return answer.strip()
 
 
-async def answer(user_id: int, question: str, reply_to: str | None = None) -> dict:
-    """Повертає {"text", "conversation_id", "message_id"}."""
+def _sanitize_history(messages: list[dict]) -> list[dict]:
+    """Валідна історія для API: без порожніх і невдалих відповідей, без двох однакових ролей поспіль."""
+    out: list[dict] = []
+    for m in messages:
+        content = (m.get("content") or "").strip()
+        if m.get("role") not in ("user", "assistant") or not content:
+            continue
+        if m["role"] == "assistant" and content.startswith(FAILED_ANSWER_PREFIXES):
+            continue
+        if out and out[-1]["role"] == m["role"]:
+            out[-1] = {"role": m["role"], "content": f"{out[-1]['content']}\n\n{content}"}
+        else:
+            out.append({"role": m["role"], "content": content})
+    return out
+
+
+async def _older_turns_summary(conv_id, keep: int) -> str:
+    """Короткий підсумок старших реплік (без виклику моделі): які питання людина ставила раніше."""
+    doc = await store.conversations.find_one({"_id": conv_id}, {"messages.role": 1, "messages.content": 1}) or {}
+    older = (doc.get("messages") or [])[:-keep] if keep else []
+    questions = [" ".join((m.get("content") or "").split())[:150] for m in older if m.get("role") == "user"]
+    summary = ("Людина раніше питала: " + "; ".join(questions[-15:])) if questions else ""
+    if summary:
+        await store.conversations.update_one({"_id": conv_id}, {"$set": {"summary": summary}})
+    return summary
+
+
+async def _current_post_block(post: dict | None) -> str:
+    if not post:
+        return "Зараз людина не дивиться окрему новину."
+    lines = [f"[{(post.get('side') or '').upper()} · {_label(post.get('side'), post.get('category'))}] {post.get('text', '')}"]
+    if post.get("source_urls"):
+        lines.append("Посилання: " + " ".join(post["source_urls"][:3]))
+    ids = post.get("source_post_ids") or []
+    if ids:
+        lines.append("post_ids: " + ", ".join(str(i) for i in ids))
+        details = []
+        async for p in posts_collection.find({"_id": {"$in": ids}}, {"summary": 1, "clean_text": 1, "post_url": 1}):
+            text = " ".join((p.get("clean_text") or "").split())[:POST_CONTEXT_CHARS // max(1, len(ids))]
+            details.append(f"- {p.get('summary') or ''}\n  Текст поста: {text}" if text else f"- {p.get('summary') or ''}")
+        if details:
+            lines.append("Що пишуть джерела:\n" + "\n".join(details))
+    return "\n".join(lines)
+
+
+async def _create(kwargs: dict, purpose: str, attempt: int):
+    """Один виклик моделі з журналом: модель, токени, причина завершення, довжина тексту, request id."""
+    try:
+        resp = await client.chat.completions.create(**kwargs)
+    except Exception as e:
+        logger.error(f"LLM error purpose={purpose} attempt={attempt} model={kwargs['model']} "
+                     f"request_id={getattr(e, 'request_id', None)} {type(e).__name__}: {e}")
+        raise
+    choice, usage = resp.choices[0], resp.usage
+    details = getattr(usage, "completion_tokens_details", None)
+    logger.info(f"LLM call purpose={purpose} attempt={attempt} model={resp.model} request_id={getattr(resp, '_request_id', None)} "
+                f"finish={choice.finish_reason} in={getattr(usage, 'prompt_tokens', None)} "
+                f"out={getattr(usage, 'completion_tokens', None)} reasoning={getattr(details, 'reasoning_tokens', None)} "
+                f"text_len={len(choice.message.content or '')} tool_calls={len(choice.message.tool_calls or [])} "
+                f"limit={kwargs.get(GEN_STYLE['tokens_key'])}")
+    return resp
+
+
+async def answer(user_id: int, question: str, reply_to: str | None = None, current_post: dict | None = None) -> dict:
+    """Повертає {"text", "conversation_id", "message_id", "tokens"}; EmptyAnswer, якщо модель не дала тексту.
+
+    current_post — новина, яку людина зараз бачить у стрічці (digest_id, n, side, category, text,
+    source_urls, source_post_ids); «це» / «про це» стосується її.
+    """
     user = await users_collection.find_one({"_id": user_id}) or {"_id": user_id}
     profile = await store.llm_user_profile(user_id, CATEGORY_LABELS) or "Профіль ще порожній."
     conv = await store.get_or_start_conversation(user_id, title=question)
-    history = await store.conversation_history(conv["_id"], limit=HISTORY_MESSAGES)
+    keep = HISTORY_TURNS * 2
+    history = _sanitize_history(await store.conversation_history(conv["_id"], limit=keep))
+    summary = await _older_turns_summary(conv["_id"], keep) or "—"
 
     system = SYSTEM_PROMPT.format(
         org=ORG_CONTEXT, today=datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%d.%m.%Y"),
-        profile=profile, today_items=await today_items(user))
+        current_post=await _current_post_block(current_post),
+        profile=profile, today_items=await today_items(user), summary=summary)
     user_msg = question if not reply_to else f"(Відповідь на повідомлення бота: «{reply_to[:1500]}»)\n{question}"
-    messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_msg}]
+    purpose = "feed" if current_post else "chat"
+    limit = MAX_OUTPUT_TOKENS_FEED if current_post else MAX_OUTPUT_TOKENS
 
+    def base_messages(hist: list[dict]) -> list[dict]:
+        return [{"role": "system", "content": system}, *_sanitize_history(hist + [{"role": "user", "content": user_msg}])]
+
+    messages = base_messages(history)
     await store.add_message(conv["_id"], user_id, "user", user_msg)
 
-    sources, tool_log, use_tools = [], [], True
-    for _ in range(MAX_TOOL_ROUNDS + 3):
-        kwargs = {"model": MODEL, "messages": messages, **GEN_PARAMS}
+    sources, tool_log, use_tools, retried = [], [], True, False
+    tokens = {"in": 0, "out": 0}
+    text = None
+    for attempt in range(1, MAX_TOOL_ROUNDS + 5):
+        kwargs = {"model": MODEL, "messages": messages, **_gen_params(limit)}
         if use_tools:
             kwargs["tools"] = TOOLS
         try:
-            resp = await client.chat.completions.create(**kwargs)
+            resp = await _create(kwargs, purpose, attempt)
         except Exception as e:
             err = str(e).lower()
-            if "max_tokens" in err and "max_tokens" in GEN_PARAMS:          # модель хоче max_completion_tokens
-                GEN_PARAMS.pop("max_tokens")
-                GEN_PARAMS["max_completion_tokens"] = 4000
+            if "max_tokens" in err and GEN_STYLE["tokens_key"] == "max_tokens":   # модель хоче max_completion_tokens
+                GEN_STYLE["tokens_key"] = "max_completion_tokens"
                 continue
-            if "temperature" in err and "temperature" in GEN_PARAMS:        # модель не приймає temperature
-                GEN_PARAMS.pop("temperature")
+            if "temperature" in err and GEN_STYLE["temperature"] is not None:   # модель не приймає temperature
+                GEN_STYLE["temperature"] = None
+                continue
+            if "reasoning_effort" in err and GEN_STYLE["reasoning_effort"]:     # модель не приймає reasoning_effort
+                GEN_STYLE["reasoning_effort"] = None
                 continue
             if use_tools and "tool" in err:   # модель не вміє інструменти — працюємо без них
                 logger.warning(f"Модель {MODEL} не підтримує інструменти, відповідаю без них")
                 use_tools = False
                 continue
             raise
+        tokens["in"] += getattr(resp.usage, "prompt_tokens", 0) or 0
+        tokens["out"] += getattr(resp.usage, "completion_tokens", 0) or 0
         msg = resp.choices[0].message
         if not getattr(msg, "tool_calls", None):
-            text = _clean(msg.content) or "Не вдалося сформулювати відповідь — спробуйте переформулювати питання."
-            break
+            text = _clean(msg.content)
+            if text:
+                break
+            if retried:
+                raise EmptyAnswer(f"empty output after retry (finish={resp.choices[0].finish_reason})", tokens)
+            logger.warning(f"LLM empty output (finish={resp.choices[0].finish_reason}); retry with shorter history")
+            retried = True
+            messages = base_messages(history[-RETRY_HISTORY_MESSAGES:])
+            continue
         messages.append({"role": "assistant", "content": msg.content or "",
                          "tool_calls": [tc.model_dump() for tc in msg.tool_calls]})
         for tc in msg.tool_calls:
@@ -269,8 +392,8 @@ async def answer(user_id: int, question: str, reply_to: str | None = None) -> di
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "content": json.dumps(result, ensure_ascii=False, default=str)[:12000]})
     else:
-        text = "Не встиг зібрати відповідь — спробуйте звузити питання."
+        raise EmptyAnswer("too many tool rounds", tokens)
 
     msg_id = await store.add_message(conv["_id"], user_id, "assistant", text,
-                                     sources=sources[:30], tool_calls=tool_log, model=MODEL)
-    return {"text": text, "conversation_id": conv["_id"], "message_id": msg_id}
+                                     sources=sources[:30], tool_calls=tool_log, model=MODEL, tokens=tokens)
+    return {"text": text, "conversation_id": conv["_id"], "message_id": msg_id, "tokens": tokens}

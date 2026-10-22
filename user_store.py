@@ -302,6 +302,28 @@ async def conversation_history(conversation_id, limit: int = 10) -> list[dict]:
     return history
 
 
+ASSISTANT_DAILY_QUESTIONS = int(os.getenv("ASSISTANT_DAILY_QUESTIONS", "50"))   # 0 — без ліміту
+ASSISTANT_DAILY_TOKENS = int(os.getenv("ASSISTANT_DAILY_TOKENS", "400000"))      # 0 — без ліміту
+
+
+async def assistant_budget_ok(user_id: int, date: str) -> bool:
+    """Чи не вичерпано денний ліміт питань / токенів аналітика (users.assistant_usage за дату date)."""
+    user = await users_collection.find_one({"_id": user_id}, {"assistant_usage": 1}) or {}
+    usage = user.get("assistant_usage") or {}
+    if usage.get("date") != date:
+        return True
+    if ASSISTANT_DAILY_QUESTIONS and usage.get("questions", 0) >= ASSISTANT_DAILY_QUESTIONS:
+        return False
+    return not (ASSISTANT_DAILY_TOKENS and usage.get("tokens", 0) >= ASSISTANT_DAILY_TOKENS)
+
+
+async def add_assistant_usage(user_id: int, date: str, tokens: int) -> None:
+    await users_collection.update_one({"_id": user_id, "assistant_usage.date": {"$ne": date}},
+                                      {"$set": {"assistant_usage": {"date": date, "questions": 0, "tokens": 0}}})
+    await users_collection.update_one({"_id": user_id}, {"$inc": {"assistant_usage.questions": 1,
+                                                                   "assistant_usage.tokens": int(tokens or 0)}})
+
+
 async def set_message_reaction(conversation_id, message_id, user_id: int, reaction: str | None) -> None:
     await conversations.update_one({"_id": conversation_id, "user_id": user_id, "messages.id": message_id},
                                    {"$set": {"messages.$.reaction": reaction}})

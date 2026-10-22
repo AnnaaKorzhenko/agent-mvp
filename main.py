@@ -564,6 +564,29 @@ def _split_plain(text: str, limit: int = TG_LIMIT) -> list[str]:
     return parts + ([cur] if cur else [])
 
 
+ANSWER_TEMPORARY_ERROR = "Тимчасова помилка з'єднання з моделлю. Спробуйте ще раз за хвилину."
+ANSWER_CANT = "Не вийшло відповісти на це питання — спробуйте сформулювати коротше або конкретніше."
+ANSWER_LIMIT = "На сьогодні ліміт запитань до аналітика вичерпано — повертайтеся завтра. Стрічка новин і оцінки працюють як завжди."
+FEED_HINT = "Оцініть новину вище, щоб отримати наступну"
+
+
+async def _feed_post(uid: int) -> tuple[dict | None, bool]:
+    """Новина, яку людина зараз бачить у стрічці, і чи чекають на неї оцінку (кнопки 👍 / 👎 / ⏭)."""
+    session = await news_sessions.find_one({"_id": uid, "status": "active"}, {"current": 1, "awaiting_comment": 1})
+    if not session:
+        return None, False
+    aw = session.get("awaiting_comment")
+    if session.get("current"):
+        did, n = session["current"].split(":")
+        did, n, showing = ObjectId(did), int(n), True
+    elif aw:
+        did, n, showing = aw["digest_id"], aw["item_n"], False
+    else:
+        return None, False
+    doc = await digests_collection.find_one({"_id": did}, {"sections": 1, "side": 1})
+    return (find_item(doc, n) if doc else None), showing
+
+
 @dp.message(F.text & ~F.text.startswith("/"))
 async def on_question(message: Message) -> None:
     if not _is_allowed(message.from_user.id):
@@ -573,27 +596,37 @@ async def on_question(message: Message) -> None:
     lock = _ask_locks.setdefault(uid, asyncio.Lock())
     if lock.locked():
         return await message.answer("Ще думаю над попереднім питанням — хвилинку…")
+    if not await store.assistant_budget_ok(uid, _kyiv_date()):
+        return await message.answer(ANSWER_LIMIT)
     reply_to = None
     if message.reply_to_message and message.reply_to_message.from_user \
             and message.reply_to_message.from_user.is_bot:
         reply_to = message.reply_to_message.text or message.reply_to_message.caption
+    post, showing = await _feed_post(uid)
     async with lock:
         status = await message.answer("🤔 Аналізую…")
         await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
         try:
-            res = await analyst.answer(uid, message.text, reply_to=reply_to)
+            res = await analyst.answer(uid, message.text, reply_to=reply_to, current_post=post)
+        except analyst.EmptyAnswer as e:
+            logger.error(f"Аналітик без відповіді для {uid}: {e}")
+            await store.add_assistant_usage(uid, _kyiv_date(), e.tokens["in"] + e.tokens["out"])
+            await status.edit_text(ANSWER_CANT)
+            return
         except Exception as e:
-            logger.exception("Помилка аналітика")
+            logger.exception(f"Помилка аналітика для {uid} (request_id={getattr(e, 'request_id', None)})")
             if "connect" in type(e).__name__.lower() or "connection" in str(e).lower():
                 logger.error(f"Модель недоступна: {analyst.client.base_url} — запущена Ollama "
                              f"або правильно задано ASSISTANT_LLM_BASE_URL у .env?")
-            await status.edit_text("Не вдалося отримати відповідь від моделі. Спробуйте трохи пізніше.")
+            await status.edit_text(ANSWER_TEMPORARY_ERROR)
             return
+        await store.add_assistant_usage(uid, _kyiv_date(), res["tokens"]["in"] + res["tokens"]["out"])
         try:
             await status.delete()
         except TelegramBadRequest:
             pass
-        parts = _split_plain(res["text"])
+        text = res["text"] + (f"\n\n{FEED_HINT}" if showing else "")
+        parts = _split_plain(text)
         for i, part in enumerate(parts):
             kb = _answer_keyboard(res["conversation_id"], res["message_id"], None) if i == len(parts) - 1 else None
             await message.answer(part, parse_mode=None, reply_markup=kb)
