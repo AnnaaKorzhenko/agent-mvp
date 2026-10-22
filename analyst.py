@@ -13,11 +13,14 @@ from user_store import digests_collection, posts_collection, users_collection
 
 logger = logging.getLogger("analyst")
 
+MODEL = os.getenv("ASSISTANT_LLM_MODEL") or "gpt-4.1-mini"
+_IS_OPENAI = MODEL.lower().startswith(("gpt-", "o1", "o3", "o4"))
 client = AsyncOpenAI(
-    base_url=os.getenv("ASSISTANT_LLM_BASE_URL") or os.getenv("LLM_BASE_URL") or "http://localhost:11434/v1",
-    api_key=os.getenv("ASSISTANT_LLM_API_KEY") or os.getenv("LLM_API_KEY") or "local",
+
+    base_url=os.getenv("ASSISTANT_LLM_BASE_URL") or (None if _IS_OPENAI else "http://localhost:11434/v1"),
+    api_key=os.getenv("ASSISTANT_LLM_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY") or "local",
+    timeout=60, max_retries=2,
 )
-MODEL = os.getenv("ASSISTANT_LLM_MODEL") or os.getenv("LLM_MODEL") or "qwen2.5:7b-instruct"
 ORG_CONTEXT = os.getenv("ORG_CONTEXT") or (
     "Українська команда в оборонному секторі. Цікавлять: інновації та технології на фронті (дрони, РЕБ, ППО, "
     "робототехніка), інвестиції й фінансування оборонних компаній, оборонна промисловість, держзакупівлі, "
@@ -25,95 +28,87 @@ ORG_CONTEXT = os.getenv("ORG_CONTEXT") or (
 )
 
 MAX_TOOL_ROUNDS = 4
-
-# Ліміт вихідних токенів — фіксований на кожен виклик. У reasoning-моделей (gpt-5*, o*) він спільний
-# для міркувань і тексту: з 4000 міркування інколи забирали все, і відповідь виходила порожньою.
-MAX_OUTPUT_TOKENS = int(os.getenv("ASSISTANT_MAX_OUTPUT_TOKENS", "8000"))            # звичайна розмова
-MAX_OUTPUT_TOKENS_FEED = int(os.getenv("ASSISTANT_MAX_OUTPUT_TOKENS_FEED", "5000"))  # питання про поточну новину
-REASONING_EFFORT = os.getenv("ASSISTANT_REASONING_EFFORT", "low")
-HISTORY_TURNS = int(os.getenv("ASSISTANT_HISTORY_TURNS", "10"))   # останні N пар «питання — відповідь»
-RETRY_HISTORY_MESSAGES = 4
-
-# Новіші моделі OpenAI (gpt-5*, o*) не приймають temperature і max_tokens (замість нього —
-# max_completion_tokens), зате приймають reasoning_effort. Підбираємо за назвою і підлаштовуємось за помилкою API.
-_NEW_STYLE = MODEL.lower().startswith(("gpt-5", "o1", "o3", "o4"))
-GEN_STYLE: dict = {"tokens_key": "max_completion_tokens" if _NEW_STYLE else "max_tokens",
-                   "temperature": None if _NEW_STYLE else 0.3,
-                   "reasoning_effort": REASONING_EFFORT if _NEW_STYLE else None}
+REASONING_EFFORT = os.getenv("ASSISTANT_REASONING_EFFORT") or "low"   # для gpt-5*: менше «роздумів»
+LAST_ANSWER_CHARS = 4000
+OLD_ANSWER_HEAD, OLD_ANSWER_TAIL = 500, 400
+TOOL_RESULT_CHARS = 8000
+HISTORY_MESSAGES = 10
 TODAY_CONTEXT_CHARS = 6000
-POST_CONTEXT_CHARS = 2500
 CATEGORY_LABELS: dict = {}   # бот підставляє свої назви категорій при старті
-FAILED_ANSWER_PREFIXES = ("Не вдалося сформулювати відповідь", "Не встиг зібрати відповідь")
 
-
-class EmptyAnswer(Exception):
-    """Модель не дала тексту (навіть після повтору з коротшою історією)."""
-
-    def __init__(self, reason: str, tokens: dict):
-        super().__init__(reason)
-        self.tokens = tokens
-
-
-def _gen_params(limit: int) -> dict:
-    p = {GEN_STYLE["tokens_key"]: limit}
-    if GEN_STYLE["temperature"] is not None:
-        p["temperature"] = GEN_STYLE["temperature"]
-    if GEN_STYLE["reasoning_effort"]:
-        p["reasoning_effort"] = GEN_STYLE["reasoning_effort"]
-    return p
-
-SYSTEM_PROMPT = """Ти — аналітик-співрозмовник для команди в оборонному секторі України.
+SYSTEM_PROMPT = """Ти — аналітик новин для команди в оборонному секторі України. Говориш з однією людиною в Telegram.
 Про команду: {org}
-Сьогодні: {today} (Київ).
+Сьогодні {today} (Київ).
 
-НОВИНА, ЯКУ ЛЮДИНА ЗАРАЗ ДИВИТЬСЯ
-{current_post}
-
-ПРО ЦЮ ЛЮДИНУ
+ПРО ЛЮДИНУ
 {profile}
 
-ЩО ЇЙ СЬОГОДНІ НАДІСЛАНО І ЧОМУ
+ЩО ЇЙ СЬОГОДНІ НАДІСЛАНО (новина · важливість · чому показана · її оцінка · посилання)
 {today_items}
 
-РАНІШЕ В ЦІЙ РОЗМОВІ
-{summary}
+ЯК ВІДПОВІДАТИ
+1. Перше речення — пряма відповідь на питання. Без вступів («Чудове питання», «Ось що я знайшов»)
+   і без підсумкових блоків наприкінці («Завдяки цьому ви отримуєте…», «Отже…»).
+2. Відповідай лише на те, що спитали. Не додавай розділів, про які не питали, і не повторюй сказане раніше.
+3. Довжина за питанням: просте питання чи уточнення — 1–3 речення; огляд чи аналіз — до 200 слів,
+   кілька пунктів «• ». Більше — лише якщо людина просить детально.
+4. Розмова одна й безперервна. Уточнення («а детальніше?», «а що з цим?», «чому?») — продовження тієї ж теми.
+   Коротка відповідь людини («так», «давай», «ок», «ні», «другий») — це відповідь на твоє останнє
+   повідомлення: якщо ти щось пропонував чи питав — одразу виконай це (не перепитуй і не переказуй
+   попередню відповідь); «ні» — коротко прийми і нічого не роби.
+4а. Наприкінці можна запропонувати один конкретний наступний крок (одне коротке речення), лише якщо він
+   справді корисний. Якщо людина погодиться — виконай саме його.
+5. Звичайний текст українською, без markdown (без **, #, таблиць).
 
-ЯК ПРАЦЮВАТИ
-- Якщо людина пише «це», «про це», «детальніше» чи «а які ризики» без уточнення — йдеться про новину,
-  яку вона зараз дивиться (розділ вище), або про попередню відповідь. Цілі людини — лише додатковий контекст.
-- Відповідай українською, по суті, до 250 слів (якщо не просять докладніше). Без markdown-розмітки.
-- Факти бери лише з даних вище або з інструментів. Якщо для відповіді потрібні новини поза сьогоднішнім
-  переліком — виклич search_news / get_digest / get_trends. Не вигадуй фактів, цифр, назв.
-- Біля фактів давай посилання на джерела (URL з даних).
-- RU-джерела — твердження російських каналів, а не факти; так і подавай.
-- «Чому ти це порадив / чому це тут»: поясни конкретно — обрана сьогодні категорія, бали інтересів людини,
-  важливість, скільки каналів писали, зв'язок з її цілями.
-- «Що буде актуально / прогноз»: спирайся на тренди (get_trends) і факти; подавай як гіпотезу з рівнем
-  упевненості (низька / середня / висока) і що її підтвердить чи спростує.
-- «Що робити»: 3–5 конкретних кроків під цілі людини; це пропозиції, рішення за людиною.
-- Інвестиції: сигнали, аргументи за і проти, ризики — але без прямих порад «купіть / вкладіть».
-- Якщо даних замало — так і скажи і запропонуй, що уточнити."""
+МЕЖІ ТЕМИ
+- Лише оборона, війна й пов'язані новини, цілі людини та цей бот; можна коротко пояснити термін з новини.
+- Інше (рецепти, код, побут тощо) не виконуй навіть частково: одне речення — «це поза моєю темою» +
+  запропонуй щось із її новин. Привітання й подяка — нормально.
+
+ФАКТИ І ДЖЕРЕЛА
+- Факти — лише з даних вище або з інструментів. Не вигадуй цифр, назв, дат. Якщо даних немає —
+  скажи одним реченням і, за потреби, що можна пошукати.
+- Після кожного факту став голий URL з даних (без слова «Джерело» і без дужок) — бот сам покаже його як «Джерело».
+- RU-джерела — це твердження російських каналів, а не факти: «рос. канали заявляють, що…».
+
+КОЛИ ШУКАТИ В БАЗІ
+- Привітання, подяка, коротка репліка, питання про сьогоднішні новини, які вже є вище — без інструментів.
+- Інша тема чи інший період — search_news (ключові слова, 2–4 найважливіші). Готове зведення — get_digest.
+  Що набирає обертів, прогноз — get_trends.
+- Не повторюй той самий пошук. Якщо перший нічого не дав — спробуй інші слова або більший період один раз.
+
+ОСОБЛИВІ ПИТАННЯ
+- «Чому ти це порадив / чому це тут»: обрана сьогодні категорія, бали інтересу, важливість,
+  скільки каналів писали, зв'язок з її цілями — конкретно, з даних вище.
+- Прогноз: гіпотеза + упевненість (низька / середня / висока) + що її підтвердить чи спростує.
+  Якщо get_trends пише, що за попередній період замало даних, — не роби висновків про зростання.
+- «Що робити»: 2–4 конкретні кроки під її цілі; рішення за людиною.
+- Інвестиції: сигнали, аргументи за і проти, ризики. Без порад «купіть / вкладіть»."""
 
 TOOLS = [
     {"type": "function", "function": {
         "name": "search_news",
-        "description": "Пошук новин у базі за ключовими словами. Повертає самарі, дату, важливість, сторону, посилання.",
+        "description": "Пошук новин у базі за ключовими словами за останні N днів. Повертає самарі, дату, "
+                       "важливість (1–5), сторону (ua/ru) і посилання.",
         "parameters": {"type": "object", "properties": {
-            "query": {"type": "string", "description": "ключові слова, напр. 'Brave1 гранти' або 'морські дрони'"},
+            "query": {"type": "string",
+                      "description": "2–4 ключові слова українською, напр. 'Brave1 гранти' або 'морські дрони'"},
             "days": {"type": "integer", "description": "за скільки останніх днів шукати (1–30)", "default": 7},
-            "side": {"type": "string", "enum": ["ua", "ru", "all"], "default": "all"},
+            "side": {"type": "string", "enum": ["ua", "ru", "all"], "default": "all",
+                     "description": "ua — українські джерела, ru — російські, all — усі"},
             "category": {"type": "string", "description": "необов'язково: ключ категорії"},
         }, "required": ["query"]}}},
     {"type": "function", "function": {
         "name": "get_digest",
-        "description": "Останнє готове зведення за добу або тиждень (пункти з джерелами).",
+        "description": "Останнє готове зведення за добу або тиждень (пункти з посиланнями).",
         "parameters": {"type": "object", "properties": {
             "period": {"type": "string", "enum": ["day", "week"]},
             "side": {"type": "string", "enum": ["ua", "ru"]},
         }, "required": ["period", "side"]}}},
     {"type": "function", "function": {
         "name": "get_trends",
-        "description": "Які категорії й теми частіше чи рідше згадуються за останні N днів порівняно з попередніми N днями.",
+        "description": "Скільки згадок мають категорії й теми за останні N днів порівняно з попередніми N днями — "
+                       "для питань «що набирає обертів», «що буде актуально».",
         "parameters": {"type": "object", "properties": {
             "days": {"type": "integer", "default": 7},
             "side": {"type": "string", "enum": ["ua", "ru"], "default": "ua"},
@@ -121,9 +116,6 @@ TOOLS = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Інструменти (запити до бази)
-# ---------------------------------------------------------------------------
 
 def _since(days: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(days=max(1, min(int(days or 7), 30)))).isoformat()
@@ -142,7 +134,7 @@ async def tool_search_news(query: str, days: int = 7, side: str = "all", categor
         return {"results": [], "note": "порожній запит"}
     rx = [{"$regex": re.escape(w[:max(4, len(w) - 2)]), "$options": "i"} for w in words]  # грубий «стемінг»
     q = {**_base_filter(side), "published_at": {"$gte": _since(days)},
-         "$or": [{f: r} for r in rx for f in ("summary", "clean_text", "tags")]}
+         "$or": [{f: r} for r in rx for f in ("summary", "tags")]}
     if category:
         q["category"] = category
     docs = await posts_collection.find(
@@ -184,15 +176,18 @@ async def tool_get_trends(days: int = 7, side: str = "ua") -> dict:
                 for k, v in cur.items()]
         rows.sort(key=lambda r: -r["now"])
         out[field] = rows[:15]
-    return {"period_days": days, "side": side, **out}
+    total_now = sum(r["now"] for r in out["category"])
+    total_before = sum(r["before"] for r in out["category"])
+    result = {"period_days": days, "side": side, "posts_now": total_now, "posts_before": total_before, **out}
+    if total_before < total_now * 0.3:
+        result["note"] = ("За попередній період у базі замало даних — порівняння ненадійне, "
+                          "висновків про зростання чи спад не роби.")
+    return result
 
 
 TOOL_FUNCS = {"search_news": tool_search_news, "get_digest": tool_get_digest, "get_trends": tool_get_trends}
 
 
-# ---------------------------------------------------------------------------
-# Що людині сьогодні надіслано і чому
-# ---------------------------------------------------------------------------
 
 def _label(side: str, cat: str) -> str:
     return CATEGORY_LABELS.get(side, {}).get(cat, cat)
@@ -247,153 +242,233 @@ def _clean(answer: str) -> str:
     return answer.strip()
 
 
-def _sanitize_history(messages: list[dict]) -> list[dict]:
-    """Валідна історія для API: без порожніх і невдалих відповідей, без двох однакових ролей поспіль."""
-    out: list[dict] = []
-    for m in messages:
-        content = (m.get("content") or "").strip()
-        if m.get("role") not in ("user", "assistant") or not content:
+# ---------------------------------------------------------------------------
+# Виклик моделі: підлаштування під параметри моделі + облік токенів
+# ---------------------------------------------------------------------------
+
+_NEW_STYLE = MODEL.lower().startswith(("gpt-5", "o1", "o3", "o4"))
+_DROPPED: set[str] = set()   # параметри, які модель відхилила (пам'ятаємо до перезапуску)
+
+
+def _params() -> dict:
+    p: dict = {}
+    if _NEW_STYLE or "max_tokens" in _DROPPED:
+        p["max_completion_tokens"] = 8000 if _NEW_STYLE else 900   # у gpt-5 сюди входять і «роздуми»
+    else:
+        p["max_tokens"] = 1200
+    if not _NEW_STYLE and "temperature" not in _DROPPED:
+        p["temperature"] = 0.3
+    if _NEW_STYLE and REASONING_EFFORT and "reasoning_effort" not in _DROPPED:
+        p["reasoning_effort"] = REASONING_EFFORT
+    return p
+
+
+async def _complete(messages: list, usage: dict, tools: list | None):
+    for _ in range(5):
+        kwargs = {"model": MODEL, "messages": messages, **_params()}
+        if tools and "tools" not in _DROPPED:
+            kwargs["tools"] = tools
+        try:
+            resp = await client.chat.completions.create(**kwargs)
+        except Exception as e:
+            err = str(e).lower()
+            bad = next((p for p in ("max_tokens", "temperature", "reasoning_effort", "tools")
+                        if f"'{p}'" in err and p not in _DROPPED), None)
+            if not bad and "does not support tools" in err:          # так пише Ollama
+                bad = "tools"
+            if not bad or bad in _DROPPED:
+                raise
+            _DROPPED.add(bad)
+            logger.warning(f"Модель {MODEL} відхилила параметр {bad} — працюю без нього")
             continue
-        if m["role"] == "assistant" and content.startswith(FAILED_ANSWER_PREFIXES):
+        u = getattr(resp, "usage", None)
+        if u:
+            usage["prompt"] += u.prompt_tokens or 0
+            usage["completion"] += u.completion_tokens or 0
+        usage["calls"] += 1
+        return resp
+    raise RuntimeError("не вдалося підібрати параметри моделі")
+
+
+def _log_empty(resp, where: str) -> None:
+    reason = getattr(resp.choices[0], "finish_reason", None)
+    u = getattr(resp, "usage", None)
+    details = getattr(u, "completion_tokens_details", None) if u else None
+    logger.warning(f"Порожня відповідь моделі ({where}): finish_reason={reason}, "
+                   f"completion_tokens={getattr(u, 'completion_tokens', None)}, "
+                   f"reasoning_tokens={getattr(details, 'reasoning_tokens', None) if details else None}"
+                   + (" — ліміт токенів з'їли «роздуми» моделі" if reason == "length" else ""))
+
+
+_TEXT_CALL = re.compile(r'\{\s*"name"\s*:\s*"(\w+)"\s*,\s*"arguments"\s*:\s*(\{.*?\})\s*\}', re.S)
+
+
+def _text_tool_call(content: str | None):
+    """qwen в Ollama іноді пише виклик інструмента текстом, а не через tool_calls."""
+    m = _TEXT_CALL.search(content or "")
+    if m and m.group(1) in TOOL_FUNCS:
+        try:
+            return m.group(1), json.loads(m.group(2))
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+async def _run_tool(name: str, args: dict, sources: list, tool_log: list) -> str:
+    fn = TOOL_FUNCS.get(name)
+    try:
+        result = await fn(**args) if fn else {"error": "невідомий інструмент"}
+    except Exception as e:
+        logger.warning(f"Інструмент {name}: {e}")
+        result = {"error": str(e)[:200]}
+    tool_log.append({"name": name, "args": json.dumps(args, ensure_ascii=False)})
+    for r in result.get("results", []) + result.get("items", []):
+        for u in ([r.get("url")] if r.get("url") else r.get("urls", [])):
+            if u:
+                sources.append(u)
+    return json.dumps(result, ensure_ascii=False, default=str)[:TOOL_RESULT_CHARS]
+
+
+async def _llm_answer(base: list, usage: dict, sources: list, tool_log: list) -> str:
+    """Відповідь моделі. Повертає "" якщо модель так і не відповіла."""
+    messages = list(base)
+    text = ""
+    for step in range(MAX_TOOL_ROUNDS + 1):
+        last = step == MAX_TOOL_ROUNDS          # останній крок — лише відповідь, без інструментів
+        resp = await _complete(messages, usage, None if last else TOOLS)
+        msg = resp.choices[0].message
+        calls = getattr(msg, "tool_calls", None) or []
+        if calls:
+            messages.append({"role": "assistant", "content": msg.content or "",
+                             "tool_calls": [tc.model_dump() for tc in calls]})
+            for tc in calls:
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                messages.append({"role": "tool", "tool_call_id": tc.id,
+                                 "content": await _run_tool(tc.function.name, args, sources, tool_log)})
             continue
-        if out and out[-1]["role"] == m["role"]:
-            out[-1] = {"role": m["role"], "content": f"{out[-1]['content']}\n\n{content}"}
-        else:
-            out.append({"role": m["role"], "content": content})
-    return out
+        call = None if last else _text_tool_call(msg.content)
+        if call:
+            result = await _run_tool(call[0], call[1], sources, tool_log)
+            messages.append({"role": "assistant", "content": msg.content})
+            messages.append({"role": "user", "content": f"Дані ({call[0]}):\n{result}\n\nТепер дай відповідь на моє питання."})
+            continue
+        text = _clean(msg.content)
+        if not text:
+            _log_empty(resp, f"крок {step}")
+        break
+
+    if not text:   # запасна спроба 1: без інструментів, з прямим проханням відповісти
+        resp = await _complete(messages + [{"role": "user", "content":
+                               "Відповідай на моє питання зараз, коротко, на основі того, що вже є."}], usage, None)
+        text = _clean(resp.choices[0].message.content)
+        if not text:
+            _log_empty(resp, "запасна спроба 1")
+    if not text:   # запасна спроба 2: просто розмова, без даних інструментів
+        resp = await _complete(base, usage, None)
+        text = _clean(resp.choices[0].message.content)
+        if not text:
+            _log_empty(resp, "запасна спроба 2")
+    return text
 
 
-async def _older_turns_summary(conv_id, keep: int) -> str:
-    """Короткий підсумок старших реплік (без виклику моделі): які питання людина ставила раніше."""
-    doc = await store.conversations.find_one({"_id": conv_id}, {"messages.role": 1, "messages.content": 1}) or {}
-    older = (doc.get("messages") or [])[:-keep] if keep else []
-    questions = [" ".join((m.get("content") or "").split())[:150] for m in older if m.get("role") == "user"]
-    summary = ("Людина раніше питала: " + "; ".join(questions[-15:])) if questions else ""
-    if summary:
-        await store.conversations.update_one({"_id": conv_id}, {"$set": {"summary": summary}})
-    return summary
+FALLBACK_HEAD = "Аналітик зараз недоступний"
+_SMALL_TALK = re.compile(r"^\W*(привіт\w*|вітаю|добр\w+ (ранку|день|вечір|ніч)|хай|hello|hi|дяку\w*|спасибі|"
+                         r"ок(ей)?|ага|зрозуміл\w*|супер|клас)\W*$", re.I)
+_STOP = set("що як де коли чому хто який яка яке які мені мене мій моя мої про для від цей ця це ці там тут "
+            "було буде є був була були зараз сьогодні тиждень тижня день дня новини новин новина розкажи покажи "
+            "скажи можеш можна треба щось також або але чи так ні the and".split())
 
 
-async def _current_post_block(post: dict | None) -> str:
-    if not post:
-        return "Зараз людина не дивиться окрему новину."
-    lines = [f"[{(post.get('side') or '').upper()} · {_label(post.get('side'), post.get('category'))}] {post.get('text', '')}"]
-    if post.get("source_urls"):
-        lines.append("Посилання: " + " ".join(post["source_urls"][:3]))
-    ids = post.get("source_post_ids") or []
-    if ids:
-        lines.append("post_ids: " + ", ".join(str(i) for i in ids))
-        details = []
-        async for p in posts_collection.find({"_id": {"$in": ids}}, {"summary": 1, "clean_text": 1, "post_url": 1}):
-            text = " ".join((p.get("clean_text") or "").split())[:POST_CONTEXT_CHARS // max(1, len(ids))]
-            details.append(f"- {p.get('summary') or ''}\n  Текст поста: {text}" if text else f"- {p.get('summary') or ''}")
-        if details:
-            lines.append("Що пишуть джерела:\n" + "\n".join(details))
+async def _fallback(question: str) -> str:
+    if _SMALL_TALK.match(question.strip()):
+        return (f"{FALLBACK_HEAD}, але бот працює: новини — /all_day, /today, налаштування — /mode, /goals. "
+                "Спробуйте написати питання трохи пізніше.")
+    words = [w for w in re.findall(r"\w{3,}", question.lower(), flags=re.U) if w not in _STOP][:6]
+    docs, title = [], ""
+    proj = {"summary": 1, "source_side": 1, "post_url": 1}
+    if words:
+        rx = [{"$regex": re.escape(w[:max(4, len(w) - 2)]), "$options": "i"} for w in words]
+        q = {**_base_filter(None), "published_at": {"$gte": _since(7)},
+             "$or": [{f: r} for r in rx for f in ("summary", "tags")]}
+        docs = await posts_collection.find(q, proj).sort([("importance", -1), ("published_at", -1)]).limit(5).to_list(5)
+        title = "Ось що є в базі по темі за тиждень:"
+    if not docs:
+        docs = await posts_collection.find({**_base_filter(None), "published_at": {"$gte": _since(1)}}, proj) \
+            .sort([("importance", -1), ("published_at", -1)]).limit(5).to_list(5)
+        title = "По темі нічого не знайшов. Найважливіше за добу:"
+    if not docs:
+        return f"{FALLBACK_HEAD}, і свіжих новин у базі поки немає. Спробуйте трохи пізніше."
+    lines = [f"{FALLBACK_HEAD} — спробуйте пізніше. {title}"]
+    for d in docs:
+        side = " (рос. джерело — їхнє твердження)" if d.get("source_side") == "ru" else ""
+        lines.append(f"• {d.get('summary')}{side}" + (f"\n  {d['post_url']}" if d.get("post_url") else ""))
     return "\n".join(lines)
 
 
-async def _create(kwargs: dict, purpose: str, attempt: int):
-    """Один виклик моделі з журналом: модель, токени, причина завершення, довжина тексту, request id."""
-    try:
-        resp = await client.chat.completions.create(**kwargs)
-    except Exception as e:
-        logger.error(f"LLM error purpose={purpose} attempt={attempt} model={kwargs['model']} "
-                     f"request_id={getattr(e, 'request_id', None)} {type(e).__name__}: {e}")
-        raise
-    choice, usage = resp.choices[0], resp.usage
-    details = getattr(usage, "completion_tokens_details", None)
-    logger.info(f"LLM call purpose={purpose} attempt={attempt} model={resp.model} request_id={getattr(resp, '_request_id', None)} "
-                f"finish={choice.finish_reason} in={getattr(usage, 'prompt_tokens', None)} "
-                f"out={getattr(usage, 'completion_tokens', None)} reasoning={getattr(details, 'reasoning_tokens', None)} "
-                f"text_len={len(choice.message.content or '')} tool_calls={len(choice.message.tool_calls or [])} "
-                f"limit={kwargs.get(GEN_STYLE['tokens_key'])}")
-    return resp
+# ---------------------------------------------------------------------------
+# Відповідь
+# ---------------------------------------------------------------------------
 
-
-async def answer(user_id: int, question: str, reply_to: str | None = None, current_post: dict | None = None) -> dict:
-    """Повертає {"text", "conversation_id", "message_id", "tokens"}; EmptyAnswer, якщо модель не дала тексту.
-
-    current_post — новина, яку людина зараз бачить у стрічці (digest_id, n, side, category, text,
-    source_urls, source_post_ids); «це» / «про це» стосується її.
-    """
-    user = await users_collection.find_one({"_id": user_id}) or {"_id": user_id}
-    profile = await store.llm_user_profile(user_id, CATEGORY_LABELS) or "Профіль ще порожній."
-    conv = await store.get_or_start_conversation(user_id, title=question)
-    keep = HISTORY_TURNS * 2
-    history = _sanitize_history(await store.conversation_history(conv["_id"], limit=keep))
-    summary = await _older_turns_summary(conv["_id"], keep) or "—"
-
-    system = SYSTEM_PROMPT.format(
-        org=ORG_CONTEXT, today=datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%d.%m.%Y"),
-        current_post=await _current_post_block(current_post),
-        profile=profile, today_items=await today_items(user), summary=summary)
-    user_msg = question if not reply_to else f"(Відповідь на повідомлення бота: «{reply_to[:1500]}»)\n{question}"
-    purpose = "feed" if current_post else "chat"
-    limit = MAX_OUTPUT_TOKENS_FEED if current_post else MAX_OUTPUT_TOKENS
-
-    def base_messages(hist: list[dict]) -> list[dict]:
-        return [{"role": "system", "content": system}, *_sanitize_history(hist + [{"role": "user", "content": user_msg}])]
-
-    messages = base_messages(history)
-    await store.add_message(conv["_id"], user_id, "user", user_msg)
-
-    sources, tool_log, use_tools, retried = [], [], True, False
-    tokens = {"in": 0, "out": 0}
-    text = None
-    for attempt in range(1, MAX_TOOL_ROUNDS + 5):
-        kwargs = {"model": MODEL, "messages": messages, **_gen_params(limit)}
-        if use_tools:
-            kwargs["tools"] = TOOLS
-        try:
-            resp = await _create(kwargs, purpose, attempt)
-        except Exception as e:
-            err = str(e).lower()
-            if "max_tokens" in err and GEN_STYLE["tokens_key"] == "max_tokens":   # модель хоче max_completion_tokens
-                GEN_STYLE["tokens_key"] = "max_completion_tokens"
-                continue
-            if "temperature" in err and GEN_STYLE["temperature"] is not None:   # модель не приймає temperature
-                GEN_STYLE["temperature"] = None
-                continue
-            if "reasoning_effort" in err and GEN_STYLE["reasoning_effort"]:     # модель не приймає reasoning_effort
-                GEN_STYLE["reasoning_effort"] = None
-                continue
-            if use_tools and "tool" in err:   # модель не вміє інструменти — працюємо без них
-                logger.warning(f"Модель {MODEL} не підтримує інструменти, відповідаю без них")
-                use_tools = False
-                continue
-            raise
-        tokens["in"] += getattr(resp.usage, "prompt_tokens", 0) or 0
-        tokens["out"] += getattr(resp.usage, "completion_tokens", 0) or 0
-        msg = resp.choices[0].message
-        if not getattr(msg, "tool_calls", None):
-            text = _clean(msg.content)
-            if text:
-                break
-            if retried:
-                raise EmptyAnswer(f"empty output after retry (finish={resp.choices[0].finish_reason})", tokens)
-            logger.warning(f"LLM empty output (finish={resp.choices[0].finish_reason}); retry with shorter history")
-            retried = True
-            messages = base_messages(history[-RETRY_HISTORY_MESSAGES:])
+async def _history(user: dict) -> list[dict]:
+    history = await store.chat_history(user["_id"], HISTORY_MESSAGES, since=user.get("chat_topic_from"))
+    last_assistant = max((i for i, m in enumerate(history) if m["role"] == "assistant"), default=-1)
+    for i, m in enumerate(history):
+        if m["role"] != "assistant":
             continue
-        messages.append({"role": "assistant", "content": msg.content or "",
-                         "tool_calls": [tc.model_dump() for tc in msg.tool_calls]})
-        for tc in msg.tool_calls:
-            fn = TOOL_FUNCS.get(tc.function.name)
-            try:
-                args = json.loads(tc.function.arguments or "{}")
-                result = await fn(**args) if fn else {"error": "невідомий інструмент"}
-            except Exception as e:
-                logger.warning(f"Інструмент {tc.function.name}: {e}")
-                result = {"error": str(e)[:200]}
-            tool_log.append({"name": tc.function.name, "args": tc.function.arguments})
-            for r in result.get("results", []) + result.get("items", []):
-                for u in ([r.get("url")] if r.get("url") else r.get("urls", [])):
-                    sources.append({"url": u})
-            messages.append({"role": "tool", "tool_call_id": tc.id,
-                             "content": json.dumps(result, ensure_ascii=False, default=str)[:12000]})
-    else:
-        raise EmptyAnswer("too many tool rounds", tokens)
+        c = m["content"]
+        if i == last_assistant:
+            m["content"] = c[:LAST_ANSWER_CHARS]
+        elif len(c) > OLD_ANSWER_HEAD + OLD_ANSWER_TAIL:
+            # кінець теж лишаємо — там зазвичай питання чи пропозиція до людини
+            m["content"] = c[:OLD_ANSWER_HEAD] + " … " + c[-OLD_ANSWER_TAIL:]
+    return history
 
-    msg_id = await store.add_message(conv["_id"], user_id, "assistant", text,
-                                     sources=sources[:30], tool_calls=tool_log, model=MODEL, tokens=tokens)
-    return {"text": text, "conversation_id": conv["_id"], "message_id": msg_id, "tokens": tokens}
+
+async def answer(user_id: int, question: str, reply_to: str | None = None) -> dict:
+    """Завжди повертає {"text", "message_id", "tokens", "fallback"}."""
+    usage = {"prompt": 0, "completion": 0, "calls": 0}
+    sources, tool_log = [], []
+    text = ""
+    try:
+        user = await users_collection.find_one({"_id": user_id}) or {"_id": user_id}
+        profile = await store.llm_user_profile(user_id, CATEGORY_LABELS) or "Профіль ще порожній."
+        history = await _history(user)
+        system = SYSTEM_PROMPT.format(
+            org=ORG_CONTEXT, today=datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%d.%m.%Y"),
+            profile=profile, today_items=await today_items(user))
+        user_msg = question if not reply_to else f"(Відповідь на повідомлення бота: «{reply_to[:1500]}»)\n{question}"
+        base = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_msg}]
+        await store.add_chat_message(user_id, "user", question, reply_to=(reply_to or "")[:1500] or None)
+        text = await _llm_answer(base, usage, sources, tool_log)
+        if not text:
+            logger.error(f"[{user_id}] модель тричі повернула порожню відповідь — відповідаю без моделі")
+    except Exception as e:
+        logger.exception(f"[{user_id}] модель недоступна ({type(e).__name__}: {str(e)[:200]}) — відповідаю без моделі")
+        if "connect" in type(e).__name__.lower() or "connection" in str(e).lower():
+            logger.error(f"Перевірте адресу моделі: {client.base_url} (Ollama запущена? ASSISTANT_LLM_BASE_URL у .env?)")
+
+    fallback = not text
+    if fallback:
+        try:
+            text = await _fallback(question)
+        except Exception:
+            logger.exception("Запасна відповідь теж не вдалася")
+            text = f"{FALLBACK_HEAD}. Новини доступні командами /all_day і /today — спробуйте трохи пізніше."
+
+    tokens = {**usage, "total": usage["prompt"] + usage["completion"], "tool_calls": len(tool_log)}
+    msg_id = None
+    try:
+        msg_id = await store.add_chat_message(user_id, "assistant", text, sources=list(dict.fromkeys(sources))[:30],
+                                              tool_calls=tool_log, model=MODEL, tokens=tokens, fallback=fallback)
+        month = datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%Y-%m")
+        await users_collection.update_one({"_id": user_id}, {"$inc": {
+            "usage.tokens_total": tokens["total"], "usage.questions": 1,
+            f"usage.by_month.{month}.tokens": tokens["total"], f"usage.by_month.{month}.questions": 1}})
+    except Exception:
+        logger.exception("Не вдалося зберегти відповідь у базу")
+    logger.info(f"[{user_id}] інструментів {len(tool_log)}, токенів {tokens['total']}"
+                + (" — ВІДПОВІДЬ БЕЗ МОДЕЛІ" if fallback else ""))
+    return {"text": text, "message_id": msg_id, "tokens": tokens, "fallback": fallback}

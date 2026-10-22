@@ -1,3 +1,4 @@
+
 import asyncio
 import html
 import logging
@@ -5,13 +6,12 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatAction, ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import (BotCommand, CallbackQuery, InlineKeyboardButton,
+from aiogram.types import (BotCommand, CallbackQuery, ErrorEvent, InlineKeyboardButton,
                            InlineKeyboardMarkup, Message, User)
 from bson import ObjectId
 
@@ -21,17 +21,10 @@ from user_store import digests_collection, news_sessions, users_collection
 
 
 import threading
-from http.server import SimpleHTTPRequestHandler, HTTPServer
-
-def run_keep_alive_server():
-
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
-    print(f"Keep-alive server online on port {port}")
-    server.serve_forever()
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
-threading.Thread(target=run_keep_alive_server, daemon=True).start()
+
 
 
 
@@ -78,7 +71,7 @@ HELP = (
     "<b>усі одразу</b> одним списком або <b>по одній</b> з кнопками 👍 / 👎 / ⏭ "
     "(наступна приходить після вашої оцінки). З ваших виборів і оцінок я вчуся, що вам важливо.\n\n"
     "/all_day — усе за добу (UA + RU)\n"
-    "/day — українські джерела за добу\n"
+    "/ua_day — українські джерела за добу\n"
     "/ru_day — російські джерела за добу\n"
     "/all_week, /week, /ru_week — те саме за тиждень\n\n"
     "<b>Питайте мене звичайними словами</b> — я аналітик по цих новинах:\n"
@@ -86,12 +79,32 @@ HELP = (
     "• чому ти порадив цю новину? (можна відповісти Reply на саму новину)\n"
     "• що зараз набирає обертів і що буде актуально?\n"
     "• що було про інвестиції в дрони за тиждень?\n\n"
-    "/new — почати нову розмову\n"
+    "Писати можна будь-коли — навіть посеред новин: після відповіді я поверну вас до неоцінених.\n"
+    "/chat — нова тема розмови (історія зберігається)\n"
     "/today — обрати категорії й отримати зведення зараз\n"
     "/mode — як надсилати новини: усі одразу чи по одній\n"
     "/goals — ваші цілі\n"
-    "/id — ваш Telegram ID"
+
 )
+
+class _HealthHandler(BaseHTTPRequestHandler):
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    do_HEAD = do_GET
+
+    def log_message(self, *args):
+        pass
+
+
+def run_keep_alive_server() -> None:
+    port = int(os.environ["PORT"])
+    logger.info(f"Keep-alive на порту {port}")
+    HTTPServer(("0.0.0.0", port), _HealthHandler).serve_forever()
 
 
 def _is_allowed(user_id: int | None) -> bool:
@@ -308,7 +321,7 @@ async def send_news(bot: Bot, user: dict, docs: list, today: dict | None = None,
     await _send_current(bot, session)
 
 
-async def _send_current(bot: Bot, session: dict) -> None:
+async def _send_current(bot: Bot, session: dict, with_header: bool = True) -> None:
 
     uid, sid = session["_id"], session["session_id"]
     queue, pos = session["queue"], session["pos"]
@@ -329,13 +342,13 @@ async def _send_current(bot: Bot, session: dict) -> None:
         session = await news_sessions.find_one_and_update(
             {"_id": uid, "session_id": sid, "pos": pos}, {"$inc": {"pos": 1}, "$set": {"updated_at": now}},
             return_document=True)
-        return await _send_current(bot, session) if session else None
+        return await _send_current(bot, session, with_header) if session else None
     item["starred"] = entry["starred"]
     key = _item_key(item["digest_id"], item["n"])
 
     await news_sessions.update_one({"_id": uid, "session_id": sid},
                                    {"$set": {"current": key, "updated_at": now}})
-    if entry.get("header"):
+    if with_header and entry.get("header"):
         await _send(bot, uid, entry["header"])
     reaction = await store.get_reaction(uid, item["digest_id"], item["n"])
     await _send(bot, uid, _news_text(item), reply_markup=_news_keyboard(item, reaction))
@@ -517,11 +530,7 @@ async def on_comment_not_text(message: Message) -> None:
 
 
 async def comment_timeout_middleware(handler, event, data):
-    """Ліниво закриває прострочене очікування коментаря перед будь-якою взаємодією людини.
 
-    Сама взаємодія обробляється як звичайно (пізній текст іде аналітику, а не в старий коментар),
-    а після неї надсилаємо наступну новину старої сесії — якщо обробник не почав нову.
-    """
     user = data.get("event_from_user")
     expired = None
     if user:
@@ -545,8 +554,8 @@ dp.callback_query.outer_middleware(comment_timeout_middleware)
 _ask_locks: dict[int, asyncio.Lock] = {}
 
 
-def _answer_keyboard(conv_id, msg_id, reaction: str | None) -> InlineKeyboardMarkup:
-    base = f"ar:{conv_id}:{msg_id}"
+def _answer_keyboard(msg_id, reaction: str | None) -> InlineKeyboardMarkup:
+    base = f"ar:{msg_id}"
     return InlineKeyboardMarkup(inline_keyboard=[[
         _btn("👍 Корисна відповідь", f"{base}:l", reaction == "like", "success"),
         _btn("👎 Не те", f"{base}:d", reaction == "dislike", "danger"),
@@ -564,27 +573,23 @@ def _split_plain(text: str, limit: int = TG_LIMIT) -> list[str]:
     return parts + ([cur] if cur else [])
 
 
-ANSWER_TEMPORARY_ERROR = "Тимчасова помилка з'єднання з моделлю. Спробуйте ще раз за хвилину."
-ANSWER_CANT = "Не вийшло відповісти на це питання — спробуйте сформулювати коротше або конкретніше."
-ANSWER_LIMIT = "На сьогодні ліміт запитань до аналітика вичерпано — повертайтеся завтра. Стрічка новин і оцінки працюють як завжди."
-FEED_HINT = "Оцініть новину вище, щоб отримати наступну"
+_URL = re.compile(r"(?:(?:\(\s*)?(?:Джерело|Джерела|Source)\s*[:—-]?\s*)?\(?(https?://[^\s<>()«»\"']+)\)?", re.I)
 
 
-async def _feed_post(uid: int) -> tuple[dict | None, bool]:
-    """Новина, яку людина зараз бачить у стрічці, і чи чекають на неї оцінку (кнопки 👍 / 👎 / ⏭)."""
-    session = await news_sessions.find_one({"_id": uid, "status": "active"}, {"current": 1, "awaiting_comment": 1})
-    if not session:
-        return None, False
-    aw = session.get("awaiting_comment")
-    if session.get("current"):
-        did, n = session["current"].split(":")
-        did, n, showing = ObjectId(did), int(n), True
-    elif aw:
-        did, n, showing = aw["digest_id"], aw["item_n"], False
-    else:
-        return None, False
-    doc = await digests_collection.find_one({"_id": did}, {"sections": 1, "side": 1})
-    return (find_item(doc, n) if doc else None), showing
+def _answer_html(text: str) -> str:
+
+    def link(m: re.Match) -> str:
+        url = m.group(1).rstrip(".,;:!?")
+        tail = m.group(1)[len(url):]
+        return f'(<a href="{url}">Джерело</a>){tail}'
+    return _URL.sub(link, html.escape(text, quote=False))
+
+
+async def _send_answer(message: Message, text: str, reply_markup=None) -> None:
+    try:
+        await message.answer(_answer_html(text), reply_markup=reply_markup)
+    except TelegramBadRequest:          # якщо HTML не сподобався Telegram — надсилаємо як є
+        await message.answer(text, parse_mode=None, reply_markup=reply_markup)
 
 
 @dp.message(F.text & ~F.text.startswith("/"))
@@ -596,60 +601,95 @@ async def on_question(message: Message) -> None:
     lock = _ask_locks.setdefault(uid, asyncio.Lock())
     if lock.locked():
         return await message.answer("Ще думаю над попереднім питанням — хвилинку…")
-    if not await store.assistant_budget_ok(uid, _kyiv_date()):
-        return await message.answer(ANSWER_LIMIT)
     reply_to = None
     if message.reply_to_message and message.reply_to_message.from_user \
             and message.reply_to_message.from_user.is_bot:
         reply_to = message.reply_to_message.text or message.reply_to_message.caption
-    post, showing = await _feed_post(uid)
+
+
+    closed = await _close_comment({"_id": uid, "awaiting_comment.stage": "offer"}, uid, {"comment_status": "no_comment"})
+    if closed:
+        await _delete_prompts(message.bot, uid, closed["awaiting_comment"], None)
+
     async with lock:
         status = await message.answer("🤔 Аналізую…")
-        await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
         try:
-            res = await analyst.answer(uid, message.text, reply_to=reply_to, current_post=post)
-        except analyst.EmptyAnswer as e:
-            logger.error(f"Аналітик без відповіді для {uid}: {e}")
-            await store.add_assistant_usage(uid, _kyiv_date(), e.tokens["in"] + e.tokens["out"])
-            await status.edit_text(ANSWER_CANT)
-            return
-        except Exception as e:
-            logger.exception(f"Помилка аналітика для {uid} (request_id={getattr(e, 'request_id', None)})")
-            if "connect" in type(e).__name__.lower() or "connection" in str(e).lower():
-                logger.error(f"Модель недоступна: {analyst.client.base_url} — запущена Ollama "
-                             f"або правильно задано ASSISTANT_LLM_BASE_URL у .env?")
-            await status.edit_text(ANSWER_TEMPORARY_ERROR)
-            return
-        await store.add_assistant_usage(uid, _kyiv_date(), res["tokens"]["in"] + res["tokens"]["out"])
+            await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+        except Exception:
+            pass
+        try:
+            res = await analyst.answer(uid, message.text, reply_to=reply_to)
+        except Exception:
+            logger.exception("Аналітик повністю недоступний")
+            res = {"text": "Зараз не можу відповісти — технічна проблема. Спробуйте за кілька хвилин.",
+                   "message_id": None, "fallback": True}
         try:
             await status.delete()
-        except TelegramBadRequest:
+        except Exception:
             pass
-        text = res["text"] + (f"\n\n{FEED_HINT}" if showing else "")
-        parts = _split_plain(text)
+        parts = _split_plain(res["text"])
         for i, part in enumerate(parts):
-            kb = _answer_keyboard(res["conversation_id"], res["message_id"], None) if i == len(parts) - 1 else None
-            await message.answer(part, parse_mode=None, reply_markup=kb)
+            last = i == len(parts) - 1
+            kb = _answer_keyboard(res["message_id"], None) if last and res.get("message_id") \
+                and not res.get("fallback") else None
+            await _send_answer(message, part, kb)
+    await _resume_news(message.bot, uid)
+
+
+async def _resume_news(bot: Bot, uid: int) -> None:
+
+    try:
+        s = await news_sessions.find_one({"_id": uid, "status": "active", "awaiting_comment": {"$exists": False}})
+        if not s or len(s["queue"]) - s["pos"] <= 0:
+            return
+        await _send(bot, uid, f"↩️ Повертаємось до новин — залишилось {len(s['queue']) - s['pos']}")
+        await _send_current(bot, s, with_header=False)
+    except Exception:
+        logger.exception(f"Не вдалося повернути до новин {uid}")
 
 
 @dp.callback_query(F.data.startswith("ar:"))
 async def on_answer_rating(cq: CallbackQuery) -> None:
-    _, conv_id, msg_id, code = cq.data.split(":")
-    reaction = {"l": "like", "d": "dislike"}[code]
-    await store.set_message_reaction(ObjectId(conv_id), ObjectId(msg_id), cq.from_user.id, reaction)
+    parts = cq.data.split(":")
+    reaction = {"l": "like", "d": "dislike"}.get(parts[-1])
+    if not reaction:
+        return await cq.answer()
+    if len(parts) == 4:
+        await store.set_message_reaction(ObjectId(parts[1]), ObjectId(parts[2]), cq.from_user.id, reaction)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            _btn("👍 Корисна відповідь", f"ar:{parts[1]}:{parts[2]}:l", reaction == "like", "success"),
+            _btn("👎 Не те", f"ar:{parts[1]}:{parts[2]}:d", reaction == "dislike", "danger")]])
+    else:
+        await store.set_chat_reaction(ObjectId(parts[1]), cq.from_user.id, reaction)
+        kb = _answer_keyboard(parts[1], reaction)
     await cq.answer("Дякую, врахую")
     try:
-        await cq.message.edit_reply_markup(reply_markup=_answer_keyboard(conv_id, msg_id, reaction))
+        await cq.message.edit_reply_markup(reply_markup=kb)
     except TelegramBadRequest:
         pass
 
 
-@dp.message(Command("new"))
+@dp.message(Command("chat"))
 async def cmd_new(message: Message) -> None:
     if not _is_allowed(message.from_user.id):
         return await _deny(message)
-    await store.close_conversation(message.from_user.id)
-    await message.answer("Почали нову розмову. Питайте 🙂")
+    await store.new_chat_topic(message.from_user.id)
+    await message.answer("Нова тема 🙂 Попередня розмова збережена, але в цю я її не тягну. Питайте.")
+
+
+@dp.errors()
+async def on_error(event: ErrorEvent) -> bool:
+
+    logger.exception(f"Помилка в обробнику: {event.exception}", exc_info=event.exception)
+    upd = event.update
+    try:
+        if upd.message:
+            await upd.message.answer("Щось пішло не так — спробуйте ще раз.", parse_mode=None)
+        elif upd.callback_query:
+            await upd.callback_query.answer("Щось пішло не так — спробуйте ще раз")
+    except Exception:
+        pass
+    return True
 
 
 
@@ -933,7 +973,7 @@ async def cmd_all_week(message: Message) -> None:
     await _cmd_digest(message, "week", ["ua", "ru"])
 
 
-@dp.message(Command("day"))
+@dp.message(Command("ua_day"))
 async def cmd_day(message: Message) -> None:
     await _cmd_digest(message, "day", ["ua"])
 
@@ -963,15 +1003,20 @@ async def main() -> None:
     await bot.set_my_commands([
         BotCommand(command="today", description="Обрати категорії й отримати новини"),
         BotCommand(command="all_day", description="Усе за добу (UA + RU)"),
-        BotCommand(command="day", description="Українські джерела за добу"),
+        BotCommand(command="ua_day", description="Українські джерела за добу"),
         BotCommand(command="ru_day", description="Російські джерела за добу"),
         BotCommand(command="all_week", description="Усе за тиждень"),
-        BotCommand(command="new", description="Нова розмова з аналітиком"),
+        BotCommand(command="chat", description="Нова тема розмови з аналітиком"),
         BotCommand(command="mode", description="Усі новини одразу чи по одній"),
         BotCommand(command="goals", description="Мої цілі"),
-        BotCommand(command="id", description="Мій Telegram ID"),
+
     ])
-    await resume_sessions(bot)
+    if os.environ.get("PORT"):
+        threading.Thread(target=run_keep_alive_server, daemon=True).start()
+    try:
+        await resume_sessions(bot)
+    except Exception:
+        logger.exception("Не вдалося відновити сесії новин — продовжую запуск")
     if DAILY_PUSH:
         asyncio.create_task(daily_push_loop(bot))
     logger.info("Бот запущено: " + (f"доступ для {len(ALLOWED)} користувачів" if ALLOWED else "відкритий доступ")
