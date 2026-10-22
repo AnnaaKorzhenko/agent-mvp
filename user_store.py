@@ -13,7 +13,8 @@ if not MONGO_URI:
 
 db = AsyncIOMotorClient(MONGO_URI, tz_aware=True)["News"]
 users_collection = db["users"]
-conversations = db["conversations"]
+conversations = db["conversations"]     # стара схема розмов: лише читаємо для історії й старих кнопок
+chat_messages = db["chat_messages"]     # діалог з аналітиком: один документ = одне повідомлення, без ліміту
 digests_collection = db["digests"]
 posts_collection = db["posts"]
 news_sessions = db["news_sessions"]   # хто на якій новині зараз (одна сесія на людину, _id = user_id)
@@ -24,7 +25,6 @@ DISLIKE_POINTS = -1    # 👎
 SKIP_POINTS = 0        # ⏭ пропустити (записується, але балів не дає)
 FEEDBACK_KEEP = 1000   # скільки останніх реакцій тримати в документі
 TEXT_SNIPPET = 300
-MAX_MESSAGES = 200     # після стількох повідомлень розмова закривається
 MAX_GOALS = 5
 
 POINTS = {"like": LIKE_POINTS, "dislike": DISLIKE_POINTS, "skip": SKIP_POINTS}
@@ -41,7 +41,7 @@ def _key(tag: str) -> str:
 
 async def ensure_indexes() -> None:
     await users_collection.create_index([("feedback.post_id", 1)])
-    await conversations.create_index([("user_id", 1), ("status", 1), ("updated_at", -1)])
+    await chat_messages.create_index([("user_id", 1), ("created_at", -1)])
 
 
 
@@ -259,69 +259,43 @@ async def _feedback_news_texts(entries: list[dict]) -> dict:
     return texts
 
 
-async def get_or_start_conversation(user_id: int, title: str | None = None) -> dict:
-    conv = await conversations.find_one({"user_id": user_id, "status": "active"},
-                                        {"messages": 0}, sort=[("updated_at", -1)])
-    if conv and conv.get("message_count", 0) < MAX_MESSAGES:
-        return conv
-    if conv:
-        await conversations.update_one({"_id": conv["_id"]}, {"$set": {"status": "closed", "updated_at": _now()}})
-    now = _now()
-    doc = {"user_id": user_id, "title": (title or "")[:100], "status": "active",
-           "created_at": now, "updated_at": now, "message_count": 0, "summary": None, "messages": []}
-    doc["_id"] = (await conversations.insert_one(doc)).inserted_id
-    return doc
+# ---------------------------------------------------------------------------
+# Діалог з аналітиком: безкінечна історія, кожне повідомлення — окремий документ
+# ---------------------------------------------------------------------------
 
-
-async def close_conversation(user_id: int) -> None:
-    await conversations.update_many({"user_id": user_id, "status": "active"},
-                                    {"$set": {"status": "closed", "updated_at": _now()}})
-
-
-async def add_message(conversation_id, user_id: int, role: str, content: str, *,
-                      sources: list[dict] | None = None, tool_calls: list[dict] | None = None,
-                      model: str | None = None, tokens: dict | None = None):
-    now = _now()
-    msg = {"id": ObjectId(), "role": role, "content": content, "created_at": now}
+async def add_chat_message(user_id: int, role: str, content: str, **meta) -> ObjectId:
+    """role: user | assistant. meta: reply_to, sources, tool_calls, model, tokens, fallback …"""
+    doc = {"user_id": user_id, "role": role, "content": content, "created_at": _now(), **meta}
     if role == "assistant":
-        msg.update(sources=sources or [], tool_calls=tool_calls or [], model=model, tokens=tokens, reaction=None)
-    await conversations.update_one({"_id": conversation_id}, {
-        "$push": {"messages": msg}, "$inc": {"message_count": 1}, "$set": {"updated_at": now}})
-    return msg["id"]
+        doc.setdefault("reaction", None)
+    return (await chat_messages.insert_one(doc)).inserted_id
 
 
-async def conversation_history(conversation_id, limit: int = 10) -> list[dict]:
-    doc = await conversations.find_one({"_id": conversation_id}, {"messages": {"$slice": -limit}}) or {}
-    history = []
-    for m in doc.get("messages", [])[-limit:]:
-        content = m["content"]
-        if m["role"] == "assistant" and m.get("sources"):
-            urls = ", ".join(s.get("url", "") for s in m["sources"][:30] if s.get("url"))
-            content += f"\n\n[Джерела цієї відповіді: {urls}]"
-        history.append({"role": m["role"], "content": content})
-    return history
+async def chat_history(user_id: int, limit: int = 10, since: datetime | None = None) -> list[dict]:
+    """Останні limit повідомлень (від старих до нових) для промпту. Вся історія лишається в базі.
+
+    since — початок поточної теми (/chat). Запасні відповіді «без моделі» в контекст не беремо.
+    Якщо в новій колекції ще нічого немає — беремо хвіст старої розмови з conversations.
+    """
+    q: dict = {"user_id": user_id, "fallback": {"$ne": True}}
+    if since:
+        q["created_at"] = {"$gte": since}
+    docs = await chat_messages.find(q, {"role": 1, "content": 1}).sort("created_at", -1).limit(limit).to_list(limit)
+    if docs or since:
+        return [{"role": d["role"], "content": d["content"]} for d in reversed(docs)]
+    old = await conversations.find_one({"user_id": user_id, "status": "active"},
+                                       {"messages": {"$slice": -limit}}, sort=[("updated_at", -1)]) or {}
+    return [{"role": m["role"], "content": m["content"]} for m in old.get("messages", [])[-limit:]]
 
 
-ASSISTANT_DAILY_QUESTIONS = int(os.getenv("ASSISTANT_DAILY_QUESTIONS", "50"))   # 0 — без ліміту
-ASSISTANT_DAILY_TOKENS = int(os.getenv("ASSISTANT_DAILY_TOKENS", "400000"))      # 0 — без ліміту
+async def new_chat_topic(user_id: int) -> None:
+    """/chat: нова тема — історія лишається в базі, але в промпт іде лише те, що після цього моменту."""
+    await users_collection.update_one({"_id": user_id}, {"$set": {"chat_topic_from": _now()}})
 
 
-async def assistant_budget_ok(user_id: int, date: str) -> bool:
-    """Чи не вичерпано денний ліміт питань / токенів аналітика (users.assistant_usage за дату date)."""
-    user = await users_collection.find_one({"_id": user_id}, {"assistant_usage": 1}) or {}
-    usage = user.get("assistant_usage") or {}
-    if usage.get("date") != date:
-        return True
-    if ASSISTANT_DAILY_QUESTIONS and usage.get("questions", 0) >= ASSISTANT_DAILY_QUESTIONS:
-        return False
-    return not (ASSISTANT_DAILY_TOKENS and usage.get("tokens", 0) >= ASSISTANT_DAILY_TOKENS)
+async def set_chat_reaction(message_id, user_id: int, reaction: str | None) -> None:
+    await chat_messages.update_one({"_id": message_id, "user_id": user_id}, {"$set": {"reaction": reaction}})
 
-
-async def add_assistant_usage(user_id: int, date: str, tokens: int) -> None:
-    await users_collection.update_one({"_id": user_id, "assistant_usage.date": {"$ne": date}},
-                                      {"$set": {"assistant_usage": {"date": date, "questions": 0, "tokens": 0}}})
-    await users_collection.update_one({"_id": user_id}, {"$inc": {"assistant_usage.questions": 1,
-                                                                   "assistant_usage.tokens": int(tokens or 0)}})
 
 
 async def set_message_reaction(conversation_id, message_id, user_id: int, reaction: str | None) -> None:
