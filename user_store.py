@@ -1,23 +1,14 @@
 
-import os
 from datetime import datetime, timezone
 
 from bson import ObjectId
-from dotenv import load_dotenv
-from motor.motor_asyncio import AsyncIOMotorClient
 
-load_dotenv()
-MONGO_URI = os.getenv("MONGO_URI")
-if not MONGO_URI:
-    raise SystemExit("Не задано MONGO_URI — додайте його у файл .env")
+from db import db
 
-db = AsyncIOMotorClient(MONGO_URI, tz_aware=True)["News"]
 users_collection = db["users"]
-conversations = db["conversations"]     # стара схема розмов: лише читаємо для історії й старих кнопок
-chat_messages = db["chat_messages"]     # діалог з аналітиком: один документ = одне повідомлення, без ліміту
+conversations = db["conversations"]     # один документ на людину: messages (діалог) + news_state (стрічка)
 digests_collection = db["digests"]
 posts_collection = db["posts"]
-news_sessions = db["news_sessions"]   # хто на якій новині зараз (одна сесія на людину, _id = user_id)
 
 CHOICE_POINTS = 1
 LIKE_POINTS = 1        # 👍
@@ -34,15 +25,15 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+async def ensure_indexes() -> None:
+    await users_collection.create_index([("feedback.post_id", 1)])
+    await conversations.create_index([("user_id", 1)], unique=True)
+    await conversations.create_index([("news_state.status", 1)])
+
+
 def _key(tag: str) -> str:
 
     return str(tag).replace(".", "·").lstrip("$").strip()
-
-
-async def ensure_indexes() -> None:
-    await users_collection.create_index([("feedback.post_id", 1)])
-    await chat_messages.create_index([("user_id", 1), ("created_at", -1)])
-
 
 
 async def add_category_choice(user_id: int, selected: dict) -> None:
@@ -260,32 +251,34 @@ async def _feedback_news_texts(entries: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Діалог з аналітиком: безкінечна історія, кожне повідомлення — окремий документ
+# Діалог з аналітиком: conversations.messages (один документ на людину)
 # ---------------------------------------------------------------------------
+
+HISTORY_SCAN = 200   # скільки останніх повідомлень переглядаємо, щоб відфільтрувати тему й запасні відповіді
+
 
 async def add_chat_message(user_id: int, role: str, content: str, **meta) -> ObjectId:
     """role: user | assistant. meta: reply_to, sources, tool_calls, model, tokens, fallback …"""
-    doc = {"user_id": user_id, "role": role, "content": content, "created_at": _now(), **meta}
+    now = _now()
+    msg = {"id": ObjectId(), "role": role, "content": content, "created_at": now, **meta}
     if role == "assistant":
-        doc.setdefault("reaction", None)
-    return (await chat_messages.insert_one(doc)).inserted_id
+        msg.setdefault("reaction", None)
+    await conversations.update_one(
+        {"user_id": user_id},
+        {"$push": {"messages": msg}, "$set": {"updated_at": now}, "$setOnInsert": {"created_at": now}},
+        upsert=True)
+    return msg["id"]
 
 
 async def chat_history(user_id: int, limit: int = 10, since: datetime | None = None) -> list[dict]:
     """Останні limit повідомлень (від старих до нових) для промпту. Вся історія лишається в базі.
 
     since — початок поточної теми (/chat). Запасні відповіді «без моделі» в контекст не беремо.
-    Якщо в новій колекції ще нічого немає — беремо хвіст старої розмови з conversations.
     """
-    q: dict = {"user_id": user_id, "fallback": {"$ne": True}}
-    if since:
-        q["created_at"] = {"$gte": since}
-    docs = await chat_messages.find(q, {"role": 1, "content": 1}).sort("created_at", -1).limit(limit).to_list(limit)
-    if docs or since:
-        return [{"role": d["role"], "content": d["content"]} for d in reversed(docs)]
-    old = await conversations.find_one({"user_id": user_id, "status": "active"},
-                                       {"messages": {"$slice": -limit}}, sort=[("updated_at", -1)]) or {}
-    return [{"role": m["role"], "content": m["content"]} for m in old.get("messages", [])[-limit:]]
+    doc = await conversations.find_one({"user_id": user_id}, {"messages": {"$slice": -HISTORY_SCAN}}) or {}
+    msgs = [m for m in doc.get("messages", []) if not m.get("fallback")
+            and (not since or (m.get("created_at") and m["created_at"] >= since))]
+    return [{"role": m["role"], "content": m["content"]} for m in msgs[-limit:]]
 
 
 async def new_chat_topic(user_id: int) -> None:
@@ -294,7 +287,8 @@ async def new_chat_topic(user_id: int) -> None:
 
 
 async def set_chat_reaction(message_id, user_id: int, reaction: str | None) -> None:
-    await chat_messages.update_one({"_id": message_id, "user_id": user_id}, {"$set": {"reaction": reaction}})
+    await conversations.update_one({"user_id": user_id, "messages.id": message_id},
+                                   {"$set": {"messages.$.reaction": reaction}})
 
 
 
