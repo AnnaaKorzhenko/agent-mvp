@@ -13,9 +13,9 @@ Written 2026-10-26 on branch `mcp-server`, which starts from `main` / `prod` at 
 | `summarizer.py` | **Local model client.** It builds `AsyncOpenAI(base_url=LLM_BASE_URL or http://localhost:11434/v1)` with `LLM_MODEL` (default `qwen2.5:7b-instruct`, through Ollama). Its entry points are `analyze_text(text, side, sem)` and `analyze_pending_posts()`. It writes `summary`, `category`, `importance`, `tags`, `source_side`, `processed` and `prompt_version` to `posts`. | Kaggle pipeline |
 | `digest.py` | Builds `digests` per period and side, using the **same client** (`from summarizer import CATEGORIES, MODEL, client`). Entry points: `build_digest(period, side, …)` and `get_latest_digest(period, side)`. | Kaggle pipeline |
 | `cleanup.py` | Retention: drops `raw_text`/`clean_text` after 7 days, deletes junk and old posts, keeps digests for 365 days | Kaggle pipeline |
-| `analyst.py` | The bot's question answering. It has its **own** OpenAI client (`ASSISTANT_LLM_*`, currently gpt-5-nano) and a tool loop with `search_news`, `get_digest` and `get_trends` (regex over `posts.summary` and `tags`). Entry point: `answer(user_id, question, reply_to)`. | Railway bot |
-| `user_store.py` | Bot data layer: users, feedback, **interest scoring**, goals, and chat messages in `conversations.messages` | Railway bot |
-| `main.py` | aiogram 3 bot: delivery (all at once, or one at a time with 👍/👎/⏭), comments, the morning picker, push loop, goals, health server | Railway bot (`Procfile: worker: python main.py`) |
+| `analyst.py` | The bot's question answering. It has its **own** OpenAI client (`ASSISTANT_LLM_*`, currently gpt-5-nano) and a tool loop with `search_news`, `get_digest` and `get_trends` (regex over `posts.summary` and `tags`). Entry point: `answer(user_id, question, reply_to)`. | Render bot |
+| `user_store.py` | Bot data layer: users, feedback, **interest scoring**, goals, and chat messages in `conversations.messages` | Render bot |
+| `main.py` | aiogram 3 bot: delivery (all at once, or one at a time with 👍/👎/⏭), comments, the morning picker, push loop, goals, health server | Render bot (web service with a keep-alive HTTP server on `PORT`; `Procfile: worker: python main.py`) |
 | `question_bank.yaml` | Feedback and onboarding questions. Not read by any code yet. | – |
 | `questions.jsonl` | 20 evaluation questions (`id`, `type`, `window_days`, `question`, `good_answer_notes`, `red_flags`) | – |
 | `test_pipeline.py` | **Broken**: imports `scrapers.*` and `bot.telegram_bot`, which no longer exist | – |
@@ -41,7 +41,7 @@ The task assigns the local-model flow (model runtime and client, summarizer, ana
 ```
 Kaggle:  scraper.py → posts(raw_text) → summarizer.py (Qwen via Ollama) → posts(summary, tags, …)
          digest.py (Qwen) → digests          cleanup.py → strips raw_text after 7 days
-Railway: main.py reads digests → Telegram → users.feedback, users.interests (user_store.py)
+Render:  main.py reads digests → Telegram → users.feedback, users.interests (user_store.py)
          analyst.py (gpt-5-nano) reads posts/digests/users → conversations.messages
 ```
 
@@ -71,7 +71,7 @@ Railway: main.py reads digests → Telegram → users.feedback, users.interests 
 - There is no `.env.example`.
 
 **Deployment**
-- Railway runs the bot from the `Procfile`. There is no Dockerfile.
+- **Render** runs the bot as a web service (corrected 2026-10-26; earlier notes said Railway). An external uptime monitor pings it so the free instance doesn't sleep. There is no Dockerfile.
 - A keep-alive HTTP server starts when `PORT` is set.
 - The Kaggle pipeline runs outside this repo's deployment.
 
@@ -120,7 +120,7 @@ Railway: main.py reads digests → Telegram → users.feedback, users.interests 
 3. **Feedback identity:** feedback is keyed by digest item, not post. `feedback_report()` groups by `(digest_id, item_n)`.
 4. **Stray indexes on `sources`:** it has the four `posts` indexes (`published_at/importance`, `processed`, …), left from an earlier collection-name swap. They're harmless but show that collection names have moved before.
 5. **`db.py` can't be configured:** the database name `News` is hard-coded, while `config.MONGO_DB_NAME` says `News-data`. Tests can't point at a test database without patching.
-6. **Python versions:** the only local interpreter is Python 3.9.6 (`.venv`), and there is no `uv` or Docker installed. The bot code uses `str | None` annotations, which only work on 3.10+ unless `from __future__ import annotations` is added, so Railway must be running 3.10 or newer.
-7. **A root Dockerfile would hijack the bot's Railway build:** Railway prefers a root `Dockerfile` over the `Procfile`. The MCP image must live elsewhere, for example `deploy/mcp/Dockerfile` with `RAILWAY_DOCKERFILE_PATH`.
+6. **Python versions:** the only local interpreter is Python 3.9.6 (`.venv`), and there is no `uv` or Docker installed. The bot code uses `str | None` annotations, which only work on 3.10+ unless `from __future__ import annotations` is added, so Render must be running 3.10 or newer.
+7. **Keep deployment files out of the bot's way:** the MCP image lives in `deploy/mcp/Dockerfile`, not at the root, so no platform mistakes it for the bot's build.
 8. **No tests:** there are no automated bot tests in the repo, and `test_pipeline.py` is broken.
 9. **Retention:** `cleanup.py` deletes posts after 14 to 180 days depending on importance, and digests after 365 days. Old `source_post_ids` in digests may point to posts that no longer exist.

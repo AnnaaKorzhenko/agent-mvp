@@ -20,6 +20,19 @@ See `CURRENT_STATE.md` for the facts this plan is based on.
 | Ownership | `cleaning.py`, `scraper.py`, `cleanup.py` and `db.py` belong to the local-model track. `question_bank.yaml` is ours. |
 | Dependencies | Approved. `brain/` uses PyMongo's async API (`AsyncMongoClient`). Motor stays only in the bot. |
 | Anthropic fallback | Default model `claude-opus-5-5` (`ANTHROPIC_MODEL`). Refusal fallbacks are on (`fallbacks: "default"`). `temperature` is not sent, because current models reject it. |
+| Login server (phase 4) | **Auth0.** One app entered by hand for Claude (a public client with PKCE). Open DCR is not used. An Auth0 post-login Action adds `client_name` and `email` claims. |
+| Hosting (phase 4) | **Render**, not Railway: the bot already runs there, kept awake by an uptime monitor. The MCP server is its own Render web service. See "Render free-tier hours" below. |
+| Users (phase 4) | A new login gets its **own new `users` record** (`_id` ObjectId, `source: "claude"`). Telegram users are kept as they are, not linked; they may be dropped later. `ALLOWED_EMAILS` optionally restricts who may sign in. The `link_identity.py` admin script was dropped. |
+
+### Render free-tier hours (decision needed)
+
+Render gives 750 free instance hours per workspace per month. A free service that's always awake uses about 730, so keeping both the bot and the MCP server awake (about 1,490 hours) would suspend all free services mid-month.
+
+| Option | Cost | Trade-off |
+|---|---|---|
+| A. Serve the MCP app from the bot's existing Render service (one process, one set of hours) | free | Needs a change to `main.py` start-up (uvicorn in the bot's event loop instead of its keep-alive thread) and the bot's build installing `brain/requirements.txt`. A crash in one can affect the other. |
+| B. Separate free service, not pinged | free | It sleeps after 15 minutes. The first Claude call after a pause waits about a minute and may time out once. |
+| C. Separate service on a paid instance | about $7/month | Always on, isolated from the bot. |
 
 ## 0. Conflicts and decisions needed before phase 2
 
@@ -27,14 +40,14 @@ See `CURRENT_STATE.md` for the facts this plan is based on.
 |---|---|---|---|
 | 1 | Use "FastMCP" | MCP Python SDK **v2.3.0** (current on PyPI) renamed it to `MCPServer` (`from mcp.server import MCPServer`). The old import path is removed. Serving options (`host`, `port`, `transport_security`) moved to `run()` / `streamable_http_app()`. | Use `mcp>=2.3,<3` and `MCPServer`. |
 | 2 | Python not specified | `mcp` needs Python ≥ 3.10. This Mac has **only Python 3.9.6**, and no Homebrew, `uv` or Docker. | `brain/` targets Python 3.12 (in the Docker image). For local dev you install Python 3.12 from python.org, or allow me to install `uv`. |
-| 3 | Bot imports scoring from `brain/` | The bot runs on Railway from the repo root with `requirements.txt`. | `brain/domain/scoring.py` is **pure Python with no third-party imports**, and `brain/__init__.py` imports nothing. So the bot needs no new dependency. |
+| 3 | Bot imports scoring from `brain/` | The bot runs on Render from the repo root with `requirements.txt`. | `brain/domain/scoring.py` is **pure Python with no third-party imports**, and `brain/__init__.py` imports nothing. So the bot needs no new dependency. |
 | 4 | `get_digest` ordered by `users.categories` + `category_scores` | `users.categories` is **legacy**: no current code writes or reads it. The bot orders by today's picker choice (`users.daily.selected`, if `daily.date` is today) and then `category_scores`. | Use the same order as the bot, so both interfaces agree. Ignore `categories` unless you want it as a fallback. |
 | 5 | `record_feedback(post_id, …)` "in the same shape the bot uses" | Bot entries are keyed by `(digest_id, item_n)`, and `set_reaction` replaces the earlier reaction to the same item. | Same fields, with `digest_id: null`, `item_n: null` and `channel`. `side`, `category` and `tags` come from the post. A new MCP reaction replaces the previous **MCP** reaction to the same `post_id` and reverses its points through `scoring.py`. Telegram entries are never touched. |
 | 6 | Map an OAuth login through `users.identities` | Nothing links an OAuth subject to a Telegram id yet. | Phase 4: an admin script `brain/scripts/link_identity.py --user <tg_id> --provider … --subject …` for the current 3 users. A self-service `/link` code in the bot is a later bot change. |
 | 7 | OAuth "as required by Claude" | The SDK is **only a resource server**: it verifies tokens and serves RFC 9728 metadata. It has no login and issues no tokens. Claude needs an authorization server with DCR or CIMD, S256 PKCE, refresh, the callback `https://claude.ai/api/mcp/auth_callback` and loopback redirects for Claude Code. | Phase 4: pick an external authorization server (§6). We don't write our own. |
 | 8 | Audit log | No collection exists for it. | A new collection, **`audit_log`**, with a TTL index (180 days). Needs your approval (§8). |
 | 9 | "the user's role" for local trust | `users` has no role field, and roles aren't in the allowed additions. | For now, `MAX_SENSITIVITY_LOCAL` comes from config (default `restricted`). Roles come later if you approve a field. |
-| 10 | Root `Dockerfile` | Railway prefers a root `Dockerfile` over the `Procfile`, so a root Dockerfile would rebuild the **bot** service as the MCP image. | `deploy/mcp/Dockerfile`, with `RAILWAY_DOCKERFILE_PATH` set on a **separate** Railway service. |
+| 10 | Root `Dockerfile` | A root Dockerfile could be mistaken for the bot's build. | `deploy/mcp/Dockerfile`; on Render the MCP server is a native Python service (or Docker with that path). |
 | 11 | Text index "on `posts`" | `posts` belongs to the pipeline. MongoDB allows only one text index per collection, and has no Ukrainian stemmer. | Create the index with a script, after you say OK: `{summary: "text", tags: "text"}` with `default_language: "none"` (no stemming, so it's the same for UA and RU). I'll tell the teammate it exists. |
 
 ## 1. Folder layout
@@ -108,7 +121,7 @@ docs/  CURRENT_STATE.md  MCP_PLAN.md  DATA_CONTRACT.md  REQUESTS_TO_LOCAL_MODEL_
 - `user_id` never comes from tool arguments.
 - In dev mode, `DEV_USER_ID` and `trust=local` come from config. Dev mode refuses to start if `PUBLIC_BASE_URL` is non-local.
 - With OAuth, `get_access_token()` gives `(issuer, subject)`, which is matched against `users.identities`. No match means a clear error.
-- **Trust level comes from the deployment, not the client.** The Railway service is `TRUST_LEVEL=cloud`. The future local machine runs a second instance with `TRUST_LEVEL=local`, reachable only on localhost or the tunnel.
+- **Trust level comes from the deployment, not the client.** The Render service is `TRUST_LEVEL=cloud`. The future local machine runs a second instance with `TRUST_LEVEL=local`, reachable only on localhost or the tunnel.
 - `channel` comes from the OAuth `client_id` / `client_name` (`Claude` → `claude`), with a config map for ChatGPT and local.
 
 ## 3. MCP tools v0
@@ -186,7 +199,7 @@ Every tool description repeats the parts relevant to it.
 - `auth.py` implements the SDK's `TokenVerifier` (verifying JWTs against the authorization server's JWKS) plus `AuthSettings(issuer_url, resource_server_url=<exact public /mcp URL>, required_scopes)`, with `validate_token_resource=True`.
 - The SDK then serves `/.well-known/oauth-protected-resource/mcp` and returns 401 with `WWW-Authenticate: Bearer resource_metadata=…`, which Claude requires.
 - Authorization server options. Claude needs DCR or CIMD, S256, refresh rotation and both callbacks.
-  - **A.** A hosted identity provider with DCR or CIMD: fastest on Railway.
+  - **A.** A hosted identity provider: **chosen: Auth0** (see Decisions).
   - **B.** Self-hosted **Keycloak**, which supports DCR, on the always-on machine. The most private, and it fits the long-term goal.
   - **C.** Our own authorization server. Not recommended: too much security-critical code.
   - Decision needed in phase 4.
@@ -196,8 +209,8 @@ Every tool description repeats the parts relevant to it.
 - `deploy/mcp/Dockerfile`: `python:3.12-slim`, non-root user, installs `brain/requirements.txt`, runs `uvicorn brain.mcp_server.server:app --host 0.0.0.0 --port $PORT --proxy-headers`.
 - `TransportSecuritySettings(allowed_hosts=[PUBLIC_HOST])` comes from env.
 - `/health` is a custom route with no data.
-- The code assumes neither Railway nor the tunnel. All of it comes from env (`PUBLIC_BASE_URL`, `PORT`, `TRUST_LEVEL`).
-- Notes for both targets go in `docs/CONNECT_CLAUDE.md`: Railway as a second service, and later the local machine behind a Cloudflare Tunnel or Tailscale Funnel.
+- The code assumes neither Render nor the tunnel. All of it comes from env (`PUBLIC_BASE_URL`, `PORT`, `TRUST_LEVEL`).
+- `docs/CONNECT_CLAUDE.md` covers Render. The local machine comes later, behind a Cloudflare Tunnel or Tailscale Funnel, using the same image.
 
 **Secrets**
 - Env only. `.env.example` lists names with placeholder values.
@@ -222,7 +235,7 @@ Every tool description repeats the parts relevant to it.
 
 ## 8. Audit
 
-**Where entries go:** `audit_log` (new collection, needs your OK) and also the standard log. Railway logs alone have short retention.
+**Where entries go:** `audit_log` (new collection, needs your OK) and also the standard log. Hosting logs alone have short retention.
 
 **Entry shape:** `{at, kind: "tool"|"model", user_id, trust, channel, tool, args (redacted: free text kept, never tokens), items_returned, max_sensitivity_returned, duration_ms, error}`.
 
@@ -275,7 +288,7 @@ Dev: `pytest`, `pytest-asyncio`.
    - `sensitivity.py`, `identity.py`, `local_models.py`, `backends.py` and `embeddings.py` (stub), with tests (her code mocked);
    - `.env.example`.
 3. **MCP server v0:** the five tools, instructions, audit (with a setup script for the `audit_log` indexes), tests, and a local run checked with MCP Inspector.
-4. **Deploy and connect:** Dockerfile, a Railway service, OAuth (after the authorization server decision), `link_identity.py`, `CONNECT_CLAUDE.md` with 10 test questions.
+4. **Deploy and connect:** Dockerfile, a Render service, Auth0 OAuth, automatic user records for new logins, `CONNECT_CLAUDE.md` with 10 test questions.
 5. **Local path:** the `LocalPipelineBackend` connected for real (with the teammate), the local-chat connection doc, embeddings and vector search if agreed, and the eval comparing local and Anthropic.
 
 `TODO(next)` notes go where the out-of-scope items plug in: `research_topic`, the outward-verification gate, tag normalisation and de-duplicating digest items.

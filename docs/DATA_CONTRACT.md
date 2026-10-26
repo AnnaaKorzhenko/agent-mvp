@@ -8,7 +8,7 @@ How to read the tables:
 - **Field:** dotted path. `[]` means "every element of this list".
 - **Type:**
   - `str`, `int`, `float`, `bool`, `datetime`, `objectid`, `list`, `dict`, `any`;
-  - `a|b` means either type is allowed;
+  - `a\|b` means either type is allowed (escaped, because `|` separates the table's columns);
   - a trailing `?` means `null` is also allowed.
 - **Required:**
   - `yes`: missing on any checked document is reported as a contract break.
@@ -76,11 +76,20 @@ Shared, not per user.
 
 ## users
 
-The bot owns this collection. The MCP server reads a **projection** (never `feedback` in reads). It writes only feedback entries, scores, and `identities`.
+Shared by the bot and the MCP server.
+- The MCP server reads a **projection** (never `feedback` in reads).
+- It writes feedback entries and scores.
+- It **creates new records for people who sign in through OAuth** (Claude). Telegram users are not changed or linked.
+
+Such a record is
+`{_id: ObjectId, source: "claude", email, created_at, last_seen, identities: [{provider: <issuer>, subject: <sub>, created_at}], onboarded: false, daily_push: false, interests: {category_scores: {ua: {}, ru: {}}, tag_scores: {}}, goals: [], feedback: []}`.
+The bot ignores these records: they have no Telegram id, and `onboarded` and `daily_push` are false.
 
 | Field | Type | Required | Access | Meaning |
 |---|---|---|---|---|
-| `_id` | int | yes | R | Telegram user id; the user identity everywhere |
+| `_id` | int\|objectid | yes | RW | Telegram user id (int) for bot users; ObjectId for users created for an OAuth login |
+| `source` | str | no | W | **New:** `claude` / `chatgpt` / … on records the MCP server created |
+| `email` | str? | no | W | **New:** sign-in email from the Auth0 Action, on records the MCP server created |
 | `interests.category_scores` | dict | no | RW | `{ua: {category: score}, ru: {…}}`, updated through `brain/domain/scoring.py` |
 | `interests.tag_scores` | dict | no | RW | `{tag: score}`, updated through `brain/domain/scoring.py` |
 | `daily.date` | str | no | R | Kyiv date of the morning picker (`YYYY-MM-DD`) |
@@ -92,7 +101,9 @@ The bot owns this collection. The MCP server reads a **projection** (never `feed
 | `feedback[].post_id` | objectid? | no | RW | Post the reaction is about (`null` in very old bot entries) |
 | `feedback[].reaction` | str | yes | RW | `like` / `dislike` / `skip` |
 | `feedback[].channel` | str | no | RW | **New:** `claude` / `chatgpt` / `local` / `telegram`. Missing = written by the bot (`telegram`) |
-| `identities` | list | no | R | **New:** `[{provider, subject}]`, maps an OAuth login to this user (phase 4) |
+| `identities` | list | no | RW | **New:** OAuth logins of this user; unique index `identity_unique` |
+| `identities[].provider` | str | yes | RW | The OAuth issuer, e.g. `https://<tenant>.auth0.com/` |
+| `identities[].subject` | str | yes | RW | The token's `sub` (a Google or Auth0 user id) |
 
 A feedback entry written by the MCP server has the bot's shape:
 `{post_id, reaction, text, digest_id: null, item_n: null, side, category, tags, at, channel}`.
