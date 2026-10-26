@@ -1,6 +1,11 @@
 # MCP server plan ("brain")
 
-Status: **approved 2026-10-26 with the decisions below. Phase 2 (foundation) done.**
+Status: **approved 2026-10-26 with the decisions below. Phase 2 (foundation) and phase 3 (MCP server v0, local) done.**
+
+Phase 3 notes:
+- Search finds words that start a word (Unicode-aware; MongoDB patterns need `(*UCP)`). Stems are at most 6 letters, and a stop list drops question words.
+- `brain/eval/run_questions.py` is the baseline (results are git-ignored).
+- MCP Inspector wasn't run, because Node.js isn't installed. The same protocol checks ran through the SDK's own HTTP client against the running server.
 See `CURRENT_STATE.md` for the facts this plan is based on.
 
 ## Decisions (2026-10-26)
