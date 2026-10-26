@@ -1,0 +1,10 @@
+# MCP server ("brain") only. The Telegram bot keeps using the root requirements.txt.
+# Python 3.12 (see deploy/mcp/Dockerfile); local dev: uv venv brain/.venv --python 3.12
+mcp>=2.3,<3
+pydantic>=2.12
+pydantic-settings>=2.4
+pymongo>=4.13
+python-dotenv>=1.0
+anthropic>=2.3,<3
+# The adapter calls the local-model track's client, which is built on openai:
+openai>=1.0
