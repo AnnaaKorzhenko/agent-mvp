@@ -25,18 +25,16 @@ Written 2026-10-26 on branch `mcp-server`, which starts from `main` / `prod` at 
 
 The task assigns the local-model flow (model runtime and client, summarizer, analyst, related prompts) to the teammate. Git history doesn't settle this cleanly, because the old `scrapers/` layout was moved to the root by one person on 2026-10-20. That makes the "last author" of most pipeline files misleading. Ownership below is therefore by role, confirmed where git agrees.
 
-**Owned by the local-model track (do not edit, move, rename or reformat):**
+**Owned by the local-model track (do not edit, move, rename or reformat; confirmed 2026-10-26):**
 - `summarizer.py`: the local model client and summary prompts
 - `digest.py`: digest prompts and build, uses the local model
-- `analyst.py`: the analyst. The teammate made the last 3 of its 4 commits.
+- `analyst.py`: the analyst
+- `cleaning.py`, `scraper.py`, `cleanup.py`: the pipeline
+- `db.py`: the shared Mongo client; the bot imports it, `brain/` does not
 - `requirements-pipeline.txt`
+- `questions.jsonl`: the MCP eval only **reads** it
 
-**To confirm with you (shared or unclear):**
-- `cleaning.py`, `scraper.py`, `cleanup.py`: pipeline files, not model code
-- `db.py`: shared by both tracks; the teammate made the last commit (renaming collections)
-- `question_bank.yaml`, `questions.jsonl`: the MCP eval will **read** `questions.jsonl` only
-
-**Owned by this track (bot, MCP, memory):** `main.py`, `user_store.py`, `Procfile`, `requirements.txt`, and the new `brain/`, `tests/` and `docs/`.
+**Owned by this track (bot, MCP, memory):** `main.py`, `user_store.py`, `question_bank.yaml`, `Procfile`, `requirements.txt`, and the new `brain/`, `tests/` and `docs/`.
 
 ## 3. Data flow
 

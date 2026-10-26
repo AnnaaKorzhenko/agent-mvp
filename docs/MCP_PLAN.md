@@ -1,7 +1,20 @@
 # MCP server plan ("brain")
 
-Status: **proposal, waiting for approval.** Nothing under `brain/` exists yet.
+Status: **approved 2026-10-26 with the decisions below. Phase 2 (foundation) done.**
 See `CURRENT_STATE.md` for the facts this plan is based on.
+
+## Decisions (2026-10-26)
+
+| # | Decision |
+|---|---|
+| Python | `uv` installed; `brain/.venv` uses Python 3.12. |
+| `audit_log` | Approved, with a TTL index. |
+| Text index on `posts` | **Not approved.** `search_posts` uses case-insensitive pattern matching on `summary` and `tags` (as the bot's analyst does) and ranks in Python. No index is created on the pipeline's collection. |
+| Tests | A throwaway `News_test_<random>` database on the same cluster, dropped after each run. |
+| MCP feedback entries | Approved as in §0.5. |
+| Ownership | `cleaning.py`, `scraper.py`, `cleanup.py` and `db.py` belong to the local-model track. `question_bank.yaml` is ours. |
+| Dependencies | Approved. `brain/` uses PyMongo's async API (`AsyncMongoClient`). Motor stays only in the bot. |
+| Anthropic fallback | Default model `claude-opus-5-5` (`ANTHROPIC_MODEL`). Refusal fallbacks are on (`fallbacks: "default"`). `temperature` is not sent, because current models reject it. |
 
 ## 0. Conflicts and decisions needed before phase 2
 
@@ -49,7 +62,7 @@ brain/
   audit/
     log.py                 # audit_tool_call(), audit_model_call()
   scripts/
-    create_text_index.py   # phase 3, run once on approval
+    setup_indexes.py       # phase 3: audit_log TTL index (no index on posts)
     link_identity.py       # phase 4
   eval/
     run_questions.py       # questions.jsonl → search_posts → results CSV / JSONL
@@ -100,7 +113,7 @@ None of the tools call an LLM. All outputs are typed pydantic models.
 | Tool | Returns (`schemas.py`) | Behaviour |
 |---|---|---|
 | `get_digest(side="both", date=None)` | `DigestResult{date, digests[{side, side_note, created_at, sections[{category, label, items[{n, text, source_urls, source_post_ids, is_russian_source_claim}]}]}]}` | Latest `period=day` digest per side, `scheduled` first and any trigger as a fallback. With `date`, the latest one created that Kyiv day. Sections use the bot's order. RU digests carry `side_note: "Claims of Russian sources, not verified facts"`. Never includes feedback. |
-| `search_posts(query, side="all", category=None, days=7, limit=10)` | `SearchResult{query, results[{post_id, summary, tags, category, source_side, channel, post_url, published_at, importance, is_russian_source_claim}], note}` | `$text` over `summary` and `tags`, excluding `is_ad`, `is_duplicate` and unprocessed posts, within `published_at ≥ now−days`. Rank = `0.6·text score (normalised) + 0.25·recency + 0.15·importance/5`. `limit` ≤ 25 and `days` ≤ 30. |
+| `search_posts(query, side="all", category=None, days=7, limit=10)` | `SearchResult{query, results[{post_id, summary, tags, category, source_side, channel, post_url, published_at, importance, is_russian_source_claim}], note}` | Pattern search over `summary` and `tags` (query words minus stop words, crude stemming), excluding `is_ad`, `is_duplicate` and unprocessed posts, within `published_at ≥ now−days`. Up to 200 candidates are ranked in Python: `0.6·word-match share + 0.25·recency + 0.15·importance/5`. `limit` ≤ 25 and `days` ≤ 30. |
 | `get_post(post_id)` | `Post{… + channel{username, country}}` | Invalid id, missing or forbidden → `ToolError("Post not found")`. |
 | `get_profile()` | `Profile{categories_today, goals[], top_categories[{side, category, label, score}], top_tags[{tag, score}]}` | Read with a projection; `feedback` is never loaded. |
 | `record_feedback(post_id, reaction, text=None)` | `FeedbackResult{post_id, reaction, replaced_previous, score_changes}` | Rejects a null, invalid or unknown post id (and one hidden by sensitivity). Writes the entry described in §0.5 and updates scores through `scoring.py`. |
@@ -150,7 +163,7 @@ Every tool description repeats the parts relevant to it.
 
 ## 5. Search
 
-**Phase 3:** the `$text` index from §0.11, created by `brain/scripts/create_text_index.py` (`--dry-run` shows what it would do).
+**Phase 3:** pattern search with ranking in Python. No index is created on `posts`; the text index was not approved.
 
 **Phase 5 (semantic)**
 - The cluster is Atlas 8.0 and `$listSearchIndexes` works, so **Atlas Vector Search** is the simplest option: no new infrastructure.
@@ -256,7 +269,7 @@ Dev: `pytest`, `pytest-asyncio`.
    - `DATA_CONTRACT.md` and the contract test;
    - `sensitivity.py`, `identity.py`, `local_models.py`, `backends.py` and `embeddings.py` (stub), with tests (her code mocked);
    - `.env.example`.
-3. **MCP server v0:** the five tools, instructions, audit, the text index script (run after your OK), tests, and a local run checked with MCP Inspector.
+3. **MCP server v0:** the five tools, instructions, audit (with a setup script for the `audit_log` indexes), tests, and a local run checked with MCP Inspector.
 4. **Deploy and connect:** Dockerfile, a Railway service, OAuth (after the authorization server decision), `link_identity.py`, `CONNECT_CLAUDE.md` with 10 test questions.
 5. **Local path:** the `LocalPipelineBackend` connected for real (with the teammate), the local-chat connection doc, embeddings and vector search if agreed, and the eval comparing local and Anthropic.
 
