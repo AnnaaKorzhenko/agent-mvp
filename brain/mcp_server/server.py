@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 
 from mcp.server import MCPServer
+from mcp.server.auth.provider import TokenVerifier
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
@@ -16,7 +17,7 @@ from brain.audit.log import AuditLog
 from brain.config import Settings, get_settings
 from brain.db.client import get_db
 from brain.db.repositories import Repos
-from brain.mcp_server.auth import token_provider
+from brain.mcp_server.auth import auth_settings, token_provider, token_verifier
 from brain.mcp_server.tools import Services, register_tools
 
 INSTRUCTIONS = """\
@@ -38,9 +39,13 @@ present them as facts.
 logger = logging.getLogger("brain.mcp")
 
 
-def create_server(svc: Services) -> MCPServer:
-    mcp = MCPServer("brain", title="News brain", instructions=INSTRUCTIONS, version="0.1.0",
-                    log_level=svc.settings.log_level.upper())
+def create_server(svc: Services, verifier: TokenVerifier | None = None) -> MCPServer:
+    """With OAUTH_ISSUER set, every request needs a valid Auth0 access token (401 + metadata otherwise)."""
+    oauth = {}
+    if svc.settings.oauth_issuer:
+        oauth = {"token_verifier": verifier or token_verifier(svc.settings), "auth": auth_settings(svc.settings)}
+    mcp = MCPServer("brain", title="News brain", instructions=INSTRUCTIONS, version="0.2.0",
+                    log_level=svc.settings.log_level.upper(), **oauth)
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health(_: Request) -> PlainTextResponse:      # never authenticated: returns no data
@@ -52,8 +57,8 @@ def create_server(svc: Services) -> MCPServer:
 
 def build_services(settings: Settings) -> Services:
     if not settings.dev_mode and not settings.oauth_issuer:
-        raise SystemExit("Refusing to start: set DEV_USER_ID for local development (phase 3), "
-                         "or OAUTH_ISSUER once OAuth is configured (phase 4).")
+        raise SystemExit("Refusing to start: set OAUTH_ISSUER + PUBLIC_BASE_URL (Auth0), "
+                         "or DEV_USER_ID for local development on 127.0.0.1.")
     db = get_db(settings)
     return Services(settings=settings, repos=Repos(db), audit=AuditLog(db), token=token_provider(settings))
 
@@ -70,5 +75,6 @@ def create_app():
     logging.basicConfig(level=settings.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     mcp = create_server(build_services(settings))
     logger.info(f"MCP server: db={settings.mongo_db} trust={settings.trust_level} "
-                f"{'dev user ' + str(settings.dev_user_id) if settings.dev_mode else 'OAuth'}")
+                + (f"dev user {settings.dev_user_id}" if settings.dev_mode
+                   else f"OAuth issuer {settings.oauth_issuer}, resource {settings.resource_url}"))
     return mcp.streamable_http_app(transport_security=transport_security(settings))

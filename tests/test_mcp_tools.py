@@ -128,7 +128,8 @@ async def test_record_feedback(client, test_db):
 
 
 async def test_not_signed_in_is_refused(test_db):
-    svc = Services(settings=make_settings(OAUTH_ISSUER="https://auth.example.com"),
+    svc = Services(settings=make_settings(OAUTH_ISSUER="https://auth.example.com/",
+                                          PUBLIC_BASE_URL="https://brain.example.com"),
                    repos=Repos(test_db),
                    audit=AuditLog(test_db), token=lambda: None)
     async with Client(create_server(svc)) as c:

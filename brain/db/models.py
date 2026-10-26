@@ -95,8 +95,11 @@ class InterestsDoc(_Doc):
 
 
 class UserProfileDoc(_Doc):
-    """users read WITHOUT feedback (see UsersRepo.PROFILE_PROJECTION)."""
-    id: int = Field(alias="_id")
+    """users read WITHOUT feedback (see UsersRepo.PROFILE_PROJECTION).
+
+    _id: a Telegram id (int) for bot users, an ObjectId (as hex) for users created for an OAuth login.
+    """
+    id: int | Id = Field(alias="_id")
     first_name: str | None = None
     daily: DailyDoc | None = None
     interests: InterestsDoc = InterestsDoc()

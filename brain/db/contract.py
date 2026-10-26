@@ -50,7 +50,8 @@ def load_contract(path: Path = CONTRACT_PATH) -> dict[str, list[FieldRule]]:
         if heading:
             collection = heading.group(1)
             continue
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        # Columns are split on unescaped pipes; "\|" inside a cell is a literal "|" (e.g. "int\|objectid").
+        cells = [c.strip().replace("\\|", "|") for c in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
         if not collection or len(cells) < 4 or not cells[0].startswith("`"):
             continue
         field, type_spec, required, access = cells[0].strip("`"), cells[1], cells[2], cells[3]

@@ -6,13 +6,14 @@ is logged with the exact field and skipped, so one bad document never breaks a w
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TypeVar
 
 from bson import ObjectId
 from bson.errors import InvalidId
 from bson.regex import Regex
 from pydantic import BaseModel, ValidationError
+from pymongo.errors import DuplicateKeyError
 from pymongo.asynchronous.database import AsyncDatabase
 
 from brain.db.models import DigestDoc, PostDoc, SourceDoc, UserProfileDoc
@@ -140,6 +141,23 @@ class DigestsRepo:
         return None
 
 
+UserId = int | str     # Telegram users: int; users created for an OAuth login: the ObjectId as hex
+
+
+def user_key(user_id: UserId) -> int | ObjectId:
+    """users._id for a user id: Telegram ids stay ints, hex strings become ObjectIds."""
+    if isinstance(user_id, int):
+        return user_id
+    oid = to_object_id(user_id)
+    if oid is None:
+        raise ValueError(f"not a user id: {user_id!r}")
+    return oid
+
+
+def _public_id(key: int | ObjectId) -> UserId:
+    return key if isinstance(key, int) else str(key)
+
+
 class UsersRepo:
     # Never includes feedback.
     PROFILE_PROJECTION = {"first_name": 1, "daily.date": 1, "daily.selected": 1, "interests": 1,
@@ -148,36 +166,66 @@ class UsersRepo:
     def __init__(self, db: AsyncDatabase):
         self.col = db["users"]
 
-    async def get_profile(self, user_id: int) -> UserProfileDoc | None:
-        doc = await self.col.find_one({"_id": user_id}, self.PROFILE_PROJECTION)
+    async def get_profile(self, user_id: UserId) -> UserProfileDoc | None:
+        doc = await self.col.find_one({"_id": user_key(user_id)}, self.PROFILE_PROJECTION)
         return parse(UserProfileDoc, doc, "users")
 
-    async def find_by_identity(self, provider: str, subject: str) -> int | None:
+    async def find_by_identity(self, provider: str, subject: str) -> UserId | None:
         doc = await self.col.find_one({"identities": {"$elemMatch": {"provider": provider, "subject": subject}}},
                                       {"_id": 1})
-        return doc["_id"] if doc else None
+        return _public_id(doc["_id"]) if doc else None
 
-    async def find_feedback(self, user_id: int, post_id: ObjectId, channels: list[str]) -> dict | None:
+    async def create_identity_user(self, provider: str, subject: str, channel: str,
+                                   email: str | None = None) -> UserId:
+        """A new users record for an OAuth login. Never touches Telegram users.
+
+        Shaped so the bot ignores it: no Telegram id, onboarded False, daily_push False.
+        The unique index on identities (brain.scripts.setup_indexes) makes concurrent first calls safe.
+        """
+        now = datetime.now(timezone.utc)
+        doc = {"_id": ObjectId(), "source": channel, "email": email, "created_at": now, "last_seen": now,
+               "identities": [{"provider": provider, "subject": subject, "created_at": now}],
+               "onboarded": False, "daily_push": False,
+               "interests": {"category_scores": {"ua": {}, "ru": {}}, "tag_scores": {}},
+               "goals": [], "feedback": []}
+        try:
+            await self.col.insert_one(doc)
+            return str(doc["_id"])
+        except DuplicateKeyError:
+            existing = await self.find_by_identity(provider, subject)
+            if existing is None:
+                raise
+            return existing
+
+    async def find_feedback(self, user_id: UserId, post_id: ObjectId, channels: list[str]) -> dict | None:
         """The user's earlier feedback entry for this post written through one of `channels` (MCP clients)."""
         doc = await self.col.find_one(
-            {"_id": user_id},
+            {"_id": user_key(user_id)},
             {"feedback": {"$elemMatch": {"post_id": post_id, "channel": {"$in": channels}}}})
         entries = (doc or {}).get("feedback") or []
         return entries[0] if entries else None
 
-    async def replace_feedback(self, user_id: int, post_id: ObjectId, channels: list[str], entry: dict,
+    async def replace_feedback(self, user_id: UserId, post_id: ObjectId, channels: list[str], entry: dict,
                                inc: dict, keep: int) -> bool:
         """Removes earlier entries for this post from `channels`, pushes `entry` (capped at `keep`) and applies `inc`.
 
         Telegram entries (no `channel`) are never touched. Returns False if the user does not exist.
         """
-        await self.col.update_one({"_id": user_id},
+        key = user_key(user_id)
+        await self.col.update_one({"_id": key},
                                   {"$pull": {"feedback": {"post_id": post_id, "channel": {"$in": channels}}}})
         update: dict = {"$push": {"feedback": {"$each": [entry], "$slice": -keep}}}
         if inc:
             update["$inc"] = inc
-        result = await self.col.update_one({"_id": user_id}, update)
+        result = await self.col.update_one({"_id": key}, update)
         return result.matched_count == 1
+
+
+async def ensure_user_indexes(db: AsyncDatabase) -> None:
+    """One users record per OAuth identity. Run from brain.scripts.setup_indexes, not at import time."""
+    await db["users"].create_index([("identities.provider", 1), ("identities.subject", 1)], unique=True,
+                                   name="identity_unique",
+                                   partialFilterExpression={"identities.subject": {"$exists": True}})
 
 
 class Repos:
