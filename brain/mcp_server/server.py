@@ -1,0 +1,74 @@
+"""The MCP server: one door to the brain. Streamable HTTP at /mcp, liveness at /health.
+
+Run locally (dev user, sample data):
+    brain/.venv/bin/python -m brain.mcp_server
+"""
+from __future__ import annotations
+
+import logging
+
+from mcp.server import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
+
+from brain.audit.log import AuditLog
+from brain.config import Settings, get_settings
+from brain.db.client import get_db
+from brain.db.repositories import Repos
+from brain.mcp_server.auth import token_provider
+from brain.mcp_server.tools import Services, register_tools
+
+INSTRUCTIONS = """\
+You are connected to the user's private news brain: daily digests and summaries of Telegram posts from \
+Ukrainian and Russian channels about the war and the defense sector, plus the user's own interests and goals.
+
+Rules:
+- For anything about the news or the user's data, answer only from these tools' results. Cite the post_url \
+or source_urls for every fact.
+- If the tools return nothing relevant, say "I don't have that in the data" instead of guessing. Do not fill \
+gaps from general knowledge without saying clearly that it is not from the data.
+- Items with is_russian_source_claim=true come from Russian channels: write "Russian channels claim ...", never \
+present them as facts.
+- After showing a digest, offer short follow-ups: a shorter version, more detail on item N, or the sources.
+- Reply in the user's language; Ukrainian by default.
+- Call record_feedback only when the user clearly rates a specific post.
+"""
+
+logger = logging.getLogger("brain.mcp")
+
+
+def create_server(svc: Services) -> MCPServer:
+    mcp = MCPServer("brain", title="News brain", instructions=INSTRUCTIONS, version="0.1.0",
+                    log_level=svc.settings.log_level.upper())
+
+    @mcp.custom_route("/health", methods=["GET"])
+    async def health(_: Request) -> PlainTextResponse:      # never authenticated: returns no data
+        return PlainTextResponse("ok")
+
+    register_tools(mcp, svc)
+    return mcp
+
+
+def build_services(settings: Settings) -> Services:
+    if not settings.dev_mode and not settings.oauth_issuer:
+        raise SystemExit("Refusing to start: set DEV_USER_ID for local development (phase 3), "
+                         "or OAUTH_ISSUER once OAuth is configured (phase 4).")
+    db = get_db(settings)
+    return Services(settings=settings, repos=Repos(db), audit=AuditLog(db), token=token_provider(settings))
+
+
+def transport_security(settings: Settings) -> TransportSecuritySettings | None:
+    if settings.allowed_hosts:
+        return TransportSecuritySettings(allowed_hosts=settings.allowed_hosts)
+    return None          # the SDK's default: DNS-rebinding protection, localhost only
+
+
+def create_app():
+    """ASGI app for uvicorn: `uvicorn brain.mcp_server.server:create_app --factory`."""
+    settings = get_settings()
+    logging.basicConfig(level=settings.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    mcp = create_server(build_services(settings))
+    logger.info(f"MCP server: db={settings.mongo_db} trust={settings.trust_level} "
+                f"{'dev user ' + str(settings.dev_user_id) if settings.dev_mode else 'OAuth'}")
+    return mcp.streamable_http_app(transport_security=transport_security(settings))

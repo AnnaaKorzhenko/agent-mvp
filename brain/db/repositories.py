@@ -6,12 +6,12 @@ is logged with the exact field and skipped, so one bad document never breaks a w
 from __future__ import annotations
 
 import logging
-import re
 from datetime import datetime
 from typing import TypeVar
 
 from bson import ObjectId
 from bson.errors import InvalidId
+from bson.regex import Regex
 from pydantic import BaseModel, ValidationError
 from pymongo.asynchronous.database import AsyncDatabase
 
@@ -78,15 +78,16 @@ class PostsRepo:
                 out[post.id] = post
         return out
 
-    async def search_candidates(self, words: list[str], *, since_iso: str, allowed: list[str],
+    async def search_candidates(self, patterns: list[str], *, since_iso: str, allowed: list[str],
                                 side: str | None = None, category: str | None = None,
                                 limit: int = 200) -> list[PostDoc]:
-        """Posts whose summary or tags match any of the words (case-insensitive), newest and most important first.
+        """Posts whose summary or tags match any of the regex patterns (case-insensitive), newest first.
 
-        Plain pattern search: no text index (not approved on the pipeline's collection). Ranking is done
-        in brain.domain.posts.
+        Plain pattern search: no text index (not approved on the pipeline's collection). Patterns are built
+        and results ranked in brain.domain.posts.
         """
-        patterns = [re.compile(re.escape(w), re.IGNORECASE) for w in words if w]
+        # (*UCP): without it MongoDB's \w is ASCII-only, so Cyrillic letters would count as word boundaries.
+        patterns = [Regex("(*UCP)" + p, "i") for p in patterns if p]
         if not patterns:
             return []
         query: dict = {
