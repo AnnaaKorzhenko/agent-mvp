@@ -160,3 +160,4 @@ Also check:
 | Every call returns 401 after sign-in | The API identifier ≠ `PUBLIC_BASE_URL + /mcp`, or `OAUTH_ISSUER` lacks the trailing slash |
 | "This account is not allowed" | The email is not in `ALLOWED_EMAILS`, or the Action isn't deployed (no email claim) |
 | Feedback shows `channel: "unknown"` | The post-login Action isn't in the flow |
+| Data goes to `News` although another database was meant | The key must be `MONGO_DB` (not `MONGO_DB_NAME`, the bot's name for it). The start-up log line `MCP server: db=…` shows which database is used |
