@@ -54,6 +54,7 @@ Then choose "Streamable HTTP" with the URL `http://127.0.0.1:8000/mcp`.
 | `get_post(post_id)` | One post |
 | `get_profile()` | Goals, today's categories, top categories and tags. Never feedback. |
 | `record_feedback(post_id, reaction, text)` | Saves a like / dislike / skip in the bot's feedback shape and updates scores |
+| `set_goal(action, text)` | Adds or removes a goal with the bot's rules (max 5 active, no duplicates; removing keeps history) |
 
 Every call is written to `audit_log`. Run `python -m brain.scripts.setup_indexes` once per database for the TTL index.
 

@@ -5,7 +5,7 @@ import itertools
 import pytest
 from bson import ObjectId
 
-from brain.domain import digests, feedback, posts, profile, sensitivity
+from brain.domain import digests, feedback, goals, posts, profile, sensitivity
 from brain.domain.errors import InvalidInput, NotFound
 from brain.domain.identity import UserContext
 from tests.fixtures.sample_data import (P_AD, P_DRONES, P_GRANTS, P_OLD, P_RU_CLAIM, P_SECRET, P_TOP, USERS)
@@ -121,6 +121,43 @@ async def test_profile_projection_never_reads_feedback(repos, user):
     assert "feedback" not in repos.users.PROFILE_PROJECTION
     p = await repos.users.get_profile(user)
     assert not hasattr(p, "feedback")
+
+
+# ---- goals ---------------------------------------------------------------------
+
+async def test_add_goal_in_bot_shape(repos, test_db, user):
+    r = await goals.add_goal(repos, cloud(user), "  стежити   за НРК ")
+    assert r.changed == "стежити за НРК"
+    assert r.goals == ["Знайти напрямки для інвестицій у defense tech", "стежити за НРК"]
+    g = (await _user(test_db, user))["goals"][-1]
+    assert {k: g[k] for k in ("text", "active", "source", "channel")} == {
+        "text": "стежити за НРК", "active": True, "source": "user", "channel": "claude"}
+    assert (await profile.get_profile(repos, cloud(user))).goals == r.goals
+    assert len((await goals.add_goal(repos, cloud(user), "x" * 400)).changed) == goals.MAX_TEXT
+
+
+async def test_add_goal_rules(repos, user):
+    with pytest.raises(InvalidInput, match="empty"):
+        await goals.add_goal(repos, cloud(user), "   ")
+    with pytest.raises(InvalidInput, match="already exists"):
+        await goals.add_goal(repos, cloud(user), "знайти напрямки для інвестицій у DEFENSE tech")
+    await goals.add_goal(repos, cloud(user), "Стара ціль")                       # an inactive goal may return
+    for i in range(3):
+        await goals.add_goal(repos, cloud(user), f"ціль {i}")
+    with pytest.raises(InvalidInput, match="Ask which one to remove"):
+        await goals.add_goal(repos, cloud(user), "шоста")
+    assert len((await profile.get_profile(repos, cloud(user))).goals) == goals.MAX_GOALS
+    with pytest.raises(NotFound):
+        await goals.add_goal(repos, cloud(424242), "ціль")
+
+
+async def test_remove_goal_keeps_history(repos, test_db, user):
+    r = await goals.remove_goal(repos, cloud(user), "знайти напрямки для інвестицій у defense tech")
+    assert r.goals == [] and r.changed == "Знайти напрямки для інвестицій у defense tech"
+    stored = (await _user(test_db, user))["goals"]
+    assert len(stored) == 2 and stored[0]["active"] is False and "removed_at" in stored[0]
+    with pytest.raises(NotFound, match="No such active goal"):
+        await goals.remove_goal(repos, cloud(user), "Стара ціль")                # inactive: not removable
 
 
 # ---- feedback ------------------------------------------------------------------

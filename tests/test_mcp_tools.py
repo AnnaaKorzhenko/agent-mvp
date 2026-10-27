@@ -13,7 +13,8 @@ from tests.conftest import make_settings
 from tests.fixtures.sample_data import P_DRONES, P_SECRET, P_TOP, USERS
 
 UID = 800_000_001
-TOOLS = {"get_digest", "search_posts", "get_post", "get_profile", "record_feedback"}
+TOOLS = {"get_digest", "search_posts", "get_post", "get_profile", "record_feedback", "set_goal"}
+WRITE_TOOLS = {"record_feedback", "set_goal"}
 SECRET_TEXTS = ("Оцінка постачання дронів", "Внутрішня оцінка", "Закритий звіт")
 
 
@@ -52,13 +53,13 @@ def client(svc):
     return ConnectPerCall(create_server(svc))
 
 
-async def test_lists_five_typed_tools(client):
+async def test_lists_typed_tools(client):
     tools = {t.name: t for t in (await client.list_tools()).tools}
     assert set(tools) == TOOLS
     for t in tools.values():
         assert t.output_schema and t.description
-    assert all(tools[n].annotations.read_only_hint for n in TOOLS - {"record_feedback"})
-    assert tools["record_feedback"].annotations.read_only_hint is False
+    assert all(tools[n].annotations.read_only_hint for n in TOOLS - WRITE_TOOLS)
+    assert all(tools[n].annotations.read_only_hint is False for n in WRITE_TOOLS)
     assert "user_id" not in json.dumps([t.input_schema for t in tools.values()])     # never an argument
 
 
@@ -125,6 +126,18 @@ async def test_record_feedback(client, test_db):
     for args in ({"post_id": "", "reaction": "like"}, {"post_id": str(P_SECRET), "reaction": "like"},
                  {"post_id": str(P_DRONES), "reaction": "love"}):
         assert (await client.call_tool("record_feedback", args)).is_error
+
+
+async def test_set_goal(client, test_db):
+    r = (await client.call_tool("set_goal", {"action": "add", "text": "стежити за НРК"})).structured_content
+    assert r["added"] == "стежити за НРК" and "стежити за НРК" in r["goals"]
+    assert (await test_db.users.find_one({"_id": UID}))["goals"][-1]["channel"] == "dev"
+    assert (await client.call_tool("set_goal", {"action": "add", "text": "Стежити за НРК"})).is_error
+    r = (await client.call_tool("set_goal", {"action": "remove", "text": "стежити за НРК"})).structured_content
+    assert r["removed"] == "стежити за НРК" and "стежити за НРК" not in r["goals"]
+    err = await client.call_tool("set_goal", {"action": "remove", "text": "немає такої"})
+    assert err.is_error and "Current goals" in err.content[0].text
+    assert (await client.call_tool("set_goal", {"action": "rename", "text": "x"})).is_error
 
 
 async def test_not_signed_in_is_refused(test_db):

@@ -18,6 +18,7 @@ from brain.config import Settings
 from brain.db.repositories import Repos
 from brain.domain import digests as digests_domain
 from brain.domain import feedback as feedback_domain
+from brain.domain import goals as goals_domain
 from brain.domain import posts as posts_domain
 from brain.domain import profile as profile_domain
 from brain.domain import sensitivity
@@ -205,4 +206,29 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
             await call.done(items=1)
             return out.FeedbackOut(post_id=r.post_id, reaction=r.reaction, replaced_previous=r.replaced_previous,
                                    score_changes=r.score_changes)
+        return await call.run(body)
+
+    @mcp.tool(title="Add or remove a goal",
+              annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True,
+                                          openWorldHint=False))
+    async def set_goal(
+        action: Annotated[Literal["add", "remove"], Field(description="add a new goal, or remove an existing one")],
+        text: Annotated[str, Field(min_length=1, max_length=300, description=(
+            "add: the goal in the user's words, e.g. 'стежити за розвитком НРК'; "
+            "remove: the goal's text exactly as get_profile returns it"))],
+    ) -> out.GoalsOut:
+        """Add or remove one of the user's goals (what they most want to achieve; at most 5). Goals shape which
+        news matter to them. Call it only when the user explicitly asks to set, change or drop a goal, never on
+        your own judgement. To change a goal, remove the old one and add the new one."""
+        call = _Call(svc, "set_goal", {"action": action, "text": text})
+
+        async def body(ctx: UserContext) -> out.GoalsOut:
+            if action == "add":
+                r = await goals_domain.add_goal(svc.repos, ctx, text)
+                result = out.GoalsOut(goals=r.goals, added=r.changed)
+            else:
+                r = await goals_domain.remove_goal(svc.repos, ctx, text)
+                result = out.GoalsOut(goals=r.goals, removed=r.changed)
+            await call.done(items=1)
+            return result
         return await call.run(body)

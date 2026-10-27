@@ -94,9 +94,13 @@ The bot ignores these records: they have no Telegram id, and `onboarded` and `da
 | `interests.tag_scores` | dict | no | RW | `{tag: score}`, updated through `brain/domain/scoring.py` |
 | `daily.date` | str | no | R | Kyiv date of the morning picker (`YYYY-MM-DD`) |
 | `daily.selected` | dict | no | R | Today's chosen categories `{ua: [], ru: []}`; ordering uses them only if `daily.date` is today |
-| `goals` | list | no | R | Goals |
-| `goals[].text` | str | yes | R | Goal text |
-| `goals[].active` | bool | yes | R | Only active goals are returned |
+| `goals` | list | no | RW | Goals, `$push`ed by `set_goal` in the bot's shape (max 5 active, no duplicates) |
+| `goals[].text` | str | yes | RW | Goal text, one line, at most 300 characters |
+| `goals[].active` | bool | yes | RW | Only active goals are returned; removing a goal sets `false` (history stays) |
+| `goals[].source` | str | no | W | `user`, as the bot writes it |
+| `goals[].created_at` | datetime | no | W | When the goal was added |
+| `goals[].removed_at` | datetime | no | W | When the goal was removed |
+| `goals[].channel` | str | no | W | **New:** the MCP client that wrote the goal. Missing = written by the bot |
 | `feedback` | list | no | W | Reaction log, `$push`ed. Read only to replace the server's own earlier entry for the same post |
 | `feedback[].post_id` | objectid? | no | RW | Post the reaction is about (`null` in very old bot entries) |
 | `feedback[].reaction` | str | yes | RW | `like` / `dislike` / `skip` |

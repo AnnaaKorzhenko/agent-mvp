@@ -221,6 +221,20 @@ class UsersRepo:
         return result.matched_count == 1
 
 
+    async def push_goal(self, user_id: UserId, goal: dict) -> bool:
+        """Appends a goal. Returns False if the user does not exist."""
+        result = await self.col.update_one({"_id": user_key(user_id)}, {"$push": {"goals": goal}})
+        return result.matched_count == 1
+
+    async def deactivate_goal(self, user_id: UserId, index: int, text: str, at: datetime) -> bool:
+        """Marks goals[index] inactive, like the bot's remove_goal (history stays). The text check guards
+        against the array having changed since it was read."""
+        result = await self.col.update_one(
+            {"_id": user_key(user_id), f"goals.{index}.text": text, f"goals.{index}.active": True},
+            {"$set": {f"goals.{index}.active": False, f"goals.{index}.removed_at": at}})
+        return result.modified_count == 1
+
+
 async def ensure_user_indexes(db: AsyncDatabase) -> None:
     """One users record per OAuth identity. Run from brain.scripts.setup_indexes, not at import time."""
     await db["users"].create_index([("identities.provider", 1), ("identities.subject", 1)], unique=True,

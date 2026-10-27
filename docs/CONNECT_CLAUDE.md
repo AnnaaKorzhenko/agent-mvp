@@ -145,6 +145,7 @@ After the first call:
 | 8 | «Які мої цілі й інтереси?» | `get_profile`; a new Claude user's profile starts empty |
 | 9 | After a post is shown: «Ця новина корисна» | `record_feedback(like)`; ask #8 again and that category's score has gone up |
 | 10 | «Зведення за 1 січня 2001» | No digest for that date; says so |
+| 11 | «Моя ціль: стежити за розвитком НРК», then «Прибери цю ціль» | `set_goal(add)`, then `set_goal(remove)`; #8 shows the goal, then no longer |
 
 Also check:
 - an email not in `ALLOWED_EMAILS` is refused;

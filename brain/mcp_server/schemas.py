@@ -82,6 +82,12 @@ class ProfileOut(BaseModel):
     top_tags: list[TagScore]
 
 
+class GoalsOut(BaseModel):
+    goals: list[str] = Field(description="The user's active goals after the change")
+    added: str | None = None
+    removed: str | None = None
+
+
 class FeedbackOut(BaseModel):
     post_id: str
     reaction: Literal["like", "dislike", "skip"]

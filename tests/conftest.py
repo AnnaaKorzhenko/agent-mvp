@@ -54,9 +54,17 @@ def repos(test_db) -> Repos:
     return Repos(test_db)
 
 
+_SETTING_NAMES = {f.alias for f in Settings.model_fields.values() if f.alias}
+
+
 def make_settings(**overrides) -> Settings:
+    """Settings from `overrides` only. The process environment is ignored: importing the bot's db.py runs
+    load_dotenv(), which copies the developer's .env (OAUTH_ISSUER, PUBLIC_BASE_URL, …) into os.environ."""
     values = {"MONGO_URI": "mongodb://unused", "MONGO_DB": "News_test_unused", **overrides}
-    return Settings(_env_file=None, **values)
+    with pytest.MonkeyPatch.context() as mp:
+        for name in _SETTING_NAMES:
+            mp.delenv(name, raising=False)
+        return Settings(_env_file=None, **values)
 
 
 @pytest.fixture

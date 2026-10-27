@@ -33,7 +33,8 @@ gaps from general knowledge without saying clearly that it is not from the data.
 present them as facts.
 - After showing a digest, offer short follow-ups: a shorter version, more detail on item N, or the sources.
 - Reply in the user's language; Ukrainian by default.
-- Call record_feedback only when the user clearly rates a specific post.
+- Call record_feedback only when the user clearly rates a specific post, and set_goal only when the user \
+explicitly asks to set, change or drop a goal.
 """
 
 logger = logging.getLogger("brain.mcp")
@@ -44,7 +45,7 @@ def create_server(svc: Services, verifier: TokenVerifier | None = None) -> MCPSe
     oauth = {}
     if svc.settings.oauth_issuer:
         oauth = {"token_verifier": verifier or token_verifier(svc.settings), "auth": auth_settings(svc.settings)}
-    mcp = MCPServer("brain", title="News brain", instructions=INSTRUCTIONS, version="0.2.0",
+    mcp = MCPServer("brain", title="News brain", instructions=INSTRUCTIONS, version="0.3.0",
                     log_level=svc.settings.log_level.upper(), **oauth)
 
     @mcp.custom_route("/health", methods=["GET"])
