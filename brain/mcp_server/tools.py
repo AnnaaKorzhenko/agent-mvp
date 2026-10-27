@@ -26,6 +26,7 @@ from brain.domain import sensitivity
 from brain.domain.errors import DomainError
 from brain.domain.identity import IdentityError, UserContext, VerifiedToken, resolve_user
 from brain.mcp_server import schemas as out
+from brain.mcp_server import widgets
 
 TokenProvider = Callable[[], VerifiedToken | None]
 
@@ -93,7 +94,7 @@ class _Call:
 
 def register_tools(mcp: MCPServer, svc: Services) -> None:
 
-    @mcp.tool(title="Today's news digest", annotations=READ_ONLY)
+    @mcp.tool(title="Today's news digest", annotations=READ_ONLY, meta=widgets.tool_meta(widgets.DIGEST_UI))
     async def get_digest(
         side: Annotated[Literal["ua", "ru", "both"], Field(
             description="ua: Ukrainian sources; ru: Russian sources (claims, not facts); both: both")] = "both",

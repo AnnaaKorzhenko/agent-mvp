@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Зведення</title>
+<style>
+  /* Claude's style variables when the host sends them (applyHostStyleVariables), otherwise these fallbacks. */
+  :root {
+    --bg: var(--color-background-primary, #ffffff);
+    --card: var(--color-background-secondary, #f6f5f2);
+    --text: var(--color-text-primary, #1f1e1d);
+    --muted: var(--color-text-secondary, #6b6a66);
+    --border: var(--color-border-tertiary, #e3e1db);
+    --accent: var(--color-text-info, #2f6fb3);
+    --ok: var(--color-text-success, #2e7d4f);
+    --bad: var(--color-text-danger, #b3261e);
+    --warn-bg: var(--color-background-warning, #fbf1d9);
+    --radius: var(--border-radius-lg, 12px);
+    --font: var(--font-sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--color-background-primary, #1f1e1d); --card: var(--color-background-secondary, #2a2927);
+      --text: var(--color-text-primary, #ecebe8); --muted: var(--color-text-secondary, #a8a6a0);
+      --border: var(--color-border-tertiary, #3a3936); --accent: var(--color-text-info, #7fb0e8);
+      --ok: var(--color-text-success, #79c79a); --bad: var(--color-text-danger, #f08a80);
+      --warn-bg: var(--color-background-warning, #3d3420);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--color-background-primary, #1f1e1d); --card: var(--color-background-secondary, #2a2927);
+    --text: var(--color-text-primary, #ecebe8); --muted: var(--color-text-secondary, #a8a6a0);
+    --border: var(--color-border-tertiary, #3a3936); --accent: var(--color-text-info, #7fb0e8);
+    --ok: var(--color-text-success, #79c79a); --bad: var(--color-text-danger, #f08a80);
+    --warn-bg: var(--color-background-warning, #3d3420);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 4px 0 8px; background: transparent; color: var(--text); font: 14px/1.45 var(--font); }
+  .side { margin: 0 0 16px; }
+  .side h2 { font-size: 15px; margin: 4px 0 8px; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; }
+  .note { font-size: 12px; color: var(--muted); font-weight: 400; }
+  .claim { background: var(--warn-bg); border-radius: 6px; padding: 1px 6px; font-size: 12px; font-weight: 500; }
+  .section h3 { font-size: 13px; color: var(--muted); font-weight: 600; margin: 12px 0 6px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; margin: 0 0 6px; }
+  .row { display: flex; gap: 8px; align-items: flex-start; }
+  .ref { flex: none; font-weight: 700; color: var(--muted); min-width: 2.2em; }
+  .text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .foot { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; justify-content: space-between;
+          margin-top: 6px; }
+  .links { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; min-width: 0; }
+  .links a { color: var(--accent); text-decoration: none; }
+  .links a:hover { text-decoration: underline; }
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .more { margin: 2px 0 0; }
+  [hidden] { display: none !important; }
+  button { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
+           border-radius: 999px; padding: 2px 10px; min-height: 30px; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:disabled { opacity: .5; cursor: default; }
+  button[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); font-weight: 600; }
+  .status { font-size: 12px; color: var(--muted); }
+  .status.ok { color: var(--ok); }
+  .status.error { color: var(--bad); }
+  .comment { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+  textarea { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
+             border-radius: 8px; padding: 6px 8px; width: 100%; min-height: 56px; resize: vertical; }
+  .empty { color: var(--muted); padding: 8px 0; }
+  @media (max-width: 420px) { body { font-size: 15px; } button { min-height: 40px; padding: 6px 14px; } }
+</style>
+</head>
+<body>
+<div id="root"><div class="empty">Завантаження зведення…</div></div>
+
+<script type="module">
+/*__EXT_APPS__*/
+</script>
+
+<script type="module">
+const { App, applyDocumentTheme, applyHostStyleVariables, applyHostFonts } = globalThis.__mcpExtApps;
+
+const REACTIONS = [["useful", "👍"], ["not_useful", "👎"], ["neutral", "50/50"]];
+const LABEL = { useful: "👍 корисно", not_useful: "👎 не корисно", neutral: "50/50" };
+const SIDE = { ua: "Українські джерела", ru: "Російські джерела" };
+const FIRST = 6;                // items shown per side before «Показати ще»
+const root = document.getElementById("root");
+const ratings = new Map();      // "digest_id:n" -> {ref, text, reaction, feedback_id, comment}
+
+const app = new App({ name: "News brain digest", version: "1.0.0" }, {}, { autoResize: true });
+
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") node.className = v;
+    else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else if (v !== undefined && v !== null && v !== false) node.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of children.flat()) if (c != null) node.append(c);   // strings become text nodes: no HTML injection
+  return node;
+}
+
+function applyContext(ctx) {
+  if (!ctx) return;
+  if (ctx.theme) applyDocumentTheme(ctx.theme);
+  if (ctx.styles?.variables) applyHostStyleVariables(ctx.styles.variables);
+  if (ctx.styles?.css?.fonts) applyHostFonts(ctx.styles.css.fonts);
+}
+
+function short(text, n = 70) { return text.length > n ? text.slice(0, n - 1) + "…" : text; }
+
+function host(url) { try { return new URL(url).host + new URL(url).pathname; } catch { return url; } }
+
+async function openLink(event, url) {
+  event.preventDefault();
+  try { await app.openLink({ url }); } catch { window.open(url, "_blank", "noopener"); }
+}
+
+function payload(result) {
+  if (result?.structuredContent) return result.structuredContent;
+  try { return JSON.parse(result?.content?.[0]?.text ?? ""); } catch { return null; }
+}
+
+function errorText(result, fallback) {
+  return result?.content?.find?.((c) => c.type === "text")?.text || fallback;
+}
+
+// The model sees only the latest context update, so always send every rating made in this widget.
+async function syncModelContext() {
+  const lines = [...ratings.values()].map((r) =>
+    `- #${r.ref} «${short(r.text)}»: ${LABEL[r.reaction]}` + (r.comment ? `; коментар: «${r.comment}»` : "") +
+    ` (feedback_id ${r.feedback_id})`);
+  const text = "Оцінки, які користувач поставив кнопками у віджеті зведення (уже збережено, record_feedback " +
+               "повторно не викликати; коментар до оцінки можна додати через її feedback_id):\n" + lines.join("\n");
+  try { await app.updateModelContext({ content: [{ type: "text", text }] }); } catch { /* host may not support it */ }
+}
+
+function card(digest, item) {
+  const key = `${digest.digest_id}:${item.n}`;
+  const status = el("span", { class: "status", role: "status" });
+  const box = el("textarea", { placeholder: "Чому? (необов'язково)", maxlength: "2000", "aria-label": "Коментар" });
+  const send = el("button", { type: "button" }, "Надіслати");
+  const skip = el("button", { type: "button" }, "Пропустити");
+  const comment = el("div", { class: "comment", hidden: true }, box, el("div", { class: "actions" }, send, skip));
+  const buttons = REACTIONS.map(([reaction, label]) => el("button", {
+    type: "button", "aria-pressed": "false", "aria-label": LABEL[reaction], title: LABEL[reaction],
+    onclick: () => rate(reaction),
+  }, label));
+
+  function busy(on) { for (const b of [...buttons, send, skip]) b.disabled = on; }
+  function show(text, kind = "") { status.textContent = text; status.className = "status " + kind; }
+
+  async function rate(reaction) {
+    busy(true); show("Зберігаю…");
+    try {
+      const result = await app.callServerTool({ name: "record_feedback", arguments: {
+        target_type: "digest_item", digest_id: digest.digest_id, item_n: item.n, reaction } });
+      const out = payload(result);
+      if (result.isError || !out?.feedback_id) throw new Error(errorText(result, "Не вдалося зберегти"));
+      ratings.set(key, { ref: item.ref, text: item.text, reaction, feedback_id: out.feedback_id, comment: "" });
+      buttons.forEach((b, i) => b.setAttribute("aria-pressed", String(REACTIONS[i][0] === reaction)));
+      show("✓ Збережено", "ok");
+      box.value = ""; comment.hidden = false;
+      await syncModelContext();
+    } catch (e) {
+      show("Не вдалося зберегти: " + (e?.message || e), "error");
+    } finally { busy(false); }
+  }
+
+  async function followUp(text) {
+    const r = ratings.get(key);
+    if (!r) return;
+    busy(true);
+    try {
+      const args = { feedback_id: r.feedback_id, ...(text ? { text } : {}) };
+      const result = await app.callServerTool({ name: "record_feedback", arguments: args });
+      if (result.isError) throw new Error(errorText(result, "Не вдалося зберегти коментар"));
+      r.comment = text || "";
+      comment.hidden = true;
+      show(text ? "✓ Збережено, з коментарем" : "✓ Збережено", "ok");
+      if (text) await syncModelContext();
+    } catch (e) {
+      show("Не вдалося зберегти коментар: " + (e?.message || e), "error");
+    } finally { busy(false); }
+  }
+  send.addEventListener("click", () => { const t = box.value.trim(); if (t) followUp(t); else box.focus(); });
+  skip.addEventListener("click", () => followUp(""));
+
+  const links = (item.source_urls || []).map((url) =>
+    el("a", { href: url, target: "_blank", rel: "noopener", onclick: (e) => openLink(e, url) }, host(url)));
+  return el("div", { class: "card", "data-ref": item.ref },
+    el("div", { class: "row" }, el("span", { class: "ref" }, `#${item.ref}`),
+       el("div", { class: "text" }, item.text,
+          el("div", { class: "foot" }, el("div", { class: "links" }, links),
+             el("div", { class: "actions" }, status, buttons)))),
+    comment);
+}
+
+function render(data) {
+  root.replaceChildren();
+  if (!data?.digests?.length) {
+    root.append(el("div", { class: "empty" }, "Зведення за цю дату немає."));
+    return;
+  }
+  for (const digest of data.digests) {
+    const heading = el("h2", {}, SIDE[digest.side] || digest.side,
+      digest.side === "ru" ? el("span", { class: "claim" }, "заяви рос. каналів, не факти") : null,
+      data.date ? el("span", { class: "note" }, data.date) : null);
+    let shown = 0;
+    const folded = [];
+    const sections = digest.sections.map((s) => {
+      const cards = s.items.map((i) => {
+        const c = card(digest, i);
+        if (++shown > FIRST) { c.hidden = true; folded.push(c); }
+        return c;
+      });
+      const section = el("div", { class: "section" }, el("h3", {}, s.title || s.category), cards);
+      if (cards.every((c) => c.hidden)) { section.hidden = true; folded.push(section); }
+      return section;
+    });
+    const rest = shown - FIRST;
+    const more = rest > 0 ? el("button", { type: "button", class: "more", onclick: () => {
+      folded.forEach((n) => { n.hidden = false; }); more.remove(); } }, `Показати ще ${rest}`) : null;
+    const hidden = digest.hidden_items
+      ? el("div", { class: "note" }, `Ще ${digest.hidden_items} пункт(и) приховано для цього підключення.`) : null;
+    root.append(el("div", { class: "side" }, heading, sections, more, hidden));
+  }
+  if (data.missing_sides?.length) {
+    root.append(el("div", { class: "note" }, "Немає зведення: " + data.missing_sides.map((s) => SIDE[s] || s).join(", ")));
+  }
+}
+
+// Handlers before connect(), so the first notifications are not missed.
+app.ontoolresult = (result) => render(payload(result));
+app.onhostcontextchanged = (ctx) => applyContext(ctx);
+await app.connect();
+applyContext(app.getHostContext());
+</script>
+</body>
+</html>

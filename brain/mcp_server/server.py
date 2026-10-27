@@ -18,6 +18,7 @@ from brain.config import Settings, get_settings
 from brain.db.client import get_db
 from brain.db.repositories import Repos
 from brain.mcp_server.auth import auth_settings, token_provider, token_verifier
+from brain.mcp_server.widgets import apps_extension
 from brain.mcp_server.tools import Services, register_tools
 
 INSTRUCTIONS = """\
@@ -49,8 +50,8 @@ def create_server(svc: Services, verifier: TokenVerifier | None = None) -> MCPSe
     oauth = {}
     if svc.settings.oauth_issuer:
         oauth = {"token_verifier": verifier or token_verifier(svc.settings), "auth": auth_settings(svc.settings)}
-    mcp = MCPServer("brain", title="News brain", instructions=INSTRUCTIONS, version="0.3.0",
-                    log_level=svc.settings.log_level.upper(), **oauth)
+    mcp = MCPServer("brain", title="News brain", instructions=INSTRUCTIONS, version="0.4.0",
+                    log_level=svc.settings.log_level.upper(), extensions=[apps_extension()], **oauth)
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health(_: Request) -> PlainTextResponse:      # never authenticated: returns no data
