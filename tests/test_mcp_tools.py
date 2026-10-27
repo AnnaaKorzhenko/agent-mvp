@@ -84,7 +84,7 @@ async def test_get_digest(client, test_db):
     assert not any(t in json.dumps(d, ensure_ascii=False) for t in SECRET_TEXTS)
     entry = await test_db.audit_log.find_one({"name": "get_digest", "user_id": UID}, sort=[("at", -1)])
     assert entry["kind"] == "tool" and entry["trust"] == "cloud" and entry["items_returned"] == 3
-    assert entry["outcome"] == "ok" and entry["args"] == {"side": "both", "date": None}
+    assert entry["outcome"] == "ok" and entry["args"] == {"side": "both", "date": None, "as_text": False}
 
 
 async def test_search_posts(client):

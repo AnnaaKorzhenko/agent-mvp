@@ -7,11 +7,17 @@ connector's own sign-in, so it needs no stable origin of its own.
 """
 from __future__ import annotations
 
+import logging
 import re
 from functools import lru_cache
 from pathlib import Path
 
-from mcp.server.apps import Apps
+from mcp.server.apps import Apps, client_supports_apps
+from mcp.server.mcpserver import Context
+
+from brain.mcp_server import schemas as out
+
+logger = logging.getLogger("brain.widgets")
 
 UI_DIR = Path(__file__).parent / "ui"
 EXT_APPS = UI_DIR / "vendor" / "ext-apps-1.7.5" / "app-with-deps.js"
@@ -47,6 +53,47 @@ def widget_html(name: str) -> str:
     if html.count(PLACEHOLDER) != 1:
         raise RuntimeError(f"{name}: expected one {PLACEHOLDER}")
     return html.replace(PLACEHOLDER, ext_apps_script())
+
+
+def client_shows_widgets(ctx: Context | None) -> bool:
+    """Whether this connection's client declared MCP Apps support (it renders our ui:// widgets)."""
+    try:
+        shows = ctx is not None and client_supports_apps(ctx)
+        params = ctx.request_context.session.client_params if ctx is not None else None
+    except Exception:           # outside a request, or a transport without a session
+        shows, params = False, None
+    client = getattr(getattr(params, "client_info", None), "name", None)
+    logger.info(f"client {client!r}: widgets {'yes' if shows else 'no'}")
+    return shows
+
+
+def _short(text: str, n: int = 90) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= n else text[:n - 1] + "…"
+
+
+def digest_index(result: out.DigestResult) -> str:
+    """What the model reads when the digest is on screen as cards: a rule not to repeat it, and an index
+    (ref -> ids, opening words) so follow-ups and chat ratings («третя некорисна») still work."""
+    items = [(d, s, i) for d in result.digests for s in d.sections for i in s.items]
+    lines = [
+        f"The user already sees this digest ({result.date}) as interactive cards #1–#{len(items)} with source "
+        "links and 👍 / 👎 / 50/50 buttons. Do NOT repeat, list or summarize the digest in your reply. Reply "
+        "with one short sentence at most (e.g. offer more detail on an item by its number), unless the user "
+        "asked something specific. If the user asks for the digest as text, call get_digest with as_text=true.",
+        "Ratings made with the buttons are already saved; they reach you as context, not as messages.",
+        "Index (ref · side · category · digest_id/n · source post ids · opening words). Items marked RU are "
+        "claims of Russian channels, not facts:",
+    ]
+    for d, s, i in items:
+        lines.append(f"#{i.ref} {'RU' if d.side == 'ru' else 'UA'} · {s.category} · {d.digest_id}/{i.n} · "
+                     f"{','.join(i.source_post_ids[:3])} · «{_short(i.text)}»")
+    for d in result.digests:
+        if d.hidden_items:
+            lines.append(f"{d.hidden_items} {d.side} item(s) withheld for this connection.")
+    if result.missing_sides:
+        lines.append("No digest for: " + ", ".join(result.missing_sides))
+    return "\n".join(lines)
 
 
 def apps_extension() -> Apps:

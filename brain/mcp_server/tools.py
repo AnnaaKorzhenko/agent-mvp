@@ -11,7 +11,8 @@ from typing import Annotated, Awaitable, Callable, Literal
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import ToolAnnotations
+from mcp.server.mcpserver import Context
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import Field
 
 from brain.audit.log import AuditLog
@@ -96,22 +97,28 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
 
     @mcp.tool(title="Today's news digest", annotations=READ_ONLY, meta=widgets.tool_meta(widgets.DIGEST_UI))
     async def get_digest(
+        mcp_ctx: Context,
         side: Annotated[Literal["ua", "ru", "both"], Field(
             description="ua: Ukrainian sources; ru: Russian sources (claims, not facts); both: both")] = "both",
         date: Annotated[str | None, Field(
             description="Kyiv date YYYY-MM-DD; omit for the latest digest")] = None,
-    ) -> out.DigestResult:
+        as_text: Annotated[bool, Field(description=(
+            "true only if the user asks for the digest as text (e.g. the cards didn't show up)"))] = False,
+    ) -> Annotated[CallToolResult, out.DigestResult]:
         """Get the user's daily news digest: sections ordered by the user's interests, every item with its
         source links (source_urls) and post ids (source_post_ids).
 
-        Present items from Ukrainian sources as reported news and items with is_russian_source_claim=true as
-        claims of Russian channels ("Russian channels claim..."), never as facts. Cite source_urls. After
-        showing the digest, offer short follow-ups: a shorter version, more detail on item N (use get_post
-        with its source_post_ids), or the sources. Show every item with its ref number (#1, #2, …) so the user
-        can refer to it and rate it."""
-        call = _Call(svc, "get_digest", {"side": side, "date": date})
+        If the result says shown_in_widget, the user already sees the digest as interactive cards with rating
+        buttons: do not repeat, list or summarize it; reply with one short sentence at most, unless the user
+        asked something specific. Otherwise present it in text: items from Ukrainian sources as reported news,
+        items with is_russian_source_claim=true as claims of Russian channels ("Russian channels claim..."),
+        never as facts; cite source_urls; show every item with its ref number (#1, #2, …) so the user can refer
+        to it and rate it. Offer short follow-ups: more detail on item N (get_post with its source_post_ids),
+        a shorter version, or the sources."""
+        call = _Call(svc, "get_digest", {"side": side, "date": date, "as_text": as_text})
+        widget = not as_text and widgets.client_shows_widgets(mcp_ctx)
 
-        async def body(ctx: UserContext) -> out.DigestResult:
+        async def body(ctx: UserContext) -> CallToolResult:
             res = await digests_domain.get_digests(svc.repos, ctx, side, date)
             refs = itertools.count(1)       # one numbering across both sides: «третя» is unambiguous
             result = out.DigestResult(date=res.date, missing_sides=res.missing_sides, digests=[
@@ -127,9 +134,13 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
                 for v in res.digests])
             if not result.digests:
                 result.note = "No digest found for this date. Say so; do not invent news."
+            result.shown_in_widget = widget and bool(result.digests)
             n = sum(len(s.items) for d in result.digests for s in d.sections)
             await call.done(items=n, labels=[v.digest.sensitivity for v in res.digests])
-            return result
+            # What the model reads: a short index when the cards are on screen, else the full digest.
+            text = widgets.digest_index(result) if result.shown_in_widget else result.model_dump_json()
+            return CallToolResult(content=[TextContent(type="text", text=text)],
+                                  structured_content=result.model_dump(mode="json"))
         return await call.run(body)
 
     @mcp.tool(title="Search news posts", annotations=READ_ONLY)

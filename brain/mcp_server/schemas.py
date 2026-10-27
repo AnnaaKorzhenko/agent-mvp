@@ -65,6 +65,8 @@ class DigestResult(BaseModel):
     digests: list[DigestOut]
     missing_sides: list[str] = Field(description="Sides with no digest for that date")
     note: str | None = None
+    shown_in_widget: bool = Field(False, description="True: the user already sees this digest as an interactive "
+                                                     "widget; do not repeat or summarize it in your reply")
 
 
 class CategoryScore(BaseModel):
