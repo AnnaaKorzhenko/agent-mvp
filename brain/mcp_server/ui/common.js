@@ -120,8 +120,15 @@ function createWidget({ name, where }) {
   }
 
   // Handlers before connect(), so the first notifications are not missed.
+  // A result not meant for cards (the user asked for text, or there is nothing to show; Claude writes it
+  // instead) leaves the widget empty: zero height, so the host shows nothing.
   async function start(render) {
-    app.ontoolresult = (result) => render(payload(result));
+    app.ontoolresult = (result) => {
+      const data = payload(result);
+      if (data?.shown_in_widget === false) { root.replaceChildren(); document.body.hidden = true; return; }
+      document.body.hidden = false;
+      render(data);
+    };
     app.onhostcontextchanged = (ctx) => applyContext(ctx);
     await app.connect();
     applyContext(app.getHostContext());

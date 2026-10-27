@@ -138,3 +138,8 @@ async def test_follow_up_is_audited_without_a_made_up_target(digest_server, test
     assert f.structured_content["target_type"] == "digest_item"
     entry = await test_db.audit_log.find_one({"name": "record_feedback", "args.feedback_id": fid})
     assert entry["args"]["target_type"] is None
+
+
+def test_widgets_hide_when_the_result_is_not_for_cards():
+    js = widgets.widget_html("digest.html")
+    assert "data?.shown_in_widget === false" in js and "document.body.hidden = true" in js

@@ -156,8 +156,9 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
     ) -> Annotated[CallToolResult, out.SearchResult]:
         """Search the news base (summaries of Telegram posts from Ukrainian and Russian channels) by key words.
 
-        Answer only from the results and cite each fact's post_url. If nothing relevant comes back, say
-        "I don't have that in the data" (you may retry once with other words or more days). Results with
+        Answer only from the results and cite each fact's post_url. If the results don't answer the question,
+        say "I don't have that in the data"; search again (once, other words or more days) only if the result
+        list is empty, because every search shows the user another set of result cards. Results with
         is_russian_source_claim=true are claims of Russian sources, not facts. When you list results, show their
         ref numbers (#1, #2, …). If the result says shown_in_widget, the user already sees the results as cards
         with links: answer in your own words citing #N, without listing the posts again."""
@@ -218,7 +219,8 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
                                           openWorldHint=False))
     async def record_feedback(
         reaction: Annotated[Literal["useful", "not_useful", "neutral", "like", "dislike", "skip"] | None, Field(
-            description="useful (👍), not_useful (👎) or neutral (50/50). Omit only with feedback_id")] = None,
+            description="useful (👍), not_useful (👎) or neutral (50/50). Omit only to add a comment to an earlier "
+                        "rating (feedback_id, or the rated item's ids with text)")] = None,
         target_type: Annotated[Literal["post", "digest_item", "answer", "suggestion"] | None, Field(
             description="post (the default): a post from search_posts/get_post; digest_item: an item of "
                         "get_digest; answer / suggestion: your own answer, analysis or suggestion. "
@@ -246,7 +248,9 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
         digest_id + n as item_n; posts: post_id); if it is unclear which item is meant, ask. Never invent ids.
         Take reasons from the user's words and keep text verbatim. For your own answer or suggestion use
         target_type answer / suggestion with a one-line `about` and the post ids you cited. Several ratings in
-        one message mean several calls. A comment that follows a rating goes to that rating's feedback_id.
+        one message mean several calls. A comment that follows a rating goes to that rating's feedback_id; if
+        you don't know it (e.g. the user rated with the cards' buttons), pass the item's ids and the text without
+        a reaction, and it is added to the user's earlier rating of that item.
         Rating the same post or digest item again replaces the earlier rating. Tell the user the
         confirmation."""
         args = {"target_type": target_type, "reaction": reaction, "post_id": post_id, "digest_id": digest_id,

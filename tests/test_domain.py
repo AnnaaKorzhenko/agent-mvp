@@ -337,3 +337,21 @@ async def test_review_queue_lists_citations_of_inaccurate_answers(repos, test_db
     grants = [r for r in rows if r["post_id"] == str(P_GRANTS)]
     assert grants and grants[0]["summary"] and any(f["text"] == "гранти не ті" for f in grants[0]["flags"])
     assert all(r["post_id"] != str(P_DRONES) or all(f["about"] != "інше" for f in r["flags"]) for r in rows)
+
+
+async def test_comment_by_item_goes_to_the_earlier_rating(repos, test_db, user):
+    r = await rate(repos, cloud(user), target_type="digest_item", digest_id=str(DIGEST_UA), item_n=1,
+                   reaction="useful")                                    # e.g. pressed in the cards
+    interests = (await _user(test_db, user))["interests"]
+    c = await rate(repos, cloud(user), target_type="digest_item", digest_id=str(DIGEST_UA), item_n=1,
+                   text="застаріло", reasons=["already_known"])          # «до неї додай: застаріло»
+    assert c.feedback_id == r.feedback_id and c.score_changes == {} and c.reaction == "useful"
+    doc = await _user(test_db, user)
+    entries = [f for f in doc["feedback"] if f.get("item_n") == 1 and f.get("channel")]
+    assert len(entries) == 1 and entries[0]["text"] == "застаріло" and entries[0]["reasons"] == ["already_known"]
+    assert doc["interests"] == interests
+
+    with pytest.raises(InvalidInput, match="hasn't rated"):                # nothing rated yet: no guessing
+        await rate(repos, cloud(user), post_id=str(P_GRANTS), text="цікаво")
+    with pytest.raises(InvalidInput, match="reaction must be"):            # neither reaction nor comment
+        await rate(repos, cloud(user), post_id=str(P_DRONES))
