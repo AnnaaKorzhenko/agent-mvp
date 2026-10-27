@@ -8,7 +8,8 @@ from bson import ObjectId
 from brain.domain import digests, feedback, goals, posts, profile, sensitivity
 from brain.domain.errors import InvalidInput, NotFound
 from brain.domain.identity import UserContext
-from tests.fixtures.sample_data import (P_AD, P_DRONES, P_GRANTS, P_OLD, P_RU_CLAIM, P_SECRET, P_TOP, USERS)
+from brain.scripts.review_queue import review_queue
+from tests.fixtures.sample_data import (DIGEST_UA, P_AD, P_DRONES, P_GRANTS, P_OLD, P_RU_CLAIM, P_SECRET, P_TOP, USERS)
 
 _ids = itertools.count(900_000_001)
 MCP_CHANNELS = ["claude", "chatgpt", "local", "dev", "unknown"]
@@ -166,46 +167,173 @@ async def _user(test_db, uid):
     return await test_db.users.find_one({"_id": uid})
 
 
-async def test_feedback_like_then_dislike_replaces(repos, test_db, user):
-    r = await feedback.record_feedback(repos, cloud(user), str(P_DRONES), "like", "  дуже   корисно ", MCP_CHANNELS)
-    assert r.replaced_previous is None
+def rate(repos, ctx, **kw):
+    return feedback.record_feedback(repos, ctx, mcp_channels=MCP_CHANNELS, **kw)
+
+
+async def test_post_rating_then_new_rating_replaces(repos, test_db, user):
+    r = await rate(repos, cloud(user), post_id=str(P_DRONES), reaction="useful", text="  дуже   корисно ",
+                   reasons=["want_more"])
+    assert r.replaced_previous is None and r.target_type == "post" and r.reaction == "useful"
     assert r.score_changes == {"interests.category_scores.ua.defense_tech": 1,
                                "interests.tag_scores.морські дрони": 1, "interests.tag_scores.Чорне море": 1}
+    assert r.confirmation == "Збережено: 👍 корисно (defense_tech +1)"
     doc = await _user(test_db, user)
     entry = doc["feedback"][-1]
-    assert {k: entry[k] for k in ("post_id", "reaction", "text", "digest_id", "item_n", "side", "category",
-                                  "channel")} == {"post_id": P_DRONES, "reaction": "like", "text": "дуже корисно",
-                                                  "digest_id": None, "item_n": None, "side": "ua",
-                                                  "category": "defense_tech", "channel": "claude"}
+    assert str(entry["fid"]) == r.feedback_id
+    assert {k: entry[k] for k in ("target_type", "post_id", "reaction", "reasons", "text", "comment_status",
+                                  "digest_id", "item_n", "side", "category", "channel")} == {
+        "target_type": "post", "post_id": P_DRONES, "reaction": "useful", "reasons": ["want_more"],
+        "text": "дуже корисно", "comment_status": "commented", "digest_id": None, "item_n": None, "side": "ua",
+        "category": "defense_tech", "channel": "claude"}
     assert doc["interests"]["category_scores"]["ua"]["defense_tech"] == 4
 
-    r = await feedback.record_feedback(repos, cloud(user, "chatgpt"), str(P_DRONES), "dislike", None, MCP_CHANNELS)
-    assert r.replaced_previous == "like"
+    r = await rate(repos, cloud(user, "chatgpt"), post_id=str(P_DRONES), reaction="dislike")     # old word
+    assert r.reaction == "not_useful" and r.replaced_previous == "useful"
     doc = await _user(test_db, user)
     assert doc["interests"]["category_scores"]["ua"]["defense_tech"] == 2           # 4 −1 (undo) −1
     assert doc["interests"]["tag_scores"]["морські дрони"] == -1
-    mcp_entries = [f for f in doc["feedback"] if f.get("post_id") == P_DRONES]
-    assert [f["reaction"] for f in mcp_entries] == ["dislike"]
+    assert [f["reaction"] for f in doc["feedback"] if f.get("post_id") == P_DRONES] == ["not_useful"]
     telegram = [f for f in doc["feedback"] if "channel" not in f]
     assert len(telegram) == 1 and telegram[0]["post_id"] == P_GRANTS                # bot entry untouched
 
 
-async def test_feedback_never_replaces_telegram_entry(repos, test_db, user):
-    await feedback.record_feedback(repos, cloud(user), str(P_GRANTS), "dislike", None, MCP_CHANNELS)
+async def test_replaces_an_older_mcp_entry_in_the_old_format(repos, test_db, user):
+    old = {"post_id": P_DRONES, "reaction": "like", "text": "", "digest_id": None, "item_n": None, "side": "ua",
+           "category": "defense_tech", "tags": ["морські дрони"], "channel": "claude"}
+    await test_db.users.update_one({"_id": user}, {"$push": {"feedback": old},
+                                                   "$inc": {"interests.category_scores.ua.defense_tech": 1}})
+    r = await rate(repos, cloud(user), post_id=str(P_DRONES), reaction="neutral")
+    assert r.replaced_previous == "useful" and r.score_changes["interests.category_scores.ua.defense_tech"] == -1
+    assert [f["reaction"] for f in (await _user(test_db, user))["feedback"] if f.get("post_id") == P_DRONES] == [
+        "neutral"]
+
+
+async def test_neutral_is_recorded_without_points(repos, test_db, user):
+    r = await rate(repos, cloud(user), post_id=str(P_DRONES), reaction="neutral")
+    assert r.score_changes == {} and r.confirmation == "Збережено: 50/50"
+    assert (await _user(test_db, user))["feedback"][-1]["reaction"] == "neutral"
+
+
+async def test_digest_item_in_the_bot_shape(repos, test_db, user):
+    r = await rate(repos, cloud(user), target_type="digest_item", digest_id=str(DIGEST_UA), item_n=1,
+                   reaction="useful")
+    entry = (await _user(test_db, user))["feedback"][-1]
+    assert {k: entry[k] for k in ("target_type", "post_id", "digest_id", "item_n", "side", "category", "tags")} == {
+        "target_type": "digest_item", "post_id": P_DRONES, "digest_id": DIGEST_UA, "item_n": 1, "side": "ua",
+        "category": "defense_tech", "tags": ["морські дрони", "Чорне море"]}
+    assert r.score_changes["interests.category_scores.ua.defense_tech"] == 1
+
+    r = await rate(repos, cloud(user), target_type="digest_item", digest_id=str(DIGEST_UA), item_n=1,
+                   reaction="not_useful")
+    assert r.replaced_previous == "useful"
+    # A post rating of the same post is a different target: neither replaces the other.
+    await rate(repos, cloud(user), post_id=str(P_DRONES), reaction="useful")
+    reactions = sorted((f.get("target_type"), f["reaction"]) for f in (await _user(test_db, user))["feedback"]
+                       if f.get("post_id") == P_DRONES)
+    assert reactions == [("digest_item", "not_useful"), ("post", "useful")]
+
+
+async def test_digest_item_never_replaces_the_bots_entry(repos, test_db, user):
+    await rate(repos, cloud(user), target_type="digest_item", digest_id=str(DIGEST_UA), item_n=3,
+               reaction="not_useful")
+    same_item = [f for f in (await _user(test_db, user))["feedback"] if f.get("item_n") == 3]
+    assert sorted(f["reaction"] for f in same_item) == ["like", "not_useful"]       # Telegram's like is kept
+
+
+@pytest.mark.parametrize("digest_id, item_n", [(str(DIGEST_UA), 2),          # confidential source: hidden
+                                               (str(DIGEST_UA), 9), (str(ObjectId()), 1), (None, 1),
+                                               (str(DIGEST_UA), None)])
+async def test_digest_item_must_exist_and_be_visible(repos, test_db, user, digest_id, item_n):
+    with pytest.raises(NotFound):
+        await rate(repos, cloud(user), target_type="digest_item", digest_id=digest_id, item_n=item_n,
+                   reaction="useful")
+    assert len((await _user(test_db, user))["feedback"]) == 1          # nothing written
+
+
+async def test_answer_feedback_is_kept_apart_and_never_scored(repos, test_db, user):
+    before = (await _user(test_db, user))["interests"]
+    args = dict(target_type="answer", reaction="not_useful", about="аналіз інвестицій у НРК",
+                cited_post_ids=[str(P_DRONES), str(P_GRANTS)], reasons=["inaccurate"], text="цифри не ті")
+    r1 = await rate(repos, cloud(user), **args)
+    r2 = await rate(repos, cloud(user), **args)
+    assert r1.score_changes == {} and r1.feedback_id != r2.feedback_id
     doc = await _user(test_db, user)
-    assert sorted(f["reaction"] for f in doc["feedback"] if f["post_id"] == P_GRANTS) == ["dislike", "like"]
+    answers = [f for f in doc["feedback"] if f.get("target_type") == "answer"]
+    assert len(answers) == 2                                            # answers don't replace each other
+    assert answers[0]["cited_post_ids"] == [P_DRONES, P_GRANTS] and answers[0]["about"] == args["about"]
+    assert answers[0]["post_id"] is None and "category" not in answers[0]
+    assert doc["interests"] == before
+
+
+@pytest.mark.parametrize("kw, error", [
+    ({"about": "  "}, "needs `about`"),
+    ({"cited_post_ids": [str(ObjectId())]}, "never invent ids"),
+    ({"cited_post_ids": [str(P_SECRET)]}, "never invent ids"),          # not visible to a cloud client
+    ({"cited_post_ids": ["xyz"]}, "post ids"),
+    ({"reasons": ["boring"]}, "unknown reasons"),
+    ({"reaction": "love"}, "reaction must be"),
+    ({"target_type": "video"}, "target_type"),
+])
+async def test_feedback_validation(repos, test_db, user, kw, error):
+    args = {"target_type": "suggestion", "reaction": "useful", "about": "порада стежити за НРК", **kw}
+    with pytest.raises(InvalidInput, match=error):
+        await rate(repos, cloud(user), **args)
+    assert len((await _user(test_db, user))["feedback"]) == 1
 
 
 @pytest.mark.parametrize("post_id, error", [(None, InvalidInput), ("", InvalidInput), ("xyz", InvalidInput),
                                             (str(ObjectId()), NotFound), (str(P_SECRET), NotFound)])
 async def test_feedback_rejects_bad_posts(repos, test_db, user, post_id, error):
     with pytest.raises(error):
-        await feedback.record_feedback(repos, cloud(user), post_id, "like", None, MCP_CHANNELS)
+        await rate(repos, cloud(user), post_id=post_id, reaction="useful")
     assert len((await _user(test_db, user))["feedback"]) == 1          # nothing written
 
 
-async def test_feedback_rejects_bad_reaction_and_unknown_user(repos):
-    with pytest.raises(InvalidInput):
-        await feedback.record_feedback(repos, cloud(1), str(P_DRONES), "love", None, MCP_CHANNELS)
+async def test_feedback_unknown_user(repos):
     with pytest.raises(NotFound):
-        await feedback.record_feedback(repos, cloud(424242), str(P_DRONES), "like", None, MCP_CHANNELS)
+        await rate(repos, cloud(424242), post_id=str(P_DRONES), reaction="useful")
+
+
+async def test_follow_up_adds_comment_and_reasons_without_scores(repos, test_db, user):
+    r = await rate(repos, cloud(user), post_id=str(P_DRONES), reaction="not_useful")
+    interests = (await _user(test_db, user))["interests"]
+
+    f = await rate(repos, cloud(user), feedback_id=r.feedback_id, text="вже знав", reasons=["already_known"])
+    assert f.score_changes == {} and f.reaction == "not_useful" and "Коментар додано" in f.confirmation
+    await rate(repos, cloud(user), feedback_id=r.feedback_id, reasons=["not_relevant", "already_known"])
+    doc = await _user(test_db, user)
+    entry = next(e for e in doc["feedback"] if str(e.get("fid")) == r.feedback_id)
+    assert entry["text"] == "вже знав" and entry["comment_status"] == "commented" and "text_at" in entry
+    assert entry["reasons"] == ["already_known", "not_relevant"]
+    assert doc["interests"] == interests
+
+    with pytest.raises(InvalidInput, match="To change the rating"):
+        await rate(repos, cloud(user), feedback_id=r.feedback_id, reaction="useful", text="x")
+
+
+async def test_follow_up_skip_and_ownership(repos, test_db, user):
+    r = await rate(repos, cloud(user), post_id=str(P_DRONES), reaction="useful")
+    await rate(repos, cloud(user), feedback_id=r.feedback_id)                       # «Пропустити»
+    entry = (await _user(test_db, user))["feedback"][-1]
+    assert entry["comment_status"] == "no_comment" and entry["text"] == ""
+
+    other = copy.deepcopy(USERS[0])
+    other["_id"] = next(_ids)
+    await test_db.users.insert_one(other)
+    with pytest.raises(NotFound):                                       # someone else's rating
+        await rate(repos, cloud(other["_id"]), feedback_id=r.feedback_id, text="x")
+    for bad in ("", "xyz"):
+        with pytest.raises(NotFound):
+            await rate(repos, cloud(user), feedback_id=bad, text="x")
+
+
+async def test_review_queue_lists_citations_of_inaccurate_answers(repos, test_db, user):
+    await rate(repos, cloud(user), target_type="answer", reaction="not_useful", about="огляд РЕБ",
+               cited_post_ids=[str(P_GRANTS)], reasons=["inaccurate"], text="гранти не ті")
+    await rate(repos, cloud(user), target_type="answer", reaction="not_useful", about="інше",
+               cited_post_ids=[str(P_DRONES)], reasons=["too_long"])               # not inaccurate: not listed
+    rows = await review_queue(test_db)
+    grants = [r for r in rows if r["post_id"] == str(P_GRANTS)]
+    assert grants and grants[0]["summary"] and any(f["text"] == "гранти не ті" for f in grants[0]["flags"])
+    assert all(r["post_id"] != str(P_DRONES) or all(f["about"] != "інше" for f in r["flags"]) for r in rows)

@@ -77,3 +77,16 @@ async def test_order_and_profile_still_work(store):
     assert us.category_order(user, "ru", first=[]) == ["ru_front"]
     profile = await us.llm_user_profile(UID, {"ua": {"defense_tech": "Інновації"}, "ru": {}})
     assert "Інновації" in profile
+
+
+async def test_feedback_report_skips_ratings_without_a_digest(store):
+    us, db = store
+    await us.set_reaction(UID, ITEM, "dislike")
+    await db["users"].update_one({"_id": UID}, {"$push": {"feedback": {"$each": [
+        {"target_type": "answer", "reaction": "not_useful", "about": "аналіз", "post_id": None,
+         "digest_id": None, "item_n": None, "channel": "claude", "at": datetime.now(timezone.utc)},
+        {"target_type": "post", "reaction": "useful", "post_id": P_DRONES, "digest_id": None, "item_n": None,
+         "channel": "claude", "at": datetime.now(timezone.utc)}]}}})
+    report = await us.feedback_report()
+    assert report and all(row["_id"]["digest_id"] is not None for row in report)
+    assert any(row["_id"] == {"digest_id": DIGEST_UA, "item_n": 1} and row["dislikes"] >= 1 for row in report)

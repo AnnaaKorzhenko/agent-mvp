@@ -15,7 +15,9 @@ LIKE_POINTS = 1        # 👍
 DISLIKE_POINTS = -1    # 👎
 SKIP_POINTS = 0        # ⏭ recorded, gives no points
 
-POINTS = {"like": LIKE_POINTS, "dislike": DISLIKE_POINTS, "skip": SKIP_POINTS}
+POINTS = {"like": LIKE_POINTS, "dislike": DISLIKE_POINTS, "skip": SKIP_POINTS,
+          # Words of MCP-written entries (👍 / 👎 / 50/50); same points as the bot's like / dislike / skip
+          "useful": LIKE_POINTS, "not_useful": DISLIKE_POINTS, "neutral": SKIP_POINTS}
 SIDES = ("ua", "ru")
 
 

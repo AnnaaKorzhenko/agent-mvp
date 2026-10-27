@@ -53,7 +53,7 @@ Then choose "Streamable HTTP" with the URL `http://127.0.0.1:8000/mcp`.
 | `search_posts(query, side, category, days, limit)` | Ranked posts: summary, tags, channel, `post_url` |
 | `get_post(post_id)` | One post |
 | `get_profile()` | Goals, today's categories, top categories and tags. Never feedback. |
-| `record_feedback(post_id, reaction, text)` | Saves a like / dislike / skip in the bot's feedback shape and updates scores |
+| `record_feedback(target_type, reaction, post_id / digest_id+item_n / about+cited_post_ids, reasons, text, feedback_id)` | Saves 👍 / 👎 / 50/50 on a post, digest item, answer or suggestion (`docs/FEEDBACK_PLAN.md`); only news ratings change scores. `feedback_id` adds a comment later |
 | `set_goal(action, text)` | Adds or removes a goal with the bot's rules (max 5 active, no duplicates; removing keeps history) |
 
 Every call is written to `audit_log`. Run `python -m brain.scripts.setup_indexes` once per database for the TTL index.

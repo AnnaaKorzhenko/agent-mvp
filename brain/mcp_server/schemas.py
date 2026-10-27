@@ -12,6 +12,7 @@ class Channel(BaseModel):
 
 
 class PostOut(BaseModel):
+    ref: int | None = Field(None, description="Number shown to the user in this result (#1, #2, …): «третя» = ref 3")
     post_id: str
     summary: str
     tags: list[str]
@@ -33,7 +34,9 @@ class SearchResult(BaseModel):
 
 
 class DigestItemOut(BaseModel):
-    n: int | None = Field(None, description="Item number; use it for 'more detail on item N'")
+    ref: int = Field(description="Number shown to the user, unique across this whole result (#1, #2, …): "
+                                 "«третя» = ref 3")
+    n: int = Field(description="The item's number inside its digest; pass it as item_n to record_feedback")
     text: str
     source_urls: list[str]
     source_post_ids: list[str] = Field(description="Ids usable with get_post and record_feedback")
@@ -89,7 +92,9 @@ class GoalsOut(BaseModel):
 
 
 class FeedbackOut(BaseModel):
-    post_id: str
-    reaction: Literal["like", "dislike", "skip"]
+    feedback_id: str = Field(description="Id of this rating; pass it back to add the user's comment or reasons")
+    target_type: Literal["post", "digest_item", "answer", "suggestion"] | str
+    reaction: Literal["useful", "not_useful", "neutral"] | str
     replaced_previous: str | None = Field(None, description="The earlier reaction from an AI client, if replaced")
     score_changes: dict[str, float]
+    confirmation: str = Field(description="Short Ukrainian confirmation to tell the user")

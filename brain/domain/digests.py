@@ -27,6 +27,10 @@ class DigestView:
     sections: list[tuple[DigestSectionDoc, list[DigestItemDoc]]]
     hidden_items: int = 0
     side_note: str | None = None
+    numbers: dict[int, int] = field(default_factory=dict)     # id(item) -> item number (see item_number)
+
+    def number(self, item: DigestItemDoc) -> int:
+        return self.numbers[id(item)]
 
 
 @dataclass
@@ -90,18 +94,47 @@ async def get_digests(repos: Repos, ctx: UserContext, side: str = "both", day: s
     return result
 
 
+async def _source_labels(repos: Repos, items: list[DigestItemDoc]) -> dict[str, str]:
+    # Labels of the source posts, read with all labels allowed: only used to decide what to hide.
+    ids = [pid for it in items for pid in it.source_post_ids]
+    return {pid: p.sensitivity for pid, p in (await repos.posts.get_many(ids, list(sensitivity.LEVELS))).items()}
+
+
+def _item_allowed(digest: DigestDoc, item: DigestItemDoc, labels: dict[str, str], ctx: UserContext) -> bool:
+    label = sensitivity.highest([digest.sensitivity, *(labels.get(p) for p in item.source_post_ids if p in labels)])
+    return sensitivity.is_allowed(label, ctx.max_sensitivity)
+
+
+def item_number(item: DigestItemDoc, position: int) -> int:
+    """The item's n; items without one are numbered by position (1, 2, …), as the bot does."""
+    return item.n if item.n is not None else position
+
+
+async def find_item(repos: Repos, ctx: UserContext, digest_id: str | None,
+                    item_n: int | None) -> tuple[DigestDoc, DigestSectionDoc, DigestItemDoc] | None:
+    """One digest item by (digest_id, n), or None if it doesn't exist or the caller may not see it."""
+    digest = await repos.digests.get(digest_id) if digest_id and item_n is not None else None
+    if digest is None:
+        return None
+    position = 0
+    for section in digest.sections:
+        for item in section.items:
+            position += 1
+            if item_number(item, position) == item_n:
+                labels = await _source_labels(repos, [item])
+                return (digest, section, item) if _item_allowed(digest, item, labels, ctx) else None
+    return None
+
+
 async def _view(repos: Repos, ctx: UserContext, digest: DigestDoc, profile: UserProfileDoc | None) -> DigestView:
-    # Labels of every source post, read with all labels allowed: only used to decide what to hide.
-    ids = [pid for sec in digest.sections for it in sec.items for pid in it.source_post_ids]
-    labels = {pid: p.sensitivity for pid, p in
-              (await repos.posts.get_many(ids, list(sensitivity.LEVELS))).items()}
+    labels = await _source_labels(repos, [it for sec in digest.sections for it in sec.items])
     view = DigestView(digest, [], side_note=RU_NOTE if digest.side == "ru" else None)
+    items = [it for sec in digest.sections for it in sec.items]          # the digest's own order
+    view.numbers = {id(it): item_number(it, pos) for pos, it in enumerate(items, 1)}
     for section in order_sections(digest.sections, profile, digest.side):
         kept = []
         for item in section.items:
-            label = sensitivity.highest([digest.sensitivity, *(labels.get(p) for p in item.source_post_ids
-                                                               if p in labels)])
-            if sensitivity.is_allowed(label, ctx.max_sensitivity):
+            if _item_allowed(digest, item, labels, ctx):
                 kept.append(item)
             else:
                 view.hidden_items += 1

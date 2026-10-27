@@ -105,6 +105,7 @@ async def feedback_report(limit: int = 50) -> list[dict]:
     count = lambda r: {"$sum": {"$cond": [{"$eq": ["$feedback.reaction", r]}, 1, 0]}}  # noqa: E731
     pipeline = [
         {"$unwind": "$feedback"},
+        {"$match": {"feedback.digest_id": {"$ne": None}}},   # only digest items (not MCP post/answer ratings)
         {"$group": {"_id": {"digest_id": "$feedback.digest_id", "item_n": "$feedback.item_n"},
                     "text": {"$first": "$feedback.text"}, "category": {"$first": "$feedback.category"},
                     "post_id": {"$first": "$feedback.post_id"},

@@ -10,7 +10,7 @@ from brain.db.repositories import Repos
 from brain.mcp_server.server import INSTRUCTIONS, create_server
 from brain.mcp_server.tools import Services
 from tests.conftest import make_settings
-from tests.fixtures.sample_data import P_DRONES, P_SECRET, P_TOP, USERS
+from tests.fixtures.sample_data import DIGEST_UA, P_DRONES, P_SECRET, P_TOP, USERS
 
 UID = 800_000_001
 TOOLS = {"get_digest", "search_posts", "get_post", "get_profile", "record_feedback", "set_goal"}
@@ -78,6 +78,9 @@ async def test_get_digest(client, test_db):
     assert all(i["is_russian_source_claim"] for s in ru["sections"] for i in s["items"])
     assert ru["side_note"] and not ua["side_note"]
     assert all(i["source_urls"] and i["source_post_ids"] for s in ua["sections"] for i in s["items"])
+    items = [i for dg in d["digests"] for s in dg["sections"] for i in s["items"]]
+    assert [i["ref"] for i in items] == list(range(1, len(items) + 1))       # one numbering across both sides
+    assert [i["n"] for i in items] == [1, 3, 1]                              # each digest's own numbers
     assert not any(t in json.dumps(d, ensure_ascii=False) for t in SECRET_TEXTS)
     entry = await test_db.audit_log.find_one({"name": "get_digest", "user_id": UID}, sort=[("at", -1)])
     assert entry["kind"] == "tool" and entry["trust"] == "cloud" and entry["items_returned"] == 3
@@ -91,6 +94,7 @@ async def test_search_posts(client):
     ids = {p["post_id"] for p in res["results"]}
     assert str(P_DRONES) in ids and not {str(P_SECRET), str(P_TOP)} & ids
     assert all(p["post_url"].startswith("https://t.me/") and p["channel"] for p in res["results"])
+    assert [p["ref"] for p in res["results"]] == list(range(1, len(res["results"]) + 1))
     empty = (await client.call_tool("search_posts", {"query": "квантовий комп'ютер"})).structured_content
     assert empty["results"] == [] and "don't have" in empty["note"]
 
@@ -120,12 +124,34 @@ async def test_get_profile(client):
 async def test_record_feedback(client, test_db):
     r = await client.call_tool("record_feedback", {"post_id": str(P_DRONES), "reaction": "like",
                                                    "text": "корисно"})
-    assert r.structured_content["reaction"] == "like"
+    assert r.structured_content["reaction"] == "useful" and r.structured_content["confirmation"]
     entry = (await test_db.users.find_one({"_id": UID}))["feedback"][-1]
-    assert entry["channel"] == "dev" and entry["text"] == "корисно"
-    for args in ({"post_id": "", "reaction": "like"}, {"post_id": str(P_SECRET), "reaction": "like"},
-                 {"post_id": str(P_DRONES), "reaction": "love"}):
+    assert entry["channel"] == "dev" and entry["text"] == "корисно" and entry["reaction"] == "useful"
+    for args in ({"post_id": "", "reaction": "useful"}, {"post_id": str(P_SECRET), "reaction": "useful"},
+                 {"post_id": str(P_DRONES), "reaction": "love"},
+                 {"target_type": "answer", "reaction": "useful"}):                    # answer without about
         assert (await client.call_tool("record_feedback", args)).is_error
+
+
+async def test_record_feedback_every_target_type(client, test_db):
+    calls = {
+        "post": {"post_id": str(P_DRONES), "reaction": "neutral"},
+        "digest_item": {"digest_id": str(DIGEST_UA), "item_n": 1, "reaction": "useful"},
+        "answer": {"about": "огляд морських дронів", "cited_post_ids": [str(P_DRONES)], "reaction": "not_useful",
+                   "reasons": ["inaccurate"], "text": "не той катер"},
+        "suggestion": {"about": "порада стежити за НРК", "reaction": "useful"},
+    }
+    for target, args in calls.items():
+        r = await client.call_tool("record_feedback", {"target_type": target, **args})
+        assert not r.is_error, (target, r.content)
+        out = r.structured_content
+        assert out["target_type"] == target and out["feedback_id"]
+        if target in ("answer", "suggestion"):
+            assert out["score_changes"] == {}                                # never scored
+    follow = await client.call_tool("record_feedback", {"feedback_id": out["feedback_id"], "text": "дякую"})
+    assert not follow.is_error and follow.structured_content["score_changes"] == {}
+    entry = (await test_db.users.find_one({"_id": UID}))["feedback"][-1]
+    assert entry["target_type"] == "suggestion" and entry["text"] == "дякую"
 
 
 async def test_set_goal(client, test_db):

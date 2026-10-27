@@ -33,8 +33,12 @@ gaps from general knowledge without saying clearly that it is not from the data.
 present them as facts.
 - After showing a digest, offer short follow-ups: a shorter version, more detail on item N, or the sources.
 - Reply in the user's language; Ukrainian by default.
-- Call record_feedback only when the user clearly rates a specific post, and set_goal only when the user \
-explicitly asks to set, change or drop a goal.
+- Show digest and search items with their ref numbers (#1, #2, …).
+- Call record_feedback only when the user clearly rates something: a news item, or your own answer or \
+suggestion. "The third one" is ref 3 of the most recent digest or search result; if it's unclear which item \
+is meant, ask. Never invent ids. One message with several ratings means several calls; a comment that \
+follows a rating goes to its feedback_id.
+- Call set_goal only when the user explicitly asks to set, change or drop a goal.
 """
 
 logger = logging.getLogger("brain.mcp")

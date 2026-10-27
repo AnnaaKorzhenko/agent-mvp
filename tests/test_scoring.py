@@ -12,8 +12,12 @@ GOLDEN = json.loads((Path(__file__).parent / "fixtures" / "scoring_golden.json")
 
 
 def test_constants_unchanged():
-    assert scoring.POINTS == GOLDEN["points"]
+    assert {k: scoring.POINTS[k] for k in GOLDEN["points"]} == GOLDEN["points"]     # the bot's words
     assert scoring.CHOICE_POINTS == GOLDEN["choice_points"]
+    # MCP words score like the bot's: 👍 = like, 👎 = dislike, 50/50 = skip
+    assert {k: scoring.POINTS[k] for k in ("useful", "not_useful", "neutral")} == {
+        "useful": GOLDEN["points"]["like"], "not_useful": GOLDEN["points"]["dislike"],
+        "neutral": GOLDEN["points"]["skip"]}
 
 
 def test_tag_key_matches_original():

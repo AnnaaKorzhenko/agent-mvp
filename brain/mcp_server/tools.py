@@ -4,6 +4,7 @@ No business logic here. user_id never comes from tool arguments.
 """
 from __future__ import annotations
 
+import itertools
 import time
 from dataclasses import dataclass
 from typing import Annotated, Awaitable, Callable, Literal
@@ -105,18 +106,20 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
         Present items from Ukrainian sources as reported news and items with is_russian_source_claim=true as
         claims of Russian channels ("Russian channels claim..."), never as facts. Cite source_urls. After
         showing the digest, offer short follow-ups: a shorter version, more detail on item N (use get_post
-        with its source_post_ids), or the sources."""
+        with its source_post_ids), or the sources. Show every item with its ref number (#1, #2, …) so the user
+        can refer to it and rate it."""
         call = _Call(svc, "get_digest", {"side": side, "date": date})
 
         async def body(ctx: UserContext) -> out.DigestResult:
             res = await digests_domain.get_digests(svc.repos, ctx, side, date)
+            refs = itertools.count(1)       # one numbering across both sides: «третя» is unambiguous
             result = out.DigestResult(date=res.date, missing_sides=res.missing_sides, digests=[
                 out.DigestOut(
                     side=v.digest.side, side_note=v.side_note, digest_id=v.digest.id,
                     created_at=v.digest.created_at.isoformat(), period_start=v.digest.period_start,
                     period_end=v.digest.period_end, hidden_items=v.hidden_items,
                     sections=[out.DigestSectionOut(category=s.category, title=s.title, items=[
-                        out.DigestItemOut(n=i.n, text=i.text, source_urls=i.source_urls,
+                        out.DigestItemOut(ref=next(refs), n=v.number(i), text=i.text, source_urls=i.source_urls,
                                           source_post_ids=i.source_post_ids,
                                           is_russian_source_claim=v.digest.side == "ru") for i in items])
                         for s, items in v.sections])
@@ -142,7 +145,8 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
 
         Answer only from the results and cite each fact's post_url. If nothing relevant comes back, say
         "I don't have that in the data" (you may retry once with other words or more days). Results with
-        is_russian_source_claim=true are claims of Russian sources, not facts."""
+        is_russian_source_claim=true are claims of Russian sources, not facts. When you list results, show their
+        ref numbers (#1, #2, …)."""
         call = _Call(svc, "search_posts", {"query": query, "side": side, "category": category,
                                            "days": days, "limit": limit})
 
@@ -154,8 +158,8 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
             elif not views:
                 note = "Nothing found. Say you don't have this in the data, or retry with other words or more days."
             await call.done(items=len(views), labels=[v.post.sensitivity for v in views])
-            return out.SearchResult(query=query, search_words=words, days=days,
-                                    results=[_post_out(v) for v in views], note=note)
+            results = [_post_out(v).model_copy(update={"ref": i}) for i, v in enumerate(views, 1)]
+            return out.SearchResult(query=query, search_words=words, days=days, results=results, note=note)
         return await call.run(body)
 
     @mcp.tool(title="Get one post", annotations=READ_ONLY)
@@ -186,26 +190,52 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
                 top_tags=[out.TagScore(tag=t, score=v) for t, v in p.top_tags])
         return await call.run(body)
 
-    @mcp.tool(title="Rate a post",
+    @mcp.tool(title="Rate news or an answer",
               annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True,
                                           openWorldHint=False))
     async def record_feedback(
-        post_id: Annotated[str, Field(description="The rated post's id (post_id or a source_post_ids value)")],
-        reaction: Annotated[Literal["like", "dislike", "skip"], Field(
-            description="like: useful; dislike: not interesting; skip: no opinion")],
+        reaction: Annotated[Literal["useful", "not_useful", "neutral", "like", "dislike", "skip"] | None, Field(
+            description="useful (👍), not_useful (👎) or neutral (50/50). Omit only with feedback_id")] = None,
+        target_type: Annotated[Literal["post", "digest_item", "answer", "suggestion"], Field(
+            description="post: a post from search_posts/get_post; digest_item: an item of get_digest; "
+                        "answer / suggestion: your own answer, analysis or suggestion")] = "post",
+        post_id: Annotated[str | None, Field(description="post: the post's post_id")] = None,
+        digest_id: Annotated[str | None, Field(description="digest_item: the item's digest_id")] = None,
+        item_n: Annotated[int | None, Field(description="digest_item: the item's n (not ref)")] = None,
+        about: Annotated[str | None, Field(max_length=200, description=(
+            "answer / suggestion: one line saying what was rated, e.g. 'аналіз інвестицій у НРК'"))] = None,
+        cited_post_ids: Annotated[list[str] | None, Field(max_length=20, description=(
+            "answer / suggestion: post ids the rated answer relied on, from the tools' results"))] = None,
+        reasons: Annotated[list[Literal["already_known", "not_relevant", "inaccurate", "too_long", "too_short",
+                                        "want_more", "other"]] | None, Field(
+            description="Reasons taken from the user's words, if any")] = None,
         text: Annotated[str | None, Field(max_length=2000,
-                                          description="The user's own words about why, if they gave any")] = None,
+                                          description="The user's own words, verbatim, if they gave any")] = None,
+        feedback_id: Annotated[str | None, Field(description=(
+            "To add a comment or reasons to an earlier rating: its feedback_id. Scores don't change"))] = None,
     ) -> out.FeedbackOut:
-        """Save the user's rating of a news post; it tunes which news they see first. Call it only when the
-        user clearly rates a specific post, never on your own judgement. A new rating of the same post
-        replaces the previous one."""
-        call = _Call(svc, "record_feedback", {"post_id": post_id, "reaction": reaction, "text": text})
+        """Save the user's rating of a news item, or of your own answer or suggestion; news ratings tune which
+        news they see first.
+
+        Call it only when the user clearly rates something, never on your own judgement. Map "the third one"
+        to ref 3 of the most recent get_digest or search_posts result and pass that item's ids (digest items:
+        digest_id + n as item_n; posts: post_id); if it is unclear which item is meant, ask. Never invent ids.
+        Take reasons from the user's words and keep text verbatim. For your own answer or suggestion use
+        target_type answer / suggestion with a one-line `about` and the post ids you cited. Several ratings in
+        one message mean several calls. A comment that follows a rating goes to that rating's feedback_id.
+        Rating the same post or digest item again replaces the earlier rating. Tell the user the
+        confirmation."""
+        args = {"target_type": target_type, "reaction": reaction, "post_id": post_id, "digest_id": digest_id,
+                "item_n": item_n, "about": about, "cited_post_ids": cited_post_ids, "reasons": reasons,
+                "text": text, "feedback_id": feedback_id}
+        call = _Call(svc, "record_feedback", args)
 
         async def body(ctx: UserContext) -> out.FeedbackOut:
-            r = await feedback_domain.record_feedback(svc.repos, ctx, post_id, reaction, text, svc.mcp_channels)
+            r = await feedback_domain.record_feedback(svc.repos, ctx, mcp_channels=svc.mcp_channels, **args)
             await call.done(items=1)
-            return out.FeedbackOut(post_id=r.post_id, reaction=r.reaction, replaced_previous=r.replaced_previous,
-                                   score_changes=r.score_changes)
+            return out.FeedbackOut(feedback_id=r.feedback_id, target_type=r.target_type, reaction=r.reaction,
+                                   replaced_previous=r.replaced_previous, score_changes=r.score_changes,
+                                   confirmation=r.confirmation)
         return await call.run(body)
 
     @mcp.tool(title="Add or remove a goal",

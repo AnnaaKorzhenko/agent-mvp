@@ -140,6 +140,10 @@ class DigestsRepo:
                     return digest
         return None
 
+    async def get(self, digest_id: str | ObjectId) -> DigestDoc | None:
+        oid = to_object_id(digest_id)
+        return parse(DigestDoc, await self.col.find_one({"_id": oid}), "digests") if oid else None
+
 
 UserId = int | str     # Telegram users: int; users created for an OAuth login: the ObjectId as hex
 
@@ -197,27 +201,34 @@ class UsersRepo:
                 raise
             return existing
 
-    async def find_feedback(self, user_id: UserId, post_id: ObjectId, channels: list[str]) -> dict | None:
-        """The user's earlier feedback entry for this post written through one of `channels` (MCP clients)."""
-        doc = await self.col.find_one(
-            {"_id": user_key(user_id)},
-            {"feedback": {"$elemMatch": {"post_id": post_id, "channel": {"$in": channels}}}})
+    async def find_feedback(self, user_id: UserId, match: dict) -> dict | None:
+        """The user's first feedback entry matching `match` (a condition on entry fields), or None."""
+        doc = await self.col.find_one({"_id": user_key(user_id)}, {"feedback": {"$elemMatch": match}})
         entries = (doc or {}).get("feedback") or []
         return entries[0] if entries else None
 
-    async def replace_feedback(self, user_id: UserId, post_id: ObjectId, channels: list[str], entry: dict,
-                               inc: dict, keep: int) -> bool:
-        """Removes earlier entries for this post from `channels`, pushes `entry` (capped at `keep`) and applies `inc`.
+    async def replace_feedback(self, user_id: UserId, match: dict | None, entry: dict, inc: dict,
+                               keep: int) -> bool:
+        """Removes earlier entries matching `match` (if given), pushes `entry` (capped at `keep`), applies `inc`.
 
-        Telegram entries (no `channel`) are never touched. Returns False if the user does not exist.
+        Callers put a `channel` condition into `match`, so Telegram entries (no `channel`) are never touched.
+        Returns False if the user does not exist.
         """
         key = user_key(user_id)
-        await self.col.update_one({"_id": key},
-                                  {"$pull": {"feedback": {"post_id": post_id, "channel": {"$in": channels}}}})
+        if match:
+            await self.col.update_one({"_id": key}, {"$pull": {"feedback": match}})
         update: dict = {"$push": {"feedback": {"$each": [entry], "$slice": -keep}}}
         if inc:
             update["$inc"] = inc
         result = await self.col.update_one({"_id": key}, update)
+        return result.matched_count == 1
+
+    async def update_feedback(self, user_id: UserId, fid: ObjectId, fields: dict) -> bool:
+        """Sets `fields` on the user's feedback entry `fid`. Returns False if there is no such entry."""
+        result = await self.col.update_one(
+            {"_id": user_key(user_id), "feedback.fid": fid},
+            {"$set": {f"feedback.$[f].{k}": v for k, v in fields.items()}},
+            array_filters=[{"f.fid": fid}])
         return result.matched_count == 1
 
 
