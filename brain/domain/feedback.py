@@ -73,13 +73,14 @@ def _confirmation(reaction: str, inc: dict, extra: str = "") -> str:
 
 
 async def record_feedback(repos: Repos, ctx: UserContext, *, mcp_channels: list[str],
-                          target_type: str = "post", reaction: str | None = None,
+                          target_type: str | None = "post", reaction: str | None = None,
                           post_id: str | None = None, digest_id: str | None = None, item_n: int | None = None,
                           about: str | None = None, cited_post_ids: list[str] | None = None,
                           reasons: list[str] | None = None, text: str | None = None,
                           feedback_id: str | None = None) -> FeedbackResult:
     if feedback_id is not None:
         return await _follow_up(repos, ctx, feedback_id, reaction, reasons, text)
+    target_type = target_type or "post"
     if target_type not in TARGETS:
         raise InvalidInput(f"target_type must be one of {', '.join(TARGETS)}")
     reaction = normalize_reaction(reaction)

@@ -22,8 +22,10 @@ logger = logging.getLogger("brain.widgets")
 UI_DIR = Path(__file__).parent / "ui"
 EXT_APPS = UI_DIR / "vendor" / "ext-apps-1.7.5" / "app-with-deps.js"
 PLACEHOLDER = "/*__EXT_APPS__*/"
+COMMON = {"/*__COMMON_CSS__*/": UI_DIR / "common.css", "/*__COMMON_JS__*/": UI_DIR / "common.js"}
 
 DIGEST_UI = "ui://news-brain/digest.html"
+SEARCH_UI = "ui://news-brain/search.html"
 
 
 def tool_meta(resource_uri: str) -> dict:
@@ -50,9 +52,12 @@ def ext_apps_script() -> str:
 @lru_cache
 def widget_html(name: str) -> str:
     html = (UI_DIR / name).read_text(encoding="utf-8")
-    if html.count(PLACEHOLDER) != 1:
-        raise RuntimeError(f"{name}: expected one {PLACEHOLDER}")
-    return html.replace(PLACEHOLDER, ext_apps_script())
+    parts = {PLACEHOLDER: ext_apps_script(), **{k: f.read_text(encoding="utf-8") for k, f in COMMON.items()}}
+    for placeholder, text in parts.items():
+        if html.count(placeholder) != 1:
+            raise RuntimeError(f"{name}: expected one {placeholder}")
+        html = html.replace(placeholder, text)
+    return html
 
 
 def client_shows_widgets(ctx: Context | None) -> bool:
@@ -96,9 +101,18 @@ def digest_index(result: out.DigestResult) -> str:
     return "\n".join(lines)
 
 
+SEARCH_NOTE = (
+    "The user already sees these results as interactive cards #1–#{n} (channel, date, summary, link, and "
+    "👍 / 👎 / 50/50 buttons). Answer the user's question from them in your own words, citing items as #N; do "
+    "NOT list the posts one by one or repeat their links. Ratings made with the buttons are already saved; they "
+    "reach you as context, not as messages.\n")
+
+
 def apps_extension() -> Apps:
     """The MCP Apps extension with every widget resource; pass it to MCPServer(extensions=[...])."""
     apps = Apps()
     apps.add_html_resource(DIGEST_UI, widget_html("digest.html"), name="digest", title="Зведення",
                            description="Today's digest with 👍 / 👎 / 50/50 buttons", prefers_border=False)
+    apps.add_html_resource(SEARCH_UI, widget_html("search.html"), name="search", title="Пошук",
+                           description="Search results with 👍 / 👎 / 50/50 buttons", prefers_border=False)
     return apps

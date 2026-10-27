@@ -49,8 +49,8 @@ Then choose "Streamable HTTP" with the URL `http://127.0.0.1:8000/mcp`.
 
 | Tool | What it returns |
 |---|---|
-| `get_digest(side, date)` | The daily digest(s) in the user's order, with links and post ids. Russian items are flagged as claims. |
-| `search_posts(query, side, category, days, limit)` | Ranked posts: summary, tags, channel, `post_url` |
+| `get_digest(side, date, as_text)` | The daily digest(s) in the user's order, with links and post ids. Russian items are flagged as claims. Shown as rating cards where the client renders MCP Apps; the model then gets only a short index unless `as_text` |
+| `search_posts(query, side, category, days, limit)` | Ranked posts: summary, tags, channel, `post_url`. Shown as rating cards where supported; the model is told to cite them as #N, not list them |
 | `get_post(post_id)` | One post |
 | `get_profile()` | Goals, today's categories, top categories and tags. Never feedback. |
 | `record_feedback(target_type, reaction, post_id / digest_id+item_n / about+cited_post_ids, reasons, text, feedback_id)` | Saves 👍 / 👎 / 50/50 on a post, digest item, answer or suggestion (`docs/FEEDBACK_PLAN.md`); only news ratings change scores. `feedback_id` adds a comment later |

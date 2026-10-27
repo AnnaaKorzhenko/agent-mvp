@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Пошук</title>
+<style>
+/*__COMMON_CSS__*/
+</style>
+</head>
+<body>
+<div id="root"><div class="empty">Пошук…</div></div>
+
+<script type="module">
+/*__EXT_APPS__*/
+</script>
+
+<script type="module">
+/*__COMMON_JS__*/
+
+const FIRST = 8;                // results shown before «Показати ще»
+const widget = createWidget({ name: "News brain search", where: "у віджеті пошуку" });
+
+function when(iso) {
+  try {
+    return new Date(iso).toLocaleString("uk-UA", { day: "2-digit", month: "2-digit", hour: "2-digit",
+                                                    minute: "2-digit", timeZone: "Europe/Kyiv" });
+  } catch { return iso?.slice(0, 10) ?? ""; }
+}
+
+function postCard(post) {
+  const meta = el("div", { class: "meta" },
+    post.channel?.username ? el("span", {}, post.channel.username) : null,
+    post.published_at ? el("span", {}, when(post.published_at)) : null,
+    post.is_russian_source_claim ? el("span", { class: "claim" }, "заява рос. каналу, не факт") : null);
+  return widget.card({
+    key: post.post_id, ref: post.ref, text: post.summary, body: [meta, post.summary],
+    urls: post.post_url ? [post.post_url] : [],
+    target: { target_type: "post", post_id: post.post_id },
+  });
+}
+
+function render(data) {
+  const results = data?.results ?? [];
+  const days = data?.days ? ` · за ${data.days} дн.` : "";
+  const side = el("div", { class: "side" }, el("h2", {}, "Знайдено: " + results.length,
+                  data?.query ? el("span", { class: "note" }, `«${data.query}»${days}`) : null));
+  root.replaceChildren(side);
+  if (!results.length) {
+    side.append(el("div", { class: "empty" }, "Нічого не знайдено."));
+    return;
+  }
+  const cards = results.map(postCard);
+  cards.slice(FIRST).forEach((c) => { c.hidden = true; });
+  side.append(...cards);
+  const rest = cards.length - FIRST;
+  if (rest > 0) {
+    const more = el("button", { type: "button", class: "more", onclick: () => {
+      cards.forEach((c) => { c.hidden = false; }); more.remove(); } }, `Показати ще ${rest}`);
+    side.append(more);
+  }
+}
+
+await widget.start(render);
+</script>
+</body>
+</html>

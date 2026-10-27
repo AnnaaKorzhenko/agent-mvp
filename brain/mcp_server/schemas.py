@@ -31,6 +31,8 @@ class SearchResult(BaseModel):
     days: int
     results: list[PostOut]
     note: str | None = None
+    shown_in_widget: bool = Field(False, description="True: the user already sees these results as cards with "
+                                                     "links; cite them as #N instead of listing them")
 
 
 class DigestItemOut(BaseModel):

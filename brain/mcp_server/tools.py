@@ -143,8 +143,9 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
                                   structured_content=result.model_dump(mode="json"))
         return await call.run(body)
 
-    @mcp.tool(title="Search news posts", annotations=READ_ONLY)
+    @mcp.tool(title="Search news posts", annotations=READ_ONLY, meta=widgets.tool_meta(widgets.SEARCH_UI))
     async def search_posts(
+        mcp_ctx: Context,
         query: Annotated[str, Field(min_length=2, max_length=300,
                                     description="Key words, e.g. 'Brave1 гранти РЕБ' (Ukrainian or Russian)")],
         side: Annotated[Literal["ua", "ru", "all"], Field(description="Source side")] = "all",
@@ -152,17 +153,20 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
             description="Optional category key, e.g. front, defense_tech, investments, ru_front")] = None,
         days: Annotated[int, Field(ge=1, le=30, description="How many past days to search")] = 7,
         limit: Annotated[int, Field(ge=1, le=25)] = 10,
-    ) -> out.SearchResult:
+    ) -> Annotated[CallToolResult, out.SearchResult]:
         """Search the news base (summaries of Telegram posts from Ukrainian and Russian channels) by key words.
 
         Answer only from the results and cite each fact's post_url. If nothing relevant comes back, say
         "I don't have that in the data" (you may retry once with other words or more days). Results with
         is_russian_source_claim=true are claims of Russian sources, not facts. When you list results, show their
-        ref numbers (#1, #2, …)."""
+        ref numbers (#1, #2, …). If the result says shown_in_widget, the user already sees the results as cards
+        with links: answer in your own words citing #N, without listing the posts again."""
         call = _Call(svc, "search_posts", {"query": query, "side": side, "category": category,
                                            "days": days, "limit": limit})
 
-        async def body(ctx: UserContext) -> out.SearchResult:
+        widget = widgets.client_shows_widgets(mcp_ctx)
+
+        async def body(ctx: UserContext) -> CallToolResult:
             views, words = await posts_domain.search(svc.repos, ctx, query, side, category, days, limit)
             note = None
             if not words:
@@ -171,7 +175,14 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
                 note = "Nothing found. Say you don't have this in the data, or retry with other words or more days."
             await call.done(items=len(views), labels=[v.post.sensitivity for v in views])
             results = [_post_out(v).model_copy(update={"ref": i}) for i, v in enumerate(views, 1)]
-            return out.SearchResult(query=query, search_words=words, days=days, results=results, note=note)
+            result = out.SearchResult(query=query, search_words=words, days=days, results=results, note=note,
+                                      shown_in_widget=widget and bool(results))
+            # The model still needs the summaries to answer; with cards on screen it is told not to list them.
+            text = result.model_dump_json()
+            if result.shown_in_widget:
+                text = widgets.SEARCH_NOTE.format(n=len(results)) + text
+            return CallToolResult(content=[TextContent(type="text", text=text)],
+                                  structured_content=result.model_dump(mode="json"))
         return await call.run(body)
 
     @mcp.tool(title="Get one post", annotations=READ_ONLY)
@@ -208,9 +219,10 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
     async def record_feedback(
         reaction: Annotated[Literal["useful", "not_useful", "neutral", "like", "dislike", "skip"] | None, Field(
             description="useful (👍), not_useful (👎) or neutral (50/50). Omit only with feedback_id")] = None,
-        target_type: Annotated[Literal["post", "digest_item", "answer", "suggestion"], Field(
-            description="post: a post from search_posts/get_post; digest_item: an item of get_digest; "
-                        "answer / suggestion: your own answer, analysis or suggestion")] = "post",
+        target_type: Annotated[Literal["post", "digest_item", "answer", "suggestion"] | None, Field(
+            description="post (the default): a post from search_posts/get_post; digest_item: an item of "
+                        "get_digest; answer / suggestion: your own answer, analysis or suggestion. "
+                        "Omit with feedback_id")] = None,
         post_id: Annotated[str | None, Field(description="post: the post's post_id")] = None,
         digest_id: Annotated[str | None, Field(description="digest_item: the item's digest_id")] = None,
         item_n: Annotated[int | None, Field(description="digest_item: the item's n (not ref)")] = None,
