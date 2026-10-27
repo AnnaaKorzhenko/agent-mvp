@@ -1,0 +1,4 @@
+-r requirements.txt
+-r ../requirements.txt     # the bot's packages, for the bot smoke test
+pytest>=8
+pytest-asyncio>=0.24

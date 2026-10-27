@@ -3,6 +3,9 @@ from datetime import datetime, timezone
 
 from bson import ObjectId
 
+from brain.domain import scoring
+from brain.domain.scoring import (CHOICE_POINTS, DISLIKE_POINTS, LIKE_POINTS, POINTS, SKIP_POINTS,  # noqa: F401
+                                  category_order, category_scores, top_tags)
 from db import db
 
 users_collection = db["users"]
@@ -10,15 +13,13 @@ conversations = db["conversations"]     # один документ на люд�
 digests_collection = db["digests"]
 posts_collection = db["posts"]
 
-CHOICE_POINTS = 1
-LIKE_POINTS = 1        # 👍
-DISLIKE_POINTS = -1    # 👎
-SKIP_POINTS = 0        # ⏭ пропустити (записується, але балів не дає)
 FEEDBACK_KEEP = 1000   # скільки останніх реакцій тримати в документі
 TEXT_SNIPPET = 300
 MAX_GOALS = 5
 
-POINTS = {"like": LIKE_POINTS, "dislike": DISLIKE_POINTS, "skip": SKIP_POINTS}
+# Бали інтересу рахує спільний модуль brain/domain/scoring.py (той самий код використовує MCP-сервер)
+_key = scoring.tag_key
+_points_inc = scoring.points_inc
 
 
 def _now() -> datetime:
@@ -31,54 +32,16 @@ async def ensure_indexes() -> None:
     await conversations.create_index([("news_state.status", 1)])
 
 
-def _key(tag: str) -> str:
-
-    return str(tag).replace(".", "·").lstrip("$").strip()
-
-
 async def add_category_choice(user_id: int, selected: dict) -> None:
     """Людина обрала категорії: кожній +1."""
-    inc = {f"interests.category_scores.{side}.{cat}": CHOICE_POINTS
-           for side in ("ua", "ru") for cat in selected.get(side, [])}
+    inc = scoring.choice_inc(selected)
     if inc:
         await users_collection.update_one({"_id": user_id}, {"$inc": inc})
-
-
-def category_scores(user: dict) -> dict:
-    return (user.get("interests") or {}).get("category_scores") or {}
-
-
-def top_tags(user: dict, limit: int = 10) -> list[dict]:
-    tags = (user.get("interests") or {}).get("tag_scores") or {}
-    return [{"tag": t, "score": v} for t, v in sorted(tags.items(), key=lambda x: -x[1]) if v > 0][:limit]
-
-
-def category_order(user: dict, side: str, first: list[str] | None = None) -> list[str]:
-    """Порядок категорій сторони: спершу first (сьогоднішній вибір), далі решта за балами."""
-    scores = category_scores(user).get(side) or {}
-    first = list(first or [])
-    rest = sorted((c for c in scores if c not in first), key=lambda c: -scores[c])
-    first.sort(key=lambda c: -scores.get(c, 0))
-    return first + rest
 
 
 # ---------------------------------------------------------------------------
 # Реакції на новини
 # ---------------------------------------------------------------------------
-
-def _points_inc(entry: dict, sign: int) -> dict:
-    points = POINTS.get(entry.get("reaction"), 0) * sign
-    if not points:
-        return {}
-    inc = {}
-    if entry.get("side") in ("ua", "ru") and entry.get("category"):
-        inc[f"interests.category_scores.{entry['side']}.{entry['category']}"] = points
-    for tag in entry.get("tags", []):
-        if _key(tag):
-            k = f"interests.tag_scores.{_key(tag)}"
-            inc[k] = inc.get(k, 0) + points
-    return inc
-
 
 async def get_reaction(user_id: int, digest_id, item_n: int) -> str | None:
     user = await users_collection.find_one(
@@ -142,6 +105,7 @@ async def feedback_report(limit: int = 50) -> list[dict]:
     count = lambda r: {"$sum": {"$cond": [{"$eq": ["$feedback.reaction", r]}, 1, 0]}}  # noqa: E731
     pipeline = [
         {"$unwind": "$feedback"},
+        {"$match": {"feedback.digest_id": {"$ne": None}}},   # only digest items (not MCP post/answer ratings)
         {"$group": {"_id": {"digest_id": "$feedback.digest_id", "item_n": "$feedback.item_n"},
                     "text": {"$first": "$feedback.text"}, "category": {"$first": "$feedback.category"},
                     "post_id": {"$first": "$feedback.post_id"},
