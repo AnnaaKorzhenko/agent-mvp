@@ -30,6 +30,13 @@ MONGO_DB=News_dev DEV_USER_ID=111000111 TRUST_LEVEL=cloud brain/.venv/bin/python
 - Liveness: `http://127.0.0.1:8000/health`
 - Dev mode (no OAuth) refuses to start on a non-local `PUBLIC_BASE_URL`.
 
+To test with real news instead, copy `posts`, `sources` and `digests` from `News` (read-only) into `News_dev`. Users and `audit_log` in `News_dev` are kept. Rerun it before a test session, since the pipeline writes to `News`:
+
+```bash
+brain/.venv/bin/python -m brain.scripts.copy_to_dev --dry-run
+brain/.venv/bin/python -m brain.scripts.copy_to_dev
+```
+
 **MCP Inspector** (needs Node.js 22+):
 
 ```bash
