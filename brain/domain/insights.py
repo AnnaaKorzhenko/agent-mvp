@@ -112,21 +112,47 @@ async def get_insights(repos: Repos, ctx: UserContext, query: str | None = None,
 
 ABOUT_ORDER = ("preference", "goal", "interest", "known", "fact", "feedback", "other")
 ABOUT_PER_KIND = 8
-ABOUT_MAX_CHARS = 1500
+ABOUT_MAX_CHARS = 2000
+
+
+LEARNED_KEYS = {"preferences": "preference", "known": "known", "avoid": "avoid",
+                "goal_candidates": "goal"}
 
 
 async def about_user(repos: Repos, ctx: UserContext) -> dict[str, list[str]]:
-    """The newest readable insights per kind, for the client model to adapt its answers (bounded in size)."""
+    """For the client model to adapt its answers, bounded in size: the learned profile first (users.learned,
+    written by the learning job, if this client may read it), then the newest readable insights per kind."""
+    out: dict[str, list[str]] = {}
+    used = 0
+    seen: set[str] = set()
+
+    def add(kind: str, text: str) -> bool:
+        nonlocal used
+        text = text if len(text) <= 200 else text[:199] + "…"
+        if normalized(text) in seen:
+            return True
+        if used + len(text) > ABOUT_MAX_CHARS:
+            return False
+        out.setdefault(kind, []).append(text)
+        seen.add(normalized(text))
+        used += len(text)
+        return True
+
+    learned = await repos.users.get_learned(ctx.user_id)
+    if learned and sensitivity.is_allowed(learned.get("sensitivity", "internal"), ctx.max_sensitivity):
+        if learned.get("summary"):
+            add("summary", learned["summary"])
+        for key, kind in LEARNED_KEYS.items():
+            for text in learned.get(key) or []:
+                add(kind, text)
+        for i in learned.get("interests") or []:
+            add("interest", f"{i['topic']} ({i['weight']}/5)")
+
     items = await repos.users.get_insights(ctx.user_id)
     items = [i for i in items if sensitivity.is_allowed(i.sensitivity, ctx.max_sensitivity)]
     items.sort(key=lambda i: i.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
-    out: dict[str, list[str]] = {}
-    used = 0
     for kind in ABOUT_ORDER:
         for i in [x for x in items if x.kind == kind][:ABOUT_PER_KIND]:
-            text = i.text if len(i.text) <= 200 else i.text[:199] + "…"
-            if used + len(text) > ABOUT_MAX_CHARS:
+            if not add(kind, i.text):
                 return out
-            out.setdefault(kind, []).append(text)
-            used += len(text)
     return out

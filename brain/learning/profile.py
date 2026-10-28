@@ -1,0 +1,227 @@
+"""Learning job: turns a user's logged messages, ratings and insights into `users.learned`, which get_profile and
+about_user hand to the client model so its answers adapt (docs/LEARNING_PLAN.md).
+
+Per user: collect what's new since the last run (chat messages, feedback, insights), ask the configured model
+backend (MODEL_BACKEND: anthropic now, the local model later) to merge it with the previous learned profile, check
+the answer against LearnedProfile, and save it. Data above the backend's allowed label is never sent: a cloud
+backend gets `public` / `internal` only. Every model call is in audit_log (model_call). Nothing else is changed:
+not the bot's interest scores, not the insights.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any
+
+from pydantic import BaseModel, Field, ValidationError
+from pymongo.asynchronous.database import AsyncDatabase
+
+from brain.db.repositories import user_key
+from brain.domain import sensitivity
+from brain.integrations.backends import ModelBackend, ModelResult
+
+logger = logging.getLogger("brain.learning")
+
+MAX_CHAT = 300          # newest chat messages per run
+MAX_FEEDBACK = 200
+MAX_INSIGHTS = 300
+MAX_TEXT = 600          # characters per item sent to the model
+CHAT_LABEL = "internal"         # what the chat, feedback and the learned profile are treated as
+
+
+class Interest(BaseModel):
+    topic: str = Field(max_length=80)
+    weight: int = Field(ge=1, le=5)
+
+
+class LearnedProfile(BaseModel):
+    """What the model returns, and what users.learned stores (plus bookkeeping fields)."""
+    summary: str = Field(max_length=700, description="Who the user is and what they need, 2-4 sentences")
+    preferences: list[str] = Field(default_factory=list, max_length=12)
+    interests: list[Interest] = Field(default_factory=list, max_length=15)
+    known: list[str] = Field(default_factory=list, max_length=12)
+    avoid: list[str] = Field(default_factory=list, max_length=10)
+    goal_candidates: list[str] = Field(default_factory=list, max_length=5)
+
+
+SYSTEM = """You maintain a short profile of one user of a news service about the war in Ukraine and the defense \
+sector. The service shows them daily digests and search results from Ukrainian and Russian Telegram channels; \
+an AI assistant answers their questions. Your profile is given to that assistant at the start of every chat so \
+its answers adapt to the user.
+
+You get the previous profile (may be empty) and the user's new activity: their own chat messages, their ratings \
+of news items and answers (with reasons and comments), and things they shared or that were detected about them \
+(insights, with a kind). Update the profile:
+- Merge new evidence with the previous profile. When statements conflict, the newer one wins.
+- preferences: how they want answers and news (length, format, language, what to include or skip).
+- interests: topics they care about, weight 1-5 by how strong and repeated the evidence is (ratings and repeated \
+questions count more than one mention). Drop topics with only weak, old evidence.
+- known: things they said they already know (don't repeat these to them).
+- avoid: topics or kinds of news they rated as not useful repeatedly or said they don't want.
+- goal_candidates: goals they expressed that are not in their active goals.
+- summary: 2-4 sentences: who they are (work, role, organization if stated) and what they need from the service.
+- Only state what the evidence supports; no guesses. Write the texts in Ukrainian, short.
+Answer with one JSON object only, no other text, with exactly these keys:
+{"summary": str, "preferences": [str], "interests": [{"topic": str, "weight": 1-5}], "known": [str], \
+"avoid": [str], "goal_candidates": [str]}"""
+
+
+@dataclass
+class Activity:
+    user_id: Any
+    previous: dict | None
+    chat: list[dict] = field(default_factory=list)
+    feedback: list[dict] = field(default_factory=list)
+    insights: list[dict] = field(default_factory=list)
+    goals: list[str] = field(default_factory=list)
+    until: datetime | None = None          # the newest timestamp included: the next run starts after it
+    withheld: int = 0                      # items above the backend's label, not sent
+    labels: list[str] = field(default_factory=list)    # labels of everything sent
+
+    @property
+    def label(self) -> str:
+        """The payload's (and so the learned profile's) label: the highest of what's sent."""
+        return sensitivity.highest(self.labels) if self.labels else "public"
+
+    @property
+    def empty(self) -> bool:
+        return not (self.chat or self.feedback or self.insights)
+
+    def payload(self) -> dict:
+        return {"previous_profile": self.previous or {}, "active_goals": self.goals,
+                "chat_messages": self.chat, "ratings": self.feedback, "insights": self.insights}
+
+    def size(self) -> int:
+        return len(json.dumps(self.payload(), ensure_ascii=False))
+
+
+def _cut(text: Any) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= MAX_TEXT else text[:MAX_TEXT - 1] + "…"
+
+
+def _day(dt: datetime | None) -> str | None:
+    return dt.date().isoformat() if dt else None
+
+
+def _newer(dt: datetime | None, since: datetime | None) -> bool:
+    if dt is None:
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return since is None or dt > since
+
+
+async def collect(db: AsyncDatabase, user_id, max_label: str) -> Activity:
+    """Everything new for this user since users.learned.processed_until, at or below `max_label`."""
+    key = user_key(user_id) if not isinstance(user_id, int) else user_id
+    user = await db.users.find_one({"_id": key}, {"learned": 1, "goals": 1, "insights": 1,
+                                                 "feedback": {"$slice": -1000}}) or {}
+    learned = user.get("learned") or {}
+    since = learned.get("processed_until")
+    if since is not None and since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    previous = {k: learned[k] for k in LearnedProfile.model_fields if k in learned} or None
+    if previous and not sensitivity.is_allowed(learned.get("sensitivity", CHAT_LABEL), max_label):
+        previous = None                     # learned from data this backend may not see: start fresh
+    act = Activity(user_id=key, previous=previous,
+                   goals=[g["text"] for g in user.get("goals") or [] if g.get("active")])
+    if previous:
+        act.labels.append(learned.get("sensitivity", CHAT_LABEL))
+    stamps: list[datetime] = []
+
+    chat_allowed = sensitivity.is_allowed(CHAT_LABEL, max_label)
+    if chat_allowed:
+        async for doc in db.conversations.find({"user_id": key}, {"messages": 1}):
+            for m in doc.get("messages") or []:
+                if m.get("role") == "user" and m.get("via") in (None, "chat", "search_query", "feedback_text",
+                                                                 "goal", "insight") \
+                        and _newer(m.get("created_at"), since):
+                    act.chat.append({"at": m["created_at"], "via": m.get("via") or "telegram",
+                                     "text": _cut(m.get("content"))})
+        act.chat.sort(key=lambda m: m["at"])
+        act.chat = act.chat[-MAX_CHAT:]
+        stamps += [m["at"] for m in act.chat]
+        for m in act.chat:
+            m["at"] = _day(m["at"])
+
+        fb = [f for f in user.get("feedback") or [] if _newer(f.get("at"), since)][-MAX_FEEDBACK:]
+        stamps += [f["at"] for f in fb]
+        if act.chat or fb:
+            act.labels.append(CHAT_LABEL)
+        act.feedback = [{k: v for k, v in {
+            "at": _day(f.get("at")), "target": f.get("target_type") or ("digest_item" if f.get("digest_id") else "post"),
+            "reaction": f.get("reaction"), "category": f.get("category"), "tags": (f.get("tags") or [])[:6],
+            "about": _cut(f.get("about")) if f.get("about") else None, "reasons": f.get("reasons") or None,
+            "comment": _cut(f.get("text")) if f.get("text") else None}.items() if v} for f in fb]
+    else:
+        act.withheld += 1
+
+    for i in user.get("insights") or []:
+        if not _newer(i.get("created_at"), since):
+            continue
+        if not sensitivity.is_allowed(i.get("sensitivity", "internal"), max_label):
+            act.withheld += 1
+            continue
+        act.insights.append({"at": _day(i.get("created_at")), "kind": i.get("kind", "other"),
+                             "origin": i.get("origin", "explicit"), "text": _cut(i.get("text"))})
+        act.labels.append(i.get("sensitivity", "internal"))
+        stamps.append(i["created_at"])
+    act.insights = act.insights[-MAX_INSIGHTS:]
+    act.until = max((s if s.tzinfo else s.replace(tzinfo=timezone.utc) for s in stamps), default=since)
+    return act
+
+
+def parse(text: str) -> LearnedProfile:
+    """The model's answer as a LearnedProfile: tolerates ```json fences and text around the object."""
+    cleaned = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("no JSON object in the answer")
+    return LearnedProfile.model_validate(json.loads(cleaned[start:end + 1]))
+
+
+@dataclass
+class Outcome:
+    profile: LearnedProfile
+    calls: list[ModelResult]
+
+
+async def learn(backend: ModelBackend, act: Activity) -> Outcome:
+    """Asks the backend for the updated profile; one retry with the error if the answer doesn't parse."""
+    label = act.label
+    messages = [{"role": "user", "content": "Data (JSON):\n" + json.dumps(act.payload(), ensure_ascii=False,
+                                                                         default=str)}]
+    calls: list[ModelResult] = []
+    for attempt in (1, 2):
+        result = await backend.complete(messages, system=SYSTEM, max_tokens=2000, sensitivity=label,
+                                        user_id=str(act.user_id))
+        calls.append(result)
+        try:
+            return Outcome(parse(result.text), calls)
+        except (ValueError, ValidationError) as e:
+            if attempt == 2:
+                raise ValueError(f"the model's answer didn't match the profile format twice: {e}") from e
+            messages += [{"role": "assistant", "content": result.text},
+                         {"role": "user", "content": f"That didn't match the format ({str(e)[:300]}). "
+                                                     "Answer again with only the JSON object."}]
+    raise RuntimeError("unreachable")
+
+
+async def save(db: AsyncDatabase, act: Activity, outcome: Outcome) -> None:
+    last = outcome.calls[-1]
+    doc = {**outcome.profile.model_dump(), "processed_until": act.until, "updated_at": datetime.now(timezone.utc),
+           "backend": last.backend, "model": last.model, "sensitivity": act.label,
+           "input": {"chat": len(act.chat), "feedback": len(act.feedback), "insights": len(act.insights)}}
+    await db.users.update_one({"_id": act.user_id}, {"$set": {"learned": doc}})
+
+
+async def users_with_activity(db: AsyncDatabase) -> list:
+    """Users with something the job could learn from: logged conversations, MCP feedback or insights."""
+    ids = set(await db.conversations.distinct("user_id", {"session_key": {"$exists": True}}))
+    ids |= set(await db.users.distinct("_id", {"$or": [{"insights.0": {"$exists": True}},
+                                                     {"feedback.channel": {"$exists": True}}]}))
+    return sorted(ids, key=str)

@@ -57,6 +57,9 @@ Then choose "Streamable HTTP" with the URL `http://127.0.0.1:8000/mcp`.
 | `set_goal(action, text)` | Adds or removes a goal with the bot's rules (max 5 active, no duplicates; removing keeps history) |
 | `save_insight(text, area, tags, sensitivity)` | Saves knowledge the user shares, verbatim, in `users.insights`; `confidential` by default |
 | `get_insights(query, area)` | Recalls saved insights this client may read (sensitivity filter) |
+| `log_turn(user_message, previous_reply, signals)` | Records a message that needs no other tool |
+
+Every tool takes `user_message` (required, the user's message verbatim) and `signals` (what it reveals: goals, interests, preferences, facts, feedback, things known), saved as detected insights. Results carry `goals_to_offer`, and `about_user` on the first call of a conversation. The learning job (`python -m brain.scripts.learn_profiles`, `docs/LEARNING_PLAN.md`) turns it all into `users.learned`.
 
 Every call is logged per user and session in `conversations` (`brain/audit/conversations.py`): sanitized arguments, a result summary with references only, and the user's own words verbatim. `audit_log` keeps security events only. Run `python -m brain.scripts.setup_indexes` once per database (see `docs/CONVERSATIONS_PLAN.md` §1.3 for production).
 

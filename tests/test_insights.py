@@ -102,16 +102,16 @@ async def test_tools_end_to_end(test_db, user):
     svc = Services(settings=make_settings(DEV_USER_ID=user, TRUST_LEVEL="cloud"), repos=Repos(test_db),
                    audit=AuditLog(test_db), token=lambda: None)
     async with Client(create_server(svc)) as c:
-        r = (await c.call_tool("save_insight", {"text": "Запам'ятай: я веду проєкт з дронами-перехоплювачами",
+        r = (await c.call_tool("save_insight", {"user_message": "тест", "text": "Запам'ятай: я веду проєкт з дронами-перехоплювачами",
                                                 "area": "робота", "sensitivity": "confidential"})).structured_content
         assert r["sensitivity"] == "confidential" and r["visible_here"] is False and "приватно" in r["confirmation"]
-        ok = (await c.call_tool("save_insight", {"text": "Можна згадувати: люблю короткі відповіді",
+        ok = (await c.call_tool("save_insight", {"user_message": "тест", "text": "Можна згадувати: люблю короткі відповіді",
                                                  "kind": "preference"})).structured_content
         assert ok["visible_here"] is True
-        got = (await c.call_tool("get_insights", {})).structured_content
+        got = (await c.call_tool("get_insights", {"user_message": "тест"})).structured_content
         assert [i["text"] for i in got["insights"]] == ["Можна згадувати: люблю короткі відповіді"]
         assert got["hidden"] == 1
-        prof = (await c.call_tool("get_profile", {})).structured_content
+        prof = (await c.call_tool("get_profile", {"user_message": "тест"})).structured_content
         assert prof["insights"] == {"saved": 2, "visible_here": 1}
         assert prof["about_user"] == {"preference": ["Можна згадувати: люблю короткі відповіді"]}
     # The insight links to the user message that carried it in the conversation log.
@@ -137,7 +137,7 @@ async def test_log_turn_records_the_message_and_saves_signals(test_db, user):
                {"kind": "preference", "text": "пиши коротше"},
                {"kind": "fact", "text": "мій партнер — Іван", "private": True}]
     async with Client(create_server(svc)) as c:
-        first = (await c.call_tool("log_turn", {"message": message, "signals": signals})).structured_content
+        first = (await c.call_tool("log_turn", {"user_message": message, "signals": signals})).structured_content
         assert first["saved"] == 6 and first["duplicates"] == 0
         assert first["goals_to_offer"] == ["знайти 3 компанії для інвестицій до кінця року"]
         # about_user comes on the first message of a conversation, read after this message's signals were saved
@@ -145,7 +145,7 @@ async def test_log_turn_records_the_message_and_saves_signals(test_db, user):
         assert "мій партнер — Іван" not in str(first["about_user"])                 # private: not for Claude
 
         again = (await c.call_tool("log_turn", {
-            "message": "пиши коротше", "previous_reply": "Показав 3 новини про НРК інвестиції",
+            "user_message": "пиши коротше", "previous_reply": "Показав 3 новини про НРК інвестиції",
             "signals": [{"kind": "preference", "text": "Пиши   коротше"}]})).structured_content
         assert again == {"saved": 0, "duplicates": 1, "goals_to_offer": [], "about_user": None}
 
@@ -165,3 +165,47 @@ async def test_log_turn_records_the_message_and_saves_signals(test_db, user):
     assert all("message" not in m["args"] and "previous_reply" not in m["args"] for m in tool_msgs)
     assert tool_msgs[0]["args"]["signals"][1]["kind"] == "goal"
     assert by_kind["known"]["message_id"] == conv["messages"][1]["id"]   # links to the user's chat message
+
+
+async def test_every_tool_requires_the_users_message(test_db, user):
+    svc = Services(settings=make_settings(DEV_USER_ID=user), repos=Repos(test_db), audit=AuditLog(test_db),
+                   token=lambda: None)
+    async with Client(create_server(svc)) as c:
+        tools = (await c.list_tools()).tools
+        assert all("user_message" in (t.input_schema.get("required") or []) for t in tools), \
+            [t.name for t in tools if "user_message" not in (t.input_schema.get("required") or [])]
+        assert all("signals" in t.input_schema["properties"] for t in tools)
+        assert (await c.call_tool("get_profile", {})).is_error                     # missing: refused
+
+
+async def test_any_tool_saves_signals_and_brings_the_profile_first(test_db, user):
+    from tests.fixtures.sample_data import DIGEST_UA
+    await insights.save_insight(Repos(test_db), cloud(user), "Люблю короткі відповіді", kind="preference")
+    svc = Services(settings=make_settings(DEV_USER_ID=user, TRUST_LEVEL="cloud"), repos=Repos(test_db),
+                   audit=AuditLog(test_db), token=lambda: None)
+    said = "Покажи новини про морські дрони — я хочу знайти, куди інвестувати в морські дрони"
+    async with Client(create_server(svc)) as c:
+        s1 = await c.call_tool("search_posts", {
+            "query": "морські дрони", "days": 30, "user_message": said,
+            "signals": [{"kind": "goal", "text": "знайти, куди інвестувати в морські дрони"},
+                        {"kind": "interest", "text": "морські дрони"}]})
+        d = s1.structured_content
+        assert d["goals_to_offer"] == ["знайти, куди інвестувати в морські дрони"]
+        assert d["about_user"]["preference"] == ["Люблю короткі відповіді"]          # first call: the profile
+        assert "About the user" in s1.content[0].text
+        # A second tool for the same message: no second copy of the message; no profile again.
+        s2 = await c.call_tool("get_digest", {"user_message": said})
+        assert s2.structured_content.get("about_user") is None
+        # A button press in the cards.
+        await c.call_tool("record_feedback", {"target_type": "digest_item", "digest_id": str(DIGEST_UA),
+                                              "item_n": 1, "reaction": "useful",
+                                              "user_message": "[widget] 👍 корисно #1 «Морські дрони»"})
+    [conv] = await test_db.conversations.find({"user_id": user}).to_list(None)
+    users = [(m["via"], m["content"]) for m in conv["messages"] if m["role"] == "user"]
+    assert users == [("chat", said), ("search_query", "морські дрони"),
+                     ("widget", "[widget] 👍 корисно #1 «Морські дрони»")]
+    chat_id = conv["messages"][1]["id"]
+    doc = await test_db.users.find_one({"_id": user})
+    detected = [i for i in doc["insights"] if i["origin"] == "detected"]
+    assert sorted(i["kind"] for i in detected) == ["goal", "interest"]
+    assert all(i["message_id"] == chat_id and i["conversation_id"] == conv["_id"] for i in detected)

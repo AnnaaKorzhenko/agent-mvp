@@ -98,7 +98,7 @@ async def digest_server(test_db):
 
 async def test_digest_with_widget_gives_the_model_only_an_index(digest_server):
     async with Client(digest_server, extensions=[AppsClient()]) as c:
-        r = await c.call_tool("get_digest", {})
+        r = await c.call_tool("get_digest", {"user_message": "тест"})
     assert r.structured_content["shown_in_widget"] is True
     sections = r.structured_content["digests"][0]["sections"]
     assert sections and sections[0]["items"][0]["text"]                        # the widget still gets everything
@@ -110,31 +110,31 @@ async def test_digest_with_widget_gives_the_model_only_an_index(digest_server):
 
 async def test_digest_as_text_or_without_widgets_is_complete(digest_server):
     async with Client(digest_server, extensions=[AppsClient()]) as c:
-        r = await c.call_tool("get_digest", {"as_text": True})
+        r = await c.call_tool("get_digest", {"user_message": "тест", "as_text": True})
     assert r.structured_content["shown_in_widget"] is False and "source_urls" in r.content[0].text
     async with Client(digest_server) as c:                                     # e.g. Claude Code
-        r = await c.call_tool("get_digest", {})
+        r = await c.call_tool("get_digest", {"user_message": "тест"})
     assert r.structured_content["shown_in_widget"] is False and "source_urls" in r.content[0].text
 
 
 async def test_search_with_widget_tells_the_model_not_to_list_posts(digest_server):
     async with Client(digest_server, extensions=[AppsClient()]) as c:
-        r = await c.call_tool("search_posts", {"query": "дрони", "days": 30})
+        r = await c.call_tool("search_posts", {"user_message": "тест", "query": "дрони", "days": 30})
     assert r.structured_content["shown_in_widget"] is True and r.structured_content["results"]
     text = r.content[0].text
     assert text.startswith("The user already sees these results") and "do NOT list" in text
     assert "summary" in text                                                   # summaries kept: Claude answers from them
     async with Client(digest_server) as c:
-        r = await c.call_tool("search_posts", {"query": "дрони", "days": 30})
+        r = await c.call_tool("search_posts", {"user_message": "тест", "query": "дрони", "days": 30})
     assert r.structured_content["shown_in_widget"] is False and r.content[0].text.startswith("{")
 
 
 async def test_follow_up_is_logged_without_a_made_up_target(digest_server, test_db):
     async with Client(digest_server) as c:
-        r = await c.call_tool("record_feedback", {"target_type": "digest_item", "digest_id": str(DIGEST_UA),
+        r = await c.call_tool("record_feedback", {"user_message": "тест", "target_type": "digest_item", "digest_id": str(DIGEST_UA),
                                                   "item_n": 1, "reaction": "useful"})
         fid = r.structured_content["feedback_id"]
-        f = await c.call_tool("record_feedback", {"feedback_id": fid, "text": "дякую"})
+        f = await c.call_tool("record_feedback", {"user_message": "тест", "feedback_id": fid, "text": "дякую"})
     assert f.structured_content["target_type"] == "digest_item"
     doc = await test_db.conversations.find_one({"messages.args.feedback_id": fid})
     [follow_up] = [m for m in doc["messages"] if m.get("args", {}).get("feedback_id") == fid]

@@ -42,7 +42,7 @@ class ConnectPerCall:
 
     async def call_tool(self, name, args):
         async with Client(self.server) as c:
-            return await c.call_tool(name, args)
+            return await c.call_tool(name, {"user_message": "тестове повідомлення", **args})
 
     async def get_instructions(self):
         async with Client(self.server) as c:
@@ -181,5 +181,5 @@ async def test_not_signed_in_is_refused(test_db):
                    repos=Repos(test_db),
                    audit=AuditLog(test_db), token=lambda: None)
     async with Client(create_server(svc)) as c:
-        r = await c.call_tool("get_profile", {})
+        r = await c.call_tool("get_profile", {"user_message": "мої цілі"})
         assert r.is_error and "Not signed in" in r.content[0].text

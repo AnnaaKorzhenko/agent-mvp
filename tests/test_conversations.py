@@ -182,7 +182,7 @@ async def test_tools_still_work_when_logging_fails(test_db):
                    token=lambda: None)
     svc.conversations.col = BrokenCollection()
     async with Client(create_server(svc)) as c:
-        r = await c.call_tool("get_post", {"post_id": str(P_DRONES)})
+        r = await c.call_tool("get_post", {"user_message": "тест", "post_id": str(P_DRONES)})
     assert not r.is_error and r.structured_content["post_id"] == str(P_DRONES)
     assert await test_db.audit_log.find_one({"event": "conversation_log_error", "user_id": user})
 

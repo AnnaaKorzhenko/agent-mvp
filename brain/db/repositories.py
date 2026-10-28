@@ -261,9 +261,17 @@ class UsersRepo:
             return "duplicate"
         return "full" if await self.col.count_documents({"_id": key}, limit=1) else "no_user"
 
-    async def link_insight(self, user_id: UserId, insight_id: ObjectId, conversation_id: ObjectId) -> None:
-        await self.col.update_one({"_id": user_key(user_id), "insights.id": insight_id},
-                                  {"$set": {"insights.$.conversation_id": conversation_id}})
+    async def link_insight(self, user_id: UserId, insight_id: ObjectId, conversation_id: ObjectId,
+                           message_id: ObjectId | None = None) -> None:
+        fields = {"insights.$.conversation_id": conversation_id}
+        if message_id is not None:
+            fields["insights.$.message_id"] = message_id
+        await self.col.update_one({"_id": user_key(user_id), "insights.id": insight_id}, {"$set": fields})
+
+    async def get_learned(self, user_id: UserId) -> dict | None:
+        """users.learned: the profile the learning job wrote (brain/learning/profile.py), if any."""
+        doc = await self.col.find_one({"_id": user_key(user_id)}, {"learned": 1})
+        return (doc or {}).get("learned")
 
     async def get_insights(self, user_id: UserId) -> list[InsightDoc]:
         doc = await self.col.find_one({"_id": user_key(user_id)}, {"insights": 1})

@@ -79,7 +79,10 @@ function createWidget({ name, where }) {
     async function rate(reaction) {
       busy(true); show("Зберігаю…");
       try {
-        const result = await app.callServerTool({ name: "record_feedback", arguments: { ...target, reaction } });
+        // record_feedback requires user_message; "[widget]" marks a button press (not typed text) in the log.
+        const user_message = `[widget] ${LABEL[reaction]} #${ref} «${short(text)}»`;
+        const result = await app.callServerTool({ name: "record_feedback",
+                                                  arguments: { ...target, reaction, user_message } });
         const out = payload(result);
         if (result.isError || !out?.feedback_id) throw new Error(errorText(result, "Не вдалося зберегти"));
         ratings.set(key, { ref, text, reaction, feedback_id: out.feedback_id, comment: "" });
@@ -97,7 +100,9 @@ function createWidget({ name, where }) {
       if (!r) return;
       busy(true);
       try {
-        const args = { feedback_id: r.feedback_id, ...(words ? { text: words } : {}) };
+        // A typed comment is the user's own words; skipping is a button press.
+        const args = { feedback_id: r.feedback_id, ...(words ? { text: words } : {}),
+                       user_message: words || `[widget] пропустив коментар до #${ref}` };
         const result = await app.callServerTool({ name: "record_feedback", arguments: args });
         if (result.isError) throw new Error(errorText(result, "Не вдалося зберегти коментар"));
         r.comment = words || "";

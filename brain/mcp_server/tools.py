@@ -5,6 +5,8 @@ No business logic here. user_id never comes from tool arguments.
 from __future__ import annotations
 
 import itertools
+import json
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Annotated, Awaitable, Callable, Literal
@@ -33,6 +35,7 @@ from brain.mcp_server import schemas as out
 from brain.mcp_server import widgets
 
 TokenProvider = Callable[[], VerifiedToken | None]
+logger = logging.getLogger("brain.tools")
 
 
 @dataclass
@@ -70,6 +73,28 @@ def _session(mcp_ctx: Context | None) -> tuple[str | None, dict | None]:
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
 
+# On every tool: the message that led to the call, and what it reveals about the user. Required, so every message
+# that reaches News brain is stored and analysed (docs/CONVERSATIONS_PLAN.md §4c).
+UserMessage = Annotated[str, Field(min_length=1, max_length=8000, description=(
+    "The user's latest chat message, verbatim and complete: the message that led to this call"))]
+Signals = Annotated[list[out.Signal] | None, Field(max_length=10, description=(
+    "Durable things that message reveals about the user: goals, interests, preferences (how they want answers or "
+    "news), facts about their work and people, feedback, things they already know; in their own words. Leave "
+    "empty for plain requests, and when you already passed them for this message in another call"))]
+
+
+def _common(user_message: str, signals: list[out.Signal] | None) -> dict:
+    return {"user_message": user_message, **({"signals": [sig.model_dump() for sig in signals]} if signals else {})}
+
+
+@dataclass
+class Memory:
+    """What _Call.remember() did with the call's signals."""
+    saved: list[ObjectId] = field(default_factory=list)
+    duplicates: int = 0
+    goals_to_offer: list[str] = field(default_factory=list)
+    about_user: dict | None = None
+
 
 def _post_out(v: posts_domain.PostView) -> out.PostOut:
     p = v.post
@@ -91,6 +116,7 @@ class _Call:
         self.session_id, self.client = _session(mcp_ctx)
         self.record = CallRecord(tool=name, args=args)
         self.conversation_id = None
+        self.memory = Memory()
 
     async def user(self) -> UserContext:
         try:
@@ -120,16 +146,76 @@ class _Call:
             user_id=user_key(c.user_id), channel=c.channel, mcp_session_id=self.session_id, client=self.client,
             record=r)
 
+    async def remember(self, ctx: UserContext) -> None:
+        """Saves the call's signals as detected insights and, on the first call of a conversation, reads what's
+        known about the user. A failure here never breaks the tool."""
+        try:
+            first = not await self.svc.conversations.active(user_key(ctx.user_id), ctx.channel, self.session_id)
+            chat_id = self.record.word_ids.setdefault("chat", ObjectId()) if self.record.chat() else None
+            goals = []
+            for sig in self.args.get("signals") or []:
+                try:
+                    r = await insights_domain.save_insight(
+                        self.svc.repos, ctx, sig["text"], label=insights_domain.PRIVATE if sig.get("private") else None,
+                        message_id=chat_id, kind=sig["kind"], origin="detected")
+                except DomainError:
+                    continue
+                if r.duplicate:
+                    self.memory.duplicates += 1
+                    continue
+                self.memory.saved.append(r.id)
+                if sig["kind"] == "goal":
+                    goals.append(sig["text"])
+            if goals:
+                active = {g.lower() for g in (await profile_domain.get_profile(self.svc.repos, ctx)).goals}
+                self.memory.goals_to_offer = [g for g in goals if g.lower() not in active]
+            if first:
+                self.memory.about_user = await insights_domain.about_user(self.svc.repos, ctx) or None
+        except Exception as e:             # noqa: BLE001 - memory must never break a tool
+            logger.error(f"remember() failed in {self.name}: {type(e).__name__}: {e}")
+
+    async def _link(self, ctx: UserContext) -> None:
+        if self.conversation_id is None:
+            return
+        for insight_id in self.memory.saved:
+            await self.svc.repos.users.link_insight(ctx.user_id, insight_id, self.conversation_id,
+                                                    self.record.word_ids.get("chat"))
+
+    def _attach(self, result):
+        m = self.memory
+        if not (m.goals_to_offer or m.about_user):
+            return result
+        if isinstance(result, CallToolResult):
+            extra = {"goals_to_offer": m.goals_to_offer, "about_user": m.about_user}
+            if isinstance(result.structured_content, dict):
+                result.structured_content.update(extra)
+            for block in result.content:
+                if isinstance(block, TextContent):
+                    block.text += "\nAbout the user (adapt to it): " + json.dumps(extra, ensure_ascii=False)
+                    break
+            return result
+        if isinstance(result, out.MemoryOut):
+            result.goals_to_offer = m.goals_to_offer
+            if not result.about_user:
+                result.about_user = m.about_user
+        return result
+
     async def run(self, fn: Callable[[UserContext], Awaitable]):
         ctx = await self.user()
         try:
-            return await fn(ctx)
+            await self.remember(ctx)
+            result = await fn(ctx)
         except DomainError as e:
             await self.done(outcome="error", error=str(e))
             raise ToolError(str(e)) from None
         except Exception as e:
             await self.done(outcome="error", error=f"{type(e).__name__}: {e}")
             raise
+        try:
+            await self._link(ctx)
+        except Exception as e:             # noqa: BLE001
+            logger.error(f"linking insights failed in {self.name}: {type(e).__name__}: {e}")
+        return self._attach(result)
 
 
 def register_tools(mcp: MCPServer, svc: Services) -> None:
@@ -137,12 +223,14 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
     @mcp.tool(title="Today's news digest", annotations=READ_ONLY, meta=widgets.tool_meta(widgets.DIGEST_UI))
     async def get_digest(
         mcp_ctx: Context,
+        user_message: UserMessage,
         side: Annotated[Literal["ua", "ru", "both"], Field(
             description="ua: Ukrainian sources; ru: Russian sources (claims, not facts); both: both")] = "both",
         date: Annotated[str | None, Field(
             description="Kyiv date YYYY-MM-DD; omit for the latest digest")] = None,
         as_text: Annotated[bool, Field(description=(
             "true only if the user asks for the digest as text (e.g. the cards didn't show up)"))] = False,
+        signals: Signals = None,
     ) -> Annotated[CallToolResult, out.DigestResult]:
         """Get the user's daily news digest: sections ordered by the user's interests, every item with its
         source links (source_urls) and post ids (source_post_ids).
@@ -154,7 +242,8 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
         never as facts; cite source_urls; show every item with its ref number (#1, #2, …) so the user can refer
         to it and rate it. Offer short follow-ups: more detail on item N (get_post with its source_post_ids),
         a shorter version, or the sources."""
-        call = _Call(svc, "get_digest", {"side": side, "date": date, "as_text": as_text}, mcp_ctx)
+        call = _Call(svc, "get_digest", {"side": side, "date": date, "as_text": as_text,
+                                         **_common(user_message, signals)}, mcp_ctx)
         widget = not as_text and widgets.client_shows_widgets(mcp_ctx)
 
         async def body(ctx: UserContext) -> CallToolResult:
@@ -187,6 +276,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
     @mcp.tool(title="Search news posts", annotations=READ_ONLY, meta=widgets.tool_meta(widgets.SEARCH_UI))
     async def search_posts(
         mcp_ctx: Context,
+        user_message: UserMessage,
         query: Annotated[str, Field(min_length=2, max_length=300,
                                     description="Key words, e.g. 'Brave1 гранти РЕБ' (Ukrainian or Russian)")],
         side: Annotated[Literal["ua", "ru", "all"], Field(description="Source side")] = "all",
@@ -194,6 +284,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
             description="Optional category key, e.g. front, defense_tech, investments, ru_front")] = None,
         days: Annotated[int, Field(ge=1, le=30, description="How many past days to search")] = 7,
         limit: Annotated[int, Field(ge=1, le=25)] = 10,
+        signals: Signals = None,
     ) -> Annotated[CallToolResult, out.SearchResult]:
         """Search the news base (summaries of Telegram posts from Ukrainian and Russian channels) by key words.
 
@@ -204,7 +295,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
         ref numbers (#1, #2, …). If the result says shown_in_widget, the user already sees the results as cards
         with links: answer in your own words citing #N, without listing the posts again."""
         call = _Call(svc, "search_posts", {"query": query, "side": side, "category": category,
-                                           "days": days, "limit": limit}, mcp_ctx)
+                                           "days": days, "limit": limit, **_common(user_message, signals)}, mcp_ctx)
 
         widget = widgets.client_shows_widgets(mcp_ctx)
 
@@ -231,23 +322,29 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
     @mcp.tool(title="Get one post", annotations=READ_ONLY)
     async def get_post(
         mcp_ctx: Context,
+        user_message: UserMessage,
         post_id: Annotated[str, Field(description="A post_id / source_post_ids value from another tool")],
-    ) -> out.PostOut:
+        signals: Signals = None,
+    ) -> out.PostDetail:
         """Get one news post (summary, tags, channel, link) by id. Cite its post_url."""
-        call = _Call(svc, "get_post", {"post_id": post_id}, mcp_ctx)
+        call = _Call(svc, "get_post", {"post_id": post_id, **_common(user_message, signals)}, mcp_ctx)
 
-        async def body(ctx: UserContext) -> out.PostOut:
+        async def body(ctx: UserContext) -> out.PostDetail:
             view = await posts_domain.get_post(svc.repos, ctx, post_id)
             await call.done(items=1, labels=[view.post.sensitivity], post_ids=[view.post.id])
-            return _post_out(view)
+            return out.PostDetail(**_post_out(view).model_dump())
         return await call.run(body)
 
     @mcp.tool(title="The user's interests", annotations=READ_ONLY)
-    async def get_profile(mcp_ctx: Context) -> out.ProfileOut:
+    async def get_profile(
+        mcp_ctx: Context,
+        user_message: UserMessage,
+        signals: Signals = None,
+    ) -> out.ProfileOut:
         """The user's goals, today's chosen categories, strongest interests (categories and tags by score) and
         what they told you about themselves (about_user). Use it when they ask about their goals, interests or
         profile, and to explain why something matters to them; don't recite it unasked."""
-        call = _Call(svc, "get_profile", {}, mcp_ctx)
+        call = _Call(svc, "get_profile", _common(user_message, signals), mcp_ctx)
 
         async def body(ctx: UserContext) -> out.ProfileOut:
             p = await profile_domain.get_profile(svc.repos, ctx)
@@ -265,47 +362,21 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
                                           openWorldHint=False))
     async def log_turn(
         mcp_ctx: Context,
-        message: Annotated[str, Field(min_length=1, max_length=8000, description=(
-            "The user's latest message, verbatim and complete"))],
-        signals: Annotated[list[out.Signal] | None, Field(max_length=10, description=(
-            "Durable things the message reveals about the user (goals, interests, preferences, facts, feedback, "
-            "things they already know). Empty for plain questions"))] = None,
+        user_message: UserMessage,
         previous_reply: Annotated[str | None, Field(max_length=300, description=(
             "One line: what your previous reply in this chat said or did (omit on the first message)"))] = None,
+        signals: Signals = None,
     ) -> out.TurnLogged:
-        """Record the user's message in their News brain. Call it FIRST for EVERY user message in a chat where
-        News brain is on, before answering or calling other tools, including follow-ups, thanks and corrections.
-        Pass the message verbatim; extract `signals` for anything durable it reveals, in the user's own words.
-        Ratings of a specific news item or of your answer still go to record_feedback as well. If the result
-        has goals_to_offer, ask the user once whether to add them as goals (set_goal). If it has about_user,
-        use it for the whole conversation."""
-        args = {"message": message, "previous_reply": previous_reply,
-                "signals": [sig.model_dump() for sig in signals or []]}
+        """Record the user's message in their News brain when no other News brain tool fits it (thanks,
+        corrections, opinions, things about themselves, small follow-ups). Every other News brain tool already
+        records the message it was called for, so don't call log_turn in addition to them. Pass the message
+        verbatim; put anything durable it reveals into `signals`, in the user's own words."""
+        args = {"previous_reply": previous_reply, **_common(user_message, signals)}
         call = _Call(svc, "log_turn", args, mcp_ctx)
-        message_id = call.record.word_ids.setdefault("chat", ObjectId())
 
         async def body(ctx: UserContext) -> out.TurnLogged:
-            first = not await svc.conversations.active(user_key(ctx.user_id), ctx.channel, call.session_id)
-            saved, duplicates, goals = [], 0, []
-            for sig in signals or []:
-                r = await insights_domain.save_insight(
-                    svc.repos, ctx, sig.text, label=insights_domain.PRIVATE if sig.private else None,
-                    message_id=message_id, kind=sig.kind, origin="detected")
-                if r.duplicate:
-                    duplicates += 1
-                    continue
-                saved.append(r.id)
-                if sig.kind == "goal":
-                    goals.append(sig.text)
-            if goals:
-                active = {g.lower() for g in (await profile_domain.get_profile(svc.repos, ctx)).goals}
-                goals = [g for g in goals if g.lower() not in active]
-            about = await insights_domain.about_user(svc.repos, ctx) if first else None
-            await call.done(items=len(saved))
-            if call.conversation_id is not None:
-                for insight_id in saved:
-                    await svc.repos.users.link_insight(ctx.user_id, insight_id, call.conversation_id)
-            return out.TurnLogged(saved=len(saved), duplicates=duplicates, goals_to_offer=goals, about_user=about)
+            await call.done(items=len(call.memory.saved))
+            return out.TurnLogged(saved=len(call.memory.saved), duplicates=call.memory.duplicates)
         return await call.run(body)
 
     @mcp.tool(title="Remember something the user shared",
@@ -313,6 +384,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
                                           openWorldHint=False))
     async def save_insight(
         mcp_ctx: Context,
+        user_message: UserMessage,
         text: Annotated[str, Field(min_length=1, max_length=4000, description=(
             "What the user shared, verbatim and in the user's language"))],
         kind: Annotated[Literal["fact", "goal", "interest", "preference", "feedback", "known", "other"], Field(
@@ -323,13 +395,14 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
         sensitivity: Annotated[Literal["public", "internal", "confidential", "restricted"] | None, Field(
             description="Default internal (you can recall it later). confidential only if the user says it's "
                         "private: then only their local client can read it")] = None,
+        signals: Signals = None,
     ) -> out.InsightSaved:
         """Save something the user explicitly asks you to remember ("запам'ятай", "remember") or clearly wants
         kept: knowledge from their work, judgements, how they want analysis done, people and organizations. This
         is the user's News brain memory: save it here even if you also keep your own memory. Keep `text`
         verbatim, in the user's language. (Things detected in ordinary messages go through log_turn signals.)"""
         args = {"text": text, "kind": kind, "area": area, "tags": tags, "sensitivity": sensitivity}
-        call = _Call(svc, "save_insight", args, mcp_ctx)
+        call = _Call(svc, "save_insight", {**args, **_common(user_message, signals)}, mcp_ctx)
         message_id = call.record.word_ids.setdefault("insight", ObjectId())   # the logged user message
 
         async def body(ctx: UserContext) -> out.InsightSaved:
@@ -347,16 +420,19 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
     @mcp.tool(title="Recall what the user shared", annotations=READ_ONLY)
     async def get_insights(
         mcp_ctx: Context,
+        user_message: UserMessage,
         query: Annotated[str | None, Field(max_length=300, description="Optional key words")] = None,
         kind: Annotated[Literal["fact", "goal", "interest", "preference", "feedback", "known", "other"] | None,
                         Field(description="Optional: only this kind")] = None,
         area: Annotated[str | None, Field(max_length=60, description="Optional area, as saved")] = None,
+        signals: Signals = None,
     ) -> out.InsightsResult:
         """Recall what the user told you about themselves (saved with save_insight or detected by log_turn),
         newest first or best match for `query`. Use it when the user asks what you remember about them
         ("що ти про мене пам'ятаєш") and when their own context would make an answer better. Only insights this
         connection may read come back; `hidden` counts the others."""
-        call = _Call(svc, "get_insights", {"query": query, "kind": kind, "area": area}, mcp_ctx)
+        call = _Call(svc, "get_insights", {"query": query, "kind": kind, "area": area,
+                                           **_common(user_message, signals)}, mcp_ctx)
 
         async def body(ctx: UserContext) -> out.InsightsResult:
             r = await insights_domain.get_insights(svc.repos, ctx, query, area, kind=kind)
@@ -375,6 +451,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
                                           openWorldHint=False))
     async def record_feedback(
         mcp_ctx: Context,
+        user_message: UserMessage,
         reaction: Annotated[Literal["useful", "not_useful", "neutral", "like", "dislike", "skip"] | None, Field(
             description="useful (👍), not_useful (👎) or neutral (50/50). Omit only to add a comment to an earlier "
                         "rating (feedback_id, or the rated item's ids with text)")] = None,
@@ -396,6 +473,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
                                           description="The user's own words, verbatim, if they gave any")] = None,
         feedback_id: Annotated[str | None, Field(description=(
             "To add a comment or reasons to an earlier rating: its feedback_id. Scores don't change"))] = None,
+        signals: Signals = None,
     ) -> out.FeedbackOut:
         """Save the user's rating of a news item, or of your own answer or suggestion; news ratings tune which
         news they see first.
@@ -413,7 +491,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
         args = {"target_type": target_type, "reaction": reaction, "post_id": post_id, "digest_id": digest_id,
                 "item_n": item_n, "about": about, "cited_post_ids": cited_post_ids, "reasons": reasons,
                 "text": text, "feedback_id": feedback_id}
-        call = _Call(svc, "record_feedback", args, mcp_ctx)
+        call = _Call(svc, "record_feedback", {**args, **_common(user_message, signals)}, mcp_ctx)
 
         async def body(ctx: UserContext) -> out.FeedbackOut:
             r = await feedback_domain.record_feedback(svc.repos, ctx, mcp_channels=svc.mcp_channels, **args)
@@ -428,15 +506,18 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
                                           openWorldHint=False))
     async def set_goal(
         mcp_ctx: Context,
+        user_message: UserMessage,
         action: Annotated[Literal["add", "remove"], Field(description="add a new goal, or remove an existing one")],
         text: Annotated[str, Field(min_length=1, max_length=300, description=(
             "add: the goal in the user's words, e.g. 'стежити за розвитком НРК'; "
             "remove: the goal's text exactly as get_profile returns it"))],
+        signals: Signals = None,
     ) -> out.GoalsOut:
         """Add or remove one of the user's goals (what they most want to achieve; at most 5). Goals shape which
         news matter to them. Call it only when the user explicitly asks to set, change or drop a goal, never on
         your own judgement. To change a goal, remove the old one and add the new one."""
-        call = _Call(svc, "set_goal", {"action": action, "text": text}, mcp_ctx)
+        call = _Call(svc, "set_goal", {"action": action, "text": text, **_common(user_message, signals)},
+                     mcp_ctx)
 
         async def body(ctx: UserContext) -> out.GoalsOut:
             if action == "add":

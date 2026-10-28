@@ -2,7 +2,8 @@
 
 The server never sees the chat itself, only tool calls. Each call becomes a `role: "tool"` message (sanitized
 arguments, a result summary with references only). Arguments that are the user's own words (USER_WORDS) also
-become verbatim `role: "user"` messages; log_turn carries each chat message this way. The client model's one-line
+become verbatim `role: "user"` messages: every tool carries the user's latest chat message (`user_message`,
+stored once per message even when several tools carry it), plus a few tool-specific arguments. The client model's one-line
 summary of its previous reply (MODEL_WORDS) becomes a `role: "assistant"` message, marked as model-written.
 Nothing reads these documents back.
 
@@ -12,6 +13,7 @@ Logging never breaks a tool: every failure is caught and reported to audit_log.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -38,8 +40,9 @@ USER_WORDS: dict[str, dict[str, str]] = {
     "record_feedback": {"text": "feedback_text"},
     "set_goal": {"text": "goal"},
     "save_insight": {"text": "insight"},
-    "log_turn": {"message": "chat"},
 }
+CHAT_ARG = "user_message"         # on every tool: the user's latest chat message, verbatim
+WIDGET_PREFIX = "[widget]"        # user_message sent by a widget button, not typed by the user
 # Text the client model wrote about its own replies (stored as role "assistant", never as the user's words).
 MODEL_WORDS: dict[str, dict[str, str]] = {
     "log_turn": {"previous_reply": "reply_summary"},
@@ -60,7 +63,11 @@ def sanitize(value: Any) -> Any:
 
 def _texts(mapping: dict[str, dict[str, str]], tool: str, args: dict) -> list[tuple[str, str]]:
     out = []
-    for arg, via in mapping.get(tool, {}).items():
+    pairs = list(mapping.get(tool, {}).items())
+    if mapping is USER_WORDS:
+        text = args.get(CHAT_ARG)
+        pairs.insert(0, (CHAT_ARG, "widget" if isinstance(text, str) and text.startswith(WIDGET_PREFIX) else "chat"))
+    for arg, via in pairs:
         text = args.get(arg)
         if isinstance(text, str) and text.strip():
             out.append((via, text.strip()[:MAX_MESSAGE_CHARS if via == "chat" else MAX_ARG_CHARS]))
@@ -78,7 +85,11 @@ def model_words(tool: str, args: dict) -> list[tuple[str, str]]:
 
 
 # Arguments stored only as their own messages (long chat text is not repeated inside the tool message).
-MOVED_ARGS = {"log_turn": {"message", "previous_reply"}}
+MOVED_ARGS = {CHAT_ARG, "previous_reply"}
+
+
+def chat_hash(text: str) -> str:
+    return hashlib.sha256(" ".join(text.split()).encode()).hexdigest()[:24]
 
 
 @dataclass
@@ -96,10 +107,14 @@ class CallRecord:
     message_id: ObjectId = field(default_factory=ObjectId)          # id of the role "tool" message
     word_ids: dict[str, ObjectId] = field(default_factory=dict)     # via -> id of its role "user" message
 
-    def messages(self, now: datetime) -> list[dict]:
-        moved = MOVED_ARGS.get(self.tool, set())
+    def chat(self) -> str | None:
+        """The user's chat message this call carries (typed, not a widget button), if any."""
+        return next((text for via, text in user_words(self.tool, self.args) if via == "chat"), None)
+
+    def messages(self, now: datetime, skip_chat: bool = False) -> list[dict]:
+        """skip_chat: the chat message is already in the document (an earlier tool of the same turn)."""
         tool_msg = {"id": self.message_id, "role": "tool", "created_at": now, "tool": self.tool,
-                    "args": sanitize({k: v for k, v in self.args.items() if k not in moved}),
+                    "args": sanitize({k: v for k, v in self.args.items() if k not in MOVED_ARGS}),
                     "result": {"ok": self.ok, "error": self.error and self.error[:300], "count": self.count,
                                "duration_ms": self.duration_ms, "post_ids": self.post_ids[:MAX_REFS],
                                "digest_ids": self.digest_ids[:MAX_REFS], "widget": self.widget}}
@@ -109,7 +124,7 @@ class CallRecord:
                    for via, text in model_words(self.tool, self.args)]
         words = [{"id": self.word_ids.setdefault(via, ObjectId()), "role": "user", "created_at": now,
                   "content": text, "via": via, "tool_message_id": self.message_id}
-                 for via, text in user_words(self.tool, self.args)]
+                 for via, text in user_words(self.tool, self.args) if not (skip_chat and via == "chat")]
         return [tool_msg, *replies, *words]
 
 
@@ -149,21 +164,34 @@ class ConversationLog:
 
     async def _append(self, user_id, channel, mcp_session_id, client, record: CallRecord) -> ObjectId:
         now = datetime.now(timezone.utc)
-        msgs = record.messages(now)
-        room = self.max_messages - len(msgs)
-        push = {"$push": {"messages": {"$each": msgs}}, "$inc": {"message_count": len(msgs)},
-                "$set": {"updated_at": now}}
         # The current document of this session (or of this user without a session id), newest part first.
         current = await self.col.find_one(
             {"user_id": user_id, "channel": channel, "mcp_session_id": mcp_session_id,
              "session_key": {"$exists": True}},
-            {"_id": 1, "part": 1, "updated_at": 1}, sort=[("updated_at", -1)])
+            {"_id": 1, "part": 1, "updated_at": 1, "last_chat": 1}, sort=[("updated_at", -1)])
+        chat = record.chat()
+        h = chat_hash(chat) if chat else None
+        last = (current or {}).get("last_chat") or {}
+        repeat = bool(h and last.get("hash") == h and current and current["updated_at"] >= now - self.idle)
+        if repeat:                          # another tool for the same message: link to the stored one
+            record.word_ids["chat"] = last["id"]
+        msgs = record.messages(now, skip_chat=repeat)
+        room = self.max_messages - len(msgs)
+        updates: dict = {"updated_at": now}
+        if h and not repeat:
+            updates["last_chat"] = {"hash": h, "id": record.word_ids["chat"]}
+        push = {"$push": {"messages": {"$each": msgs}}, "$inc": {"message_count": len(msgs)}, "$set": updates}
         if current:
             done = await self.col.find_one_and_update(
                 {"_id": current["_id"], "message_count": {"$lte": room}, "updated_at": {"$gte": now - self.idle}},
                 push, projection={"_id": 1})
             if done:
                 return done["_id"]
+        if repeat:                          # a new part starts: it gets the chat message itself
+            msgs = record.messages(now)
+            updates["last_chat"] = {"hash": h, "id": record.word_ids["chat"]}
+            push = {"$push": {"messages": {"$each": msgs}}, "$inc": {"message_count": len(msgs)},
+                    "$set": updates}
         part = current["part"] + 1 if current and mcp_session_id else 1
         key = f"{mcp_session_id}:{part}" if mcp_session_id else f"anon:{ObjectId()}"
         new = {"channel": channel, "client": client, "mcp_session_id": mcp_session_id, "part": part,

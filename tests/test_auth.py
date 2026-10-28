@@ -79,7 +79,8 @@ async def session(server, bearer, *calls):
     """Several tool calls over one MCP connection (one Mcp-Session-Id)."""
     async with httpx2.AsyncClient(headers={"Authorization": f"Bearer {bearer}"}, timeout=20) as http:
         async with Client(streamable_http_client(server.resource, http_client=http)) as c:
-            return [await c.call_tool(tool, args) for tool, args in calls]
+            return [await c.call_tool(tool, {"user_message": f"повідомлення для {tool}", **args})
+                    for tool, args in calls]
 
 
 async def call(server, bearer, tool, args):
@@ -139,13 +140,16 @@ async def test_calls_in_a_row_are_one_conversation(server, test_db):
     [doc] = await test_db.conversations.find({"user_id": user["_id"]}).to_list(None)
     assert doc["client"]["name"] and doc["part"] == 1 and doc["session_key"].startswith("anon:")
     roles = [(m["role"], m.get("tool") or m.get("via")) for m in doc["messages"]]
-    assert roles == [("tool", "search_posts"), ("user", "search_query"), ("tool", "record_feedback"),
-                     ("user", "feedback_text"), ("tool", "get_post")]
-    assert doc["message_count"] == 5
-    search, query = doc["messages"][0], doc["messages"][1]
+    assert roles == [("tool", "search_posts"), ("user", "chat"), ("user", "search_query"),
+                     ("tool", "record_feedback"), ("user", "chat"), ("user", "feedback_text"),
+                     ("tool", "get_post"), ("user", "chat")]
+    assert doc["message_count"] == 8
+    search, said, query = doc["messages"][:3]
+    assert said["content"] == "повідомлення для search_posts" and said["tool_message_id"] == search["id"]
     assert query["content"] == "морські дрони" and query["tool_message_id"] == search["id"]
+    assert "user_message" not in search["args"]                            # stored once, as its own message
     assert search["result"]["ok"] and str(P_DRONES) in search["result"]["post_ids"]
-    assert doc["messages"][3]["content"] == "корисно, дякую"
+    assert doc["messages"][5]["content"] == "корисно, дякую"
 
     await call(server, bob, "get_profile", {})                  # another connection, inside the idle window
     assert await test_db.conversations.count_documents({"user_id": user["_id"]}) == 1
