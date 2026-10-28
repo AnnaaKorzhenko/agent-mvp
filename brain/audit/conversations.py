@@ -1,8 +1,10 @@
 """MCP activity per user and session, in the `conversations` collection (docs/CONVERSATIONS_PLAN.md §1).
 
-The server never sees the user's chat or Claude's replies, only tool calls. Each call becomes a `role: "tool"`
-message (sanitized arguments, a result summary with references only); arguments that are the user's own words
-(USER_WORDS) also become verbatim `role: "user"` messages. Nothing reads these documents back.
+The server never sees the chat itself, only tool calls. Each call becomes a `role: "tool"` message (sanitized
+arguments, a result summary with references only). Arguments that are the user's own words (USER_WORDS) also
+become verbatim `role: "user"` messages; log_turn carries each chat message this way. The client model's one-line
+summary of its previous reply (MODEL_WORDS) becomes a `role: "assistant"` message, marked as model-written.
+Nothing reads these documents back.
 
 Documents sit next to the Telegram bot's (one per Telegram user, no `session_key`). A unique index on
 (user_id, session_key) keeps the bot's one-document-per-user rule and lets MCP sessions have many.
@@ -26,6 +28,7 @@ logger = logging.getLogger("brain.conversations")
 COLLECTION = "conversations"
 UNIQUE_INDEX = "user_session_unique"      # same name, keys and options as user_store.py (the bot)
 MAX_ARG_CHARS = 2000
+MAX_MESSAGE_CHARS = 8000          # a chat message passed by log_turn
 MAX_LIST = 50
 MAX_REFS = 50
 
@@ -35,6 +38,11 @@ USER_WORDS: dict[str, dict[str, str]] = {
     "record_feedback": {"text": "feedback_text"},
     "set_goal": {"text": "goal"},
     "save_insight": {"text": "insight"},
+    "log_turn": {"message": "chat"},
+}
+# Text the client model wrote about its own replies (stored as role "assistant", never as the user's words).
+MODEL_WORDS: dict[str, dict[str, str]] = {
+    "log_turn": {"previous_reply": "reply_summary"},
 }
 
 
@@ -50,14 +58,27 @@ def sanitize(value: Any) -> Any:
     return value
 
 
-def user_words(tool: str, args: dict) -> list[tuple[str, str]]:
-    """[(via, text)] for the arguments of `tool` that are the user's words."""
+def _texts(mapping: dict[str, dict[str, str]], tool: str, args: dict) -> list[tuple[str, str]]:
     out = []
-    for arg, via in USER_WORDS.get(tool, {}).items():
+    for arg, via in mapping.get(tool, {}).items():
         text = args.get(arg)
         if isinstance(text, str) and text.strip():
-            out.append((via, text.strip()[:MAX_ARG_CHARS]))
+            out.append((via, text.strip()[:MAX_MESSAGE_CHARS if via == "chat" else MAX_ARG_CHARS]))
     return out
+
+
+def user_words(tool: str, args: dict) -> list[tuple[str, str]]:
+    """[(via, text)] for the arguments of `tool` that are the user's words."""
+    return _texts(USER_WORDS, tool, args)
+
+
+def model_words(tool: str, args: dict) -> list[tuple[str, str]]:
+    """[(via, text)] for the arguments of `tool` that the client model wrote about its own replies."""
+    return _texts(MODEL_WORDS, tool, args)
+
+
+# Arguments stored only as their own messages (long chat text is not repeated inside the tool message).
+MOVED_ARGS = {"log_turn": {"message", "previous_reply"}}
 
 
 @dataclass
@@ -76,15 +97,20 @@ class CallRecord:
     word_ids: dict[str, ObjectId] = field(default_factory=dict)     # via -> id of its role "user" message
 
     def messages(self, now: datetime) -> list[dict]:
+        moved = MOVED_ARGS.get(self.tool, set())
         tool_msg = {"id": self.message_id, "role": "tool", "created_at": now, "tool": self.tool,
-                    "args": sanitize(self.args),
+                    "args": sanitize({k: v for k, v in self.args.items() if k not in moved}),
                     "result": {"ok": self.ok, "error": self.error and self.error[:300], "count": self.count,
                                "duration_ms": self.duration_ms, "post_ids": self.post_ids[:MAX_REFS],
                                "digest_ids": self.digest_ids[:MAX_REFS], "widget": self.widget}}
+        # The model's summary of its previous reply comes first: it was said before this user message.
+        replies = [{"id": ObjectId(), "role": "assistant", "created_at": now, "content": text, "via": via,
+                    "written_by": "model", "tool_message_id": self.message_id}
+                   for via, text in model_words(self.tool, self.args)]
         words = [{"id": self.word_ids.setdefault(via, ObjectId()), "role": "user", "created_at": now,
                   "content": text, "via": via, "tool_message_id": self.message_id}
                  for via, text in user_words(self.tool, self.args)]
-        return [tool_msg, *words]
+        return [tool_msg, *replies, *words]
 
 
 class ConversationLog:
@@ -108,6 +134,18 @@ class ConversationLog:
                                    mcp_session_id=mcp_session_id, tool=record.tool,
                                    error=f"{type(e).__name__}: {e}")
             return None
+
+    async def active(self, user_id, channel: str, mcp_session_id: str | None) -> bool:
+        """Whether this user already has a conversation in progress (activity within the idle window)."""
+        if self.col is None:
+            return False
+        try:
+            return bool(await self.col.find_one(
+                {"user_id": user_id, "channel": channel, "mcp_session_id": mcp_session_id,
+                 "session_key": {"$exists": True},
+                 "updated_at": {"$gte": datetime.now(timezone.utc) - self.idle}}, {"_id": 1}))
+        except Exception:                  # noqa: BLE001 - only decides whether to send the profile again
+            return False
 
     async def _append(self, user_id, channel, mcp_session_id, client, record: CallRecord) -> ObjectId:
         now = datetime.now(timezone.utc)

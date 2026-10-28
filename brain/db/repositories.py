@@ -248,12 +248,17 @@ class UsersRepo:
 
 
     async def push_insight(self, user_id: UserId, insight: dict, cap: int) -> str:
-        """Appends an insight unless the user already has `cap`. Returns "ok", "full" or "no_user"."""
+        """Appends an insight unless the user already has `cap`, or one of the same kind and normalized text.
+        Returns "ok", "duplicate", "full" or "no_user"."""
         key = user_key(user_id)
-        result = await self.col.update_one({"_id": key, f"insights.{cap - 1}": {"$exists": False}},
-                                           {"$push": {"insights": insight}})
+        same = {"kind": insight["kind"], "norm": insight["norm"]}
+        result = await self.col.update_one(
+            {"_id": key, f"insights.{cap - 1}": {"$exists": False}, "insights": {"$not": {"$elemMatch": same}}},
+            {"$push": {"insights": insight}})
         if result.matched_count:
             return "ok"
+        if await self.col.count_documents({"_id": key, "insights": {"$elemMatch": same}}, limit=1):
+            return "duplicate"
         return "full" if await self.col.count_documents({"_id": key}, limit=1) else "no_user"
 
     async def link_insight(self, user_id: UserId, insight_id: ObjectId, conversation_id: ObjectId) -> None:

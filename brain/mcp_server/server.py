@@ -42,9 +42,12 @@ suggestion. "The third one" is ref 3 of the most recent digest or search result;
 is meant, ask. Never invent ids. One message with several ratings means several calls; a comment that \
 follows a rating goes to its feedback_id.
 - Call set_goal only when the user explicitly asks to set, change or drop a goal.
-- When the user shares durable knowledge or context (their work, judgements, how they want analysis done, people \
-and organizations), or says "запам'ятай", save it with save_insight, verbatim; not for one-off requests or small \
-talk. Use get_insights when their own context would improve an answer.
+- For EVERY user message, call log_turn first, with the message verbatim and the durable signals it reveals \
+(goals, interests, preferences, facts about their work, feedback, things they already know). Pass a one-line \
+previous_reply after the first message. When log_turn returns about_user, adapt to it for the whole conversation: \
+follow their preferences, skip what they already know, connect news to their goals and interests.
+- News brain is the user's memory here. For "запам'ятай" use save_insight; for "що ти про мене пам'ятаєш" or \
+questions about their goals and interests use get_insights and get_profile, even if you also have your own memory.
 """
 
 logger = logging.getLogger("brain.mcp")

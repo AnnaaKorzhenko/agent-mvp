@@ -87,12 +87,42 @@ class InsightCount(BaseModel):
     visible_here: int = Field(description="Of those, how many this connection may read with get_insights")
 
 
+AboutUser = dict[str, list[str]]
+ABOUT_USER_HELP = ("What the user has told you about themselves, newest first, by kind (preference, goal, interest, "
+                   "known, fact, feedback): follow their preferences, skip what they already know, connect news "
+                   "to their goals and interests")
+
+
 class ProfileOut(BaseModel):
     categories_today: dict[str, list[str]] = Field(description="Categories the user picked this morning, per side")
     goals: list[str]
     top_categories: list[CategoryScore]
     top_tags: list[TagScore]
     insights: InsightCount = InsightCount(saved=0, visible_here=0)
+    about_user: AboutUser = Field(default_factory=dict, description=ABOUT_USER_HELP)
+
+
+SignalKind = Literal["goal", "interest", "preference", "fact", "feedback", "known"]
+
+
+class Signal(BaseModel):
+    """Something durable the user revealed in a message (input to log_turn)."""
+    kind: SignalKind = Field(description=(
+        "goal: what they want to achieve; interest: topics they care about; preference: how they want answers "
+        "or news (length, language, format, what to skip); fact: about their work, organization, people, "
+        "situation; feedback: about your answers or the service; known: something they already know"))
+    text: str = Field(min_length=2, max_length=500, description=(
+        "The user's own words for it (quote them; a minimal paraphrase only if needed), in their language"))
+    private: bool = Field(False, description="True only if the user said it's private / not to be recalled")
+
+
+class TurnLogged(BaseModel):
+    saved: int = Field(description="Signals saved as new insights")
+    duplicates: int = Field(0, description="Signals already saved before")
+    goals_to_offer: list[str] = Field(default_factory=list, description=(
+        "Detected goals not yet among the active goals: ask the user once whether to add them (set_goal)"))
+    about_user: AboutUser | None = Field(None, description=(
+        "Only on the first message of a conversation: " + ABOUT_USER_HELP))
 
 
 class InsightSaved(BaseModel):

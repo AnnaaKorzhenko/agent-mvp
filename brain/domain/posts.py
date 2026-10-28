@@ -86,9 +86,20 @@ def _published(post: PostDoc) -> datetime | None:
         return None
 
 
-def rank(post: PostDoc, stems: list[str], now: datetime, days: int) -> float:
+def hits(post: PostDoc, stems: list[str]) -> int:
+    """How many of the query stems the post's summary or tags contain."""
     haystack = (post.summary + " | " + " | ".join(post.tags)).lower()
-    match = (sum(1 for s in stems if re.search(stem_pattern(s), haystack)) / len(stems)) if stems else 0.0
+    return sum(1 for s in stems if re.search(stem_pattern(s), haystack))
+
+
+def min_hits(best: int) -> int:
+    """Weak matches are dropped: with 1-2 words matched at best, all of them are needed; with more, all but
+    one. «морські дрони безекіпажні катери»: posts that only mention «дрони» don't make the list."""
+    return best if best <= 2 else best - 1
+
+
+def rank(post: PostDoc, stems: list[str], now: datetime, days: int) -> float:
+    match = hits(post, stems) / len(stems) if stems else 0.0
     published = _published(post)
     age_days = (now - published).total_seconds() / 86400 if published else days
     recency = max(0.0, 1.0 - age_days / days)
@@ -110,6 +121,10 @@ async def search(repos: Repos, ctx: UserContext, query: str, side: str = "all", 
         [stem_pattern(s) for s in stems], since_iso=since, allowed=ctx.allowed, side=side if side in ("ua", "ru") else None,
         category=category or None, limit=CANDIDATES)
     candidates = sensitivity.filter_allowed(candidates, ctx.max_sensitivity)       # second check
+    counts = {id(p): hits(p, stems) for p in candidates}
+    if counts:
+        need = min_hits(max(counts.values()))
+        candidates = [p for p in candidates if counts[id(p)] >= need]
     ranked = sorted(candidates, key=lambda p: rank(p, stems, now, days), reverse=True)[:limit]
     channels = await repos.sources.get_many([p.channel_id for p in ranked if p.channel_id])
     return [PostView(p, channels.get(p.channel_id or ""), rank(p, stems, now, days)) for p in ranked], stems

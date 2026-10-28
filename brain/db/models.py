@@ -95,12 +95,14 @@ class InterestsDoc(_Doc):
 
 
 class InsightDoc(_Doc):
-    """users.insights[]: knowledge the user shared (save_insight). Private by default."""
+    """users.insights[]: what the user shared (save_insight) or the client model detected (log_turn)."""
     id: Id
+    kind: str = "other"
+    origin: str = "explicit"
     text: str
     area: str | None = None
     tags: Annotated[list[str], BeforeValidator(_as_list)] = []
-    sensitivity: str = "confidential"
+    sensitivity: str = "internal"
     created_at: datetime | None = None
     channel: str | None = None
     conversation_id: Id | None = None
