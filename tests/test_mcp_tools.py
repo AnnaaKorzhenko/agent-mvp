@@ -13,8 +13,9 @@ from tests.conftest import make_settings
 from tests.fixtures.sample_data import DIGEST_UA, P_DRONES, P_SECRET, P_TOP, USERS
 
 UID = 800_000_001
-TOOLS = {"get_digest", "search_posts", "get_post", "get_profile", "record_feedback", "set_goal"}
-WRITE_TOOLS = {"record_feedback", "set_goal"}
+TOOLS = {"get_digest", "search_posts", "get_post", "get_profile", "record_feedback", "set_goal", "save_insight",
+         "get_insights"}
+WRITE_TOOLS = {"record_feedback", "set_goal", "save_insight"}
 SECRET_TEXTS = ("Оцінка постачання дронів", "Внутрішня оцінка", "Закритий звіт")
 
 
@@ -53,6 +54,11 @@ def client(svc):
     return ConnectPerCall(create_server(svc))
 
 
+async def last_tool_message(db, tool):
+    doc = await db.conversations.find_one({"user_id": UID, "messages.tool": tool}, sort=[("updated_at", -1)])
+    return [m for m in doc["messages"] if m.get("tool") == tool][-1]
+
+
 async def test_lists_typed_tools(client):
     tools = {t.name: t for t in (await client.list_tools()).tools}
     assert set(tools) == TOOLS
@@ -82,9 +88,12 @@ async def test_get_digest(client, test_db):
     assert [i["ref"] for i in items] == list(range(1, len(items) + 1))       # one numbering across both sides
     assert [i["n"] for i in items] == [1, 3, 1]                              # each digest's own numbers
     assert not any(t in json.dumps(d, ensure_ascii=False) for t in SECRET_TEXTS)
-    entry = await test_db.audit_log.find_one({"name": "get_digest", "user_id": UID}, sort=[("at", -1)])
-    assert entry["kind"] == "tool" and entry["trust"] == "cloud" and entry["items_returned"] == 3
-    assert entry["outcome"] == "ok" and entry["args"] == {"side": "both", "date": None, "as_text": False}
+    msg = await last_tool_message(test_db, "get_digest")
+    assert msg["args"] == {"side": "both", "as_text": False}                        # None values dropped
+    assert msg["result"]["ok"] and msg["result"]["count"] == 3 and len(msg["result"]["digest_ids"]) == 2
+    # The withheld confidential item is a security event (a count, no content).
+    event = await test_db.audit_log.find_one({"event": "sensitivity_filtered", "user_id": UID})
+    assert event["details"] == {"tool": "get_digest", "count": 1, "max_allowed": "internal"}
 
 
 async def test_search_posts(client):
@@ -110,8 +119,8 @@ async def test_get_post(client, test_db):
     for bad in (str(P_SECRET), "nope"):
         r = await client.call_tool("get_post", {"post_id": bad})
         assert r.is_error and "Post not found" in r.content[0].text
-    entry = await test_db.audit_log.find_one({"name": "get_post", "outcome": "error"})
-    assert entry and entry["error"] == "Post not found"
+    msg = await last_tool_message(test_db, "get_post")
+    assert msg["result"]["ok"] is False and msg["result"]["error"] == "Post not found"
 
 
 async def test_get_profile(client):

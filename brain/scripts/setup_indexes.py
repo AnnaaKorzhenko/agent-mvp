@@ -1,35 +1,54 @@
-"""Creates the MCP server's indexes: audit_log (TTL) and users.identities (one record per OAuth login).
-Never touches the pipeline's collections.
+"""Creates the MCP server's indexes: audit_log (TTL), users.identities (one record per OAuth login) and the
+conversations indexes for MCP sessions. Never touches the pipeline's collections.
 
-    brain/.venv/bin/python -m brain.scripts.setup_indexes [--db NAME] [--dry-run]
+    brain/.venv/bin/python -m brain.scripts.setup_indexes [--db NAME] [--dry-run] [--replace-conversations-unique]
+
+--replace-conversations-unique drops the bot's old unique {user_id} index on conversations (`user_id_1`), which
+forbids more than one document per user. Run it only after the bot with the new user_store.py is deployed
+(docs/CONVERSATIONS_PLAN.md §1.3): the new unique (user_id, session_key) index keeps one Telegram document per user.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
 
+from brain.audit.conversations import COLLECTION as CONVERSATIONS
+from brain.audit.conversations import UNIQUE_INDEX, ensure_conversation_indexes
 from brain.audit.log import COLLECTION, ensure_audit_indexes
 from brain.config import get_settings
 from brain.db.client import close_client, get_client
 from brain.db.repositories import ensure_user_indexes
 
+OLD_UNIQUE = "user_id_1"
 
-async def main(db_name: str | None, dry_run: bool) -> None:
+
+async def _indexes(db, name: str) -> list[str]:
+    return [i["name"] async for i in await db[name].list_indexes()] if name in await db.list_collection_names() \
+        else []
+
+
+async def main(db_name: str | None, dry_run: bool, replace_unique: bool) -> None:
     settings = get_settings()
     db = get_client(settings)[db_name or settings.mongo_db]
-    existing = [i["name"] async for i in await db[COLLECTION].list_indexes()] \
-        if COLLECTION in await db.list_collection_names() else []
-    print(f"database {db.name}: {COLLECTION} indexes now: {existing or 'none'}")
-    users_idx = [i["name"] async for i in await db.users.list_indexes()]
-    print(f"database {db.name}: users indexes now: {users_idx}")
+    for name in (COLLECTION, "users", CONVERSATIONS):
+        print(f"database {db.name}: {name} indexes now: {await _indexes(db, name) or 'none'}")
+    old = OLD_UNIQUE in await _indexes(db, CONVERSATIONS)
     if dry_run:
         print(f"dry run: would ensure {COLLECTION}.ttl_at (expire after {settings.audit_ttl_days} days), "
-              f"{COLLECTION}.user_at and users.identity_unique")
+              f"{COLLECTION}.user_at, users.identity_unique, {CONVERSATIONS}.{UNIQUE_INDEX}, .user_updated, "
+              f".mcp_session" + (f"; and drop {CONVERSATIONS}.{OLD_UNIQUE}" if old and replace_unique else ""))
     else:
         await ensure_audit_indexes(db, settings.audit_ttl_days)
         await ensure_user_indexes(db)
-        print("ensured:", [i["name"] async for i in await db[COLLECTION].list_indexes()],
-              [i["name"] async for i in await db.users.list_indexes()])
+        await ensure_conversation_indexes(db)
+        if old and replace_unique:
+            await db[CONVERSATIONS].drop_index(OLD_UNIQUE)
+            print(f"dropped {CONVERSATIONS}.{OLD_UNIQUE}")
+        for name in (COLLECTION, "users", CONVERSATIONS):
+            print(f"ensured {name}: {await _indexes(db, name)}")
+    if old and not replace_unique:
+        print(f"NOTE: {CONVERSATIONS}.{OLD_UNIQUE} (unique user_id) still exists: MCP sessions can't be logged "
+              "into this database until it's dropped with --replace-conversations-unique.")
     await close_client()
 
 
@@ -37,5 +56,6 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--db")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--replace-conversations-unique", action="store_true")
     a = ap.parse_args()
-    asyncio.run(main(a.db, a.dry_run))
+    asyncio.run(main(a.db, a.dry_run, a.replace_conversations_unique))

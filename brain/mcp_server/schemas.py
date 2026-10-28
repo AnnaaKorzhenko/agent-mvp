@@ -82,11 +82,40 @@ class TagScore(BaseModel):
     score: float
 
 
+class InsightCount(BaseModel):
+    saved: int = Field(description="Insights the user has saved")
+    visible_here: int = Field(description="Of those, how many this connection may read with get_insights")
+
+
 class ProfileOut(BaseModel):
     categories_today: dict[str, list[str]] = Field(description="Categories the user picked this morning, per side")
     goals: list[str]
     top_categories: list[CategoryScore]
     top_tags: list[TagScore]
+    insights: InsightCount = InsightCount(saved=0, visible_here=0)
+
+
+class InsightSaved(BaseModel):
+    insight_id: str
+    sensitivity: Literal["public", "internal", "confidential", "restricted"] | str
+    visible_here: bool = Field(description="False: saved, but this connection can't read it back (its label is "
+                                           "above what this connection may receive)")
+    confirmation: str = Field(description="Short Ukrainian confirmation to tell the user")
+
+
+class InsightOut(BaseModel):
+    insight_id: str
+    text: str = Field(description="The user's own words, verbatim")
+    area: str | None
+    tags: list[str]
+    sensitivity: str
+    created_at: str | None
+
+
+class InsightsResult(BaseModel):
+    insights: list[InsightOut]
+    hidden: int = Field(0, description="Matching insights this connection may not read")
+    note: str | None = None
 
 
 class GoalsOut(BaseModel):

@@ -28,7 +28,10 @@ def _now() -> datetime:
 
 async def ensure_indexes() -> None:
     await users_collection.create_index([("feedback.post_id", 1)])
-    await conversations.create_index([("user_id", 1)], unique=True)
+    # Telegram documents have no session_key, so this still allows one per user; MCP session documents
+    # (brain/audit/conversations.py) carry distinct keys. Same keys, options and name as brain's setup_indexes.
+    await conversations.create_index([("user_id", 1), ("session_key", 1)], unique=True,
+                                     name="user_session_unique")
     await conversations.create_index([("news_state.status", 1)])
 
 

@@ -129,15 +129,16 @@ async def test_search_with_widget_tells_the_model_not_to_list_posts(digest_serve
     assert r.structured_content["shown_in_widget"] is False and r.content[0].text.startswith("{")
 
 
-async def test_follow_up_is_audited_without_a_made_up_target(digest_server, test_db):
+async def test_follow_up_is_logged_without_a_made_up_target(digest_server, test_db):
     async with Client(digest_server) as c:
         r = await c.call_tool("record_feedback", {"target_type": "digest_item", "digest_id": str(DIGEST_UA),
                                                   "item_n": 1, "reaction": "useful"})
         fid = r.structured_content["feedback_id"]
         f = await c.call_tool("record_feedback", {"feedback_id": fid, "text": "дякую"})
     assert f.structured_content["target_type"] == "digest_item"
-    entry = await test_db.audit_log.find_one({"name": "record_feedback", "args.feedback_id": fid})
-    assert entry["args"]["target_type"] is None
+    doc = await test_db.conversations.find_one({"messages.args.feedback_id": fid})
+    [follow_up] = [m for m in doc["messages"] if m.get("args", {}).get("feedback_id") == fid]
+    assert "target_type" not in follow_up["args"]                         # not a made-up "post"
 
 
 def test_widgets_hide_when_the_result_is_not_for_cards():

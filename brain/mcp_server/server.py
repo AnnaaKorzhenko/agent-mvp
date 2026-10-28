@@ -42,6 +42,9 @@ suggestion. "The third one" is ref 3 of the most recent digest or search result;
 is meant, ask. Never invent ids. One message with several ratings means several calls; a comment that \
 follows a rating goes to its feedback_id.
 - Call set_goal only when the user explicitly asks to set, change or drop a goal.
+- When the user shares durable knowledge or context (their work, judgements, how they want analysis done, people \
+and organizations), or says "запам'ятай", save it with save_insight, verbatim; not for one-off requests or small \
+talk. Use get_insights when their own context would improve an answer.
 """
 
 logger = logging.getLogger("brain.mcp")
@@ -51,7 +54,8 @@ def create_server(svc: Services, verifier: TokenVerifier | None = None) -> MCPSe
     """With OAUTH_ISSUER set, every request needs a valid Auth0 access token (401 + metadata otherwise)."""
     oauth = {}
     if svc.settings.oauth_issuer:
-        oauth = {"token_verifier": verifier or token_verifier(svc.settings), "auth": auth_settings(svc.settings)}
+        oauth = {"token_verifier": verifier or token_verifier(svc.settings, svc.audit.event),
+                 "auth": auth_settings(svc.settings)}
     mcp = MCPServer("brain", title="News brain", instructions=INSTRUCTIONS, version="0.4.0",
                     log_level=svc.settings.log_level.upper(), extensions=[apps_extension()], **oauth)
 

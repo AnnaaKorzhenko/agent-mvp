@@ -55,8 +55,10 @@ Then choose "Streamable HTTP" with the URL `http://127.0.0.1:8000/mcp`.
 | `get_profile()` | Goals, today's categories, top categories and tags. Never feedback. |
 | `record_feedback(target_type, reaction, post_id / digest_id+item_n / about+cited_post_ids, reasons, text, feedback_id)` | Saves 👍 / 👎 / 50/50 on a post, digest item, answer or suggestion (`docs/FEEDBACK_PLAN.md`); only news ratings change scores. `feedback_id` adds a comment later |
 | `set_goal(action, text)` | Adds or removes a goal with the bot's rules (max 5 active, no duplicates; removing keeps history) |
+| `save_insight(text, area, tags, sensitivity)` | Saves knowledge the user shares, verbatim, in `users.insights`; `confidential` by default |
+| `get_insights(query, area)` | Recalls saved insights this client may read (sensitivity filter) |
 
-Every call is written to `audit_log`. Run `python -m brain.scripts.setup_indexes` once per database for the TTL index.
+Every call is logged per user and session in `conversations` (`brain/audit/conversations.py`): sanitized arguments, a result summary with references only, and the user's own words verbatim. `audit_log` keeps security events only. Run `python -m brain.scripts.setup_indexes` once per database (see `docs/CONVERSATIONS_PLAN.md` §1.3 for production).
 
 ## Eval baseline
 

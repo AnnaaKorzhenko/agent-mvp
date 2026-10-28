@@ -16,7 +16,7 @@ from pydantic import BaseModel, ValidationError
 from pymongo.errors import DuplicateKeyError
 from pymongo.asynchronous.database import AsyncDatabase
 
-from brain.db.models import DigestDoc, PostDoc, SourceDoc, UserProfileDoc
+from brain.db.models import DigestDoc, InsightDoc, PostDoc, SourceDoc, UserProfileDoc
 
 logger = logging.getLogger("brain.db")
 
@@ -164,8 +164,9 @@ def _public_id(key: int | ObjectId) -> UserId:
 
 class UsersRepo:
     # Never includes feedback.
+    # Never includes feedback; of insights only their labels (for a count), never the texts.
     PROFILE_PROJECTION = {"first_name": 1, "daily.date": 1, "daily.selected": 1, "interests": 1,
-                          "goals": 1, "identities": 1}
+                          "goals": 1, "identities": 1, "insights.sensitivity": 1}
 
     def __init__(self, db: AsyncDatabase):
         self.col = db["users"]
@@ -244,6 +245,24 @@ class UsersRepo:
             {"_id": user_key(user_id), f"goals.{index}.text": text, f"goals.{index}.active": True},
             {"$set": {f"goals.{index}.active": False, f"goals.{index}.removed_at": at}})
         return result.modified_count == 1
+
+
+    async def push_insight(self, user_id: UserId, insight: dict, cap: int) -> str:
+        """Appends an insight unless the user already has `cap`. Returns "ok", "full" or "no_user"."""
+        key = user_key(user_id)
+        result = await self.col.update_one({"_id": key, f"insights.{cap - 1}": {"$exists": False}},
+                                           {"$push": {"insights": insight}})
+        if result.matched_count:
+            return "ok"
+        return "full" if await self.col.count_documents({"_id": key}, limit=1) else "no_user"
+
+    async def link_insight(self, user_id: UserId, insight_id: ObjectId, conversation_id: ObjectId) -> None:
+        await self.col.update_one({"_id": user_key(user_id), "insights.id": insight_id},
+                                  {"$set": {"insights.$.conversation_id": conversation_id}})
+
+    async def get_insights(self, user_id: UserId) -> list[InsightDoc]:
+        doc = await self.col.find_one({"_id": user_key(user_id)}, {"insights": 1})
+        return [i for i in (parse(InsightDoc, x, "users") for x in (doc or {}).get("insights") or []) if i]
 
 
 async def ensure_user_indexes(db: AsyncDatabase) -> None:
