@@ -1,11 +1,13 @@
 """Runs the learning job: updates users.learned from each user's new messages, ratings and insights.
 
     brain/.venv/bin/python -m brain.scripts.learn_profiles [--db News_dev] [--user ID] [--backend anthropic|local]
-                                                           [--show-payload | --dry-run]
+                                                           [--since 2026-10-29] [--show-payload | --dry-run]
 
 --show-payload  prints what would be sent, without calling the model (free)
 --dry-run       calls the model and prints the new profile, without saving it
 (neither)       calls the model and saves users.learned
+--since DATE    reprocesses activity from that UTC date (default: since the last run), e.g. after a fix of what
+                the job sees; the previous profile is still merged in
 
 The backend comes from MODEL_BACKEND unless --backend is given; `anthropic` needs ANTHROPIC_API_KEY and uses
 ANTHROPIC_MODEL. A cloud backend gets `public` / `internal` data only. Token use is printed per user and in total;
@@ -16,6 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from datetime import datetime, timezone
 
 from brain.audit.log import AuditLog
 from brain.config import get_settings
@@ -29,7 +32,7 @@ def _user_id(raw: str):
 
 
 async def main(db_name: str | None, user: str | None, backend_name: str | None, show_payload: bool,
-               dry_run: bool) -> None:
+               dry_run: bool, since: datetime | None = None) -> None:
     settings = get_settings()
     if backend_name:
         settings = settings.model_copy(update={"model_backend": backend_name})
@@ -40,7 +43,7 @@ async def main(db_name: str | None, user: str | None, backend_name: str | None, 
           f"{len(users)} user(s)")
     total_in = total_out = 0
     for uid in users:
-        act = await profile.collect(db, uid, backend.max_label)
+        act = await profile.collect(db, uid, backend.max_label, since)
         head = (f"\nuser {uid}: {len(act.chat)} messages, {len(act.feedback)} ratings, {len(act.insights)} "
                 f"insights new; {act.withheld} withheld above '{backend.max_label}'; payload {act.size()} chars, "
                 f"label {act.label}")
@@ -77,8 +80,9 @@ if __name__ == "__main__":
     ap.add_argument("--db")
     ap.add_argument("--user")
     ap.add_argument("--backend", choices=["anthropic", "local"])
+    ap.add_argument("--since", type=lambda d: datetime.fromisoformat(d).replace(tzinfo=timezone.utc))
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--show-payload", action="store_true")
     mode.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
-    asyncio.run(main(a.db, a.user, a.backend, a.show_payload, a.dry_run))
+    asyncio.run(main(a.db, a.user, a.backend, a.show_payload, a.dry_run, a.since))

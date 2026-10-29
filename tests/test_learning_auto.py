@@ -209,3 +209,27 @@ async def test_a_goal_written_to_the_database_starts_a_run_through_the_stream(db
         task.cancel()
     learned = (await db.users.find_one({"_id": uid}))["learned"]
     assert learned["goal_keywords"][0]["goal"] == "стежити за НРК" and len(backend.sent) == 1
+
+
+def commented(minutes_ago, text="більше про цей пристрій"):
+    return {"post_id": ObjectId(), "reaction": "useful", "target_type": "digest_item", "channel": "claude",
+            "at": NOW - timedelta(minutes=minutes_ago), "text": text, "text_at": NOW - timedelta(minutes=minutes_ago)}
+
+
+async def test_a_comment_is_due_after_the_short_delay_without_the_threshold(db):
+    waited = await add_user(db, feedback=[commented(3)], learned=mapped(minutes_ago=10))   # cooldown doesn't apply
+    fresh = await add_user(db, feedback=[commented(1)], learned=mapped())
+    silent = await add_user(db, feedback=[commented(3, text="")], learned=mapped())
+    old = await add_user(db, feedback=[commented(200)], learned=mapped(minutes_ago=100))   # already processed
+    d = await due(db)
+    assert d[waited] == "comment" and fresh not in d and silent not in d and old not in d
+
+
+async def test_a_comment_from_the_stream_is_debounced_like_a_goal(db):
+    learner = auto.Learner(db, settings(LEARNING_GOAL_DELAY_MINUTES=0), FakeBackend(AuditLog(db), []))
+    nudged = []
+    learner.nudge = lambda uid, delay_seconds=None: nudged.append(uid)
+    uid = await add_user(db, feedback=[commented(1)], learned=mapped())
+    await learner.on_change({"operationType": "update", "documentKey": {"_id": uid},
+                             "updateDescription": {"updatedFields": {"feedback.0.text": "більше"}}})
+    assert nudged == [uid]

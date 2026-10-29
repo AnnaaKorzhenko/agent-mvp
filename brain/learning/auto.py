@@ -5,6 +5,8 @@ MongoDB pushes every change of users.goals and users.feedback to an open change 
 with an OAuth login):
 - a goal change starts a run LEARNING_GOAL_DELAY_MINUTES after the last one (several goals in a row: one run), if
   an active goal then has no keywords (removing a goal doesn't cost a model call);
+- a comment on a rating (a new rating with text, or text added later) starts a run after the same delay: it is
+  the strongest signal there is («more on this device»), so it doesn't wait for the threshold;
 - a rating counts toward LEARNING_FEEDBACK_THRESHOLD ratings since the last run; at the threshold, and at least
   LEARNING_COOLDOWN_MINUTES after the last run, it starts a run.
 The job's own writes (learned, learning_lock, last_seen) don't trigger anything. Runs go in the background, so the
@@ -42,7 +44,7 @@ STREAM = [{"$match": {"$or": [
 @dataclass
 class Due:
     user_id: object
-    reason: str           # "goal" | "feedback"
+    reason: str           # "goal" | "comment" | "feedback"
 
 
 def _utc(dt: datetime | None) -> datetime | None:
@@ -51,14 +53,15 @@ def _utc(dt: datetime | None) -> datetime | None:
 
 async def due_users(db: AsyncDatabase, settings: Settings, now: datetime | None = None, *,
                     user_id=None, goal_delay: bool = True) -> list[Due]:
-    """Who is due now (all served users, or one). goal_delay=False: a nudge has already waited the delay."""
+    """Who is due now (all served users, or one). goal_delay=False: a nudge has already waited the delay (for
+    goals and comments alike)."""
     now = now or datetime.now(timezone.utc)
     out: list[Due] = []
     query: dict = {"identities.0": {"$exists": True}}
     if user_id is not None:
         query["_id"] = user_id
     cursor = db.users.find(query,
-                           {"goals": 1, "feedback.at": 1, "learned.processed_until": 1, "learned.updated_at": 1,
+                           {"goals": 1, "feedback.at": 1, "feedback.text": 1, "feedback.text_at": 1, "learned.processed_until": 1, "learned.updated_at": 1,
                             "learned.goal_keywords.goal": 1, "learning_lock": 1})
     async for u in cursor:
         lock = _utc(u.get("learning_lock"))
@@ -75,6 +78,12 @@ async def due_users(db: AsyncDatabase, settings: Settings, now: datetime | None 
             out.append(Due(u["_id"], "goal"))
             continue
         since = _utc(learned.get("processed_until"))
+        commented = [t for f in u.get("feedback") or [] if f.get("text")
+                     and (t := profile.feedback_stamp(f)) and (since is None or t > since)]
+        delay = now - timedelta(minutes=settings.learning_goal_delay_minutes)
+        if commented and (not goal_delay or max(commented) <= delay):
+            out.append(Due(u["_id"], "comment"))
+            continue
         new = sum(1 for f in u.get("feedback") or [] if f.get("at") and (since is None or _utc(f["at"]) > since))
         last = _utc(learned.get("updated_at"))
         cooled = last is None or last <= now - timedelta(minutes=settings.learning_cooldown_minutes)
@@ -139,8 +148,9 @@ class Learner:
         return done
 
     def nudge(self, user_id, delay_seconds: float | None = None) -> None:
-        """A goal changed: after the goal delay, run this user if an active goal lacks keywords. Another change
-        within the delay restarts it, so several goals added in a row make one run. Never raises."""
+        """A goal changed or a comment came: after the goal delay, run this user if an active goal lacks keywords
+        or a comment is unprocessed. Another change within the delay restarts it, so several goals or a rating and
+        its comment in a row make one run. Never raises."""
         delay = self.settings.learning_goal_delay_minutes * 60 if delay_seconds is None else delay_seconds
         try:
             if (old := self.pending.get(user_id)) and not old.done():
@@ -150,8 +160,8 @@ class Learner:
                 await asyncio.sleep(delay)
                 self.pending.pop(user_id, None)
                 due = await due_users(self.db, self.settings, user_id=user_id, goal_delay=False)
-                if any(d.reason == "goal" for d in due):
-                    await self.run_user(user_id, "goal added")
+                if reason := next((d.reason for d in due if d.reason in ("goal", "comment")), None):
+                    await self.run_user(user_id, "goal added" if reason == "goal" else "comment")
 
             self.pending[user_id] = asyncio.get_running_loop().create_task(later())
         except Exception as e:                 # noqa: BLE001 - a nudge must never break set_goal
@@ -174,8 +184,10 @@ class Learner:
         if any(f == "goals" or f.startswith("goals.") for f in fields):
             self.nudge(user_id)
         elif any(f == "feedback" or f.startswith("feedback.") for f in fields):
-            due = await due_users(self.db, self.settings, user_id=user_id)
-            if any(d.reason == "feedback" for d in due):
+            due = await due_users(self.db, self.settings, user_id=user_id, goal_delay=False)
+            if any(d.reason == "comment" for d in due):
+                self.nudge(user_id)
+            elif any(d.reason == "feedback" for d in due):
                 self._background(self.run_user(user_id, "feedback"))
 
     async def catch_up(self) -> None:

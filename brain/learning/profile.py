@@ -85,6 +85,10 @@ of news items and answers (with reasons and comments), and things they shared or
 questions count more than one mention). Drop topics with only weak, old evidence.
 - known: things they said they already know (don't repeat these to them).
 - avoid: topics or kinds of news they rated as not useful repeatedly or said they don't want.
+- Each rating's "about" is the text of the rated news item; its "comment" refers to that item («this device», \
+«this topic» mean what "about" names). A comment asking for more on something specific is strong evidence: add \
+an interest named by that specific thing itself (the system, model, company or event from "about", written as \
+«назва: що саме цікавить»), weight 4-5, not a general «wants details».
 - goal_candidates: goals they expressed that are not in their active goals.
 - summary: 2-4 sentences: who they are (work, role, organization if stated) and what they need from the service.
 - goal_keywords: ONLY for each goal in goals_to_map (copy its text exactly into "goal"); the other active goals \
@@ -151,6 +155,23 @@ def _cut(text: Any) -> str:
     return text if len(text) <= MAX_TEXT else text[:MAX_TEXT - 1] + "…"
 
 
+ABOUT_SHORT = 200       # what a rating without a comment was about: enough to name the topic
+NEUTRAL = ("neutral", "skip")
+
+
+def _about(f: dict, text: str | None) -> str | None:
+    """The rated item's text: in full when the user commented or gave reasons (the comment refers to it), shorter
+    for a plain 👍 / 👎, left out for 50/50 (says little, costs tokens)."""
+    if not text:
+        return None
+    if f.get("text") or f.get("reasons") or f.get("target_type") in ("answer", "suggestion"):
+        return _cut(text)
+    if f.get("reaction") in NEUTRAL:
+        return None
+    text = " ".join(str(text).split())
+    return text if len(text) <= ABOUT_SHORT else text[:ABOUT_SHORT - 1] + "…"
+
+
 def _day(dt: datetime | None) -> str | None:
     return dt.date().isoformat() if dt else None
 
@@ -163,13 +184,45 @@ def _newer(dt: datetime | None, since: datetime | None) -> bool:
     return since is None or dt > since
 
 
-async def collect(db: AsyncDatabase, user_id, max_label: str) -> Activity:
-    """Everything new for this user since users.learned.processed_until, at or below `max_label`."""
+def feedback_stamp(f: dict) -> datetime | None:
+    """When a rating last carried news: a comment added later (text_at) makes an old rating new again."""
+    stamps = [s if s.tzinfo else s.replace(tzinfo=timezone.utc)
+              for s in (f.get("at"), f.get("text_at") if f.get("text") else None) if isinstance(s, datetime)]
+    return max(stamps, default=None)
+
+
+async def _rated_texts(db: AsyncDatabase, fb: list[dict]) -> dict[int, str]:
+    """What each rating was about, for ratings that didn't keep a copy (the bot's, and MCP ratings before
+    2026-10-29): the post summary if the post still exists, else the digest item's text (digests stay a year)."""
+    out: dict[int, str] = {}
+    need = [(i, f) for i, f in enumerate(fb) if not f.get("about")]
+    ids = list({f["post_id"] for _, f in need if f.get("post_id")})
+    summaries = {p["_id"]: p.get("summary") async for p in db.posts.find({"_id": {"$in": ids}}, {"summary": 1})}
+    by_item: dict = {}
+    for i, f in need:
+        if summaries.get(f.get("post_id")):
+            out[i] = summaries[f["post_id"]]
+        elif f.get("digest_id") is not None and f.get("item_n") is not None:
+            by_item[(f["digest_id"], f["item_n"])] = i
+    digest_ids = list({d for d, _ in by_item})
+    async for d in db.digests.find({"_id": {"$in": digest_ids}}, {"sections.items": 1}):
+        c = 0
+        for s in d.get("sections") or []:
+            for it in s.get("items") or []:
+                c += 1
+                if (i := by_item.get((d["_id"], it.get("n", c)))) is not None:
+                    out[i] = it.get("text") or ""
+    return out
+
+
+async def collect(db: AsyncDatabase, user_id, max_label: str, since: datetime | None = None) -> Activity:
+    """Everything new for this user since users.learned.processed_until (or `since`, to reprocess from a date),
+    at or below `max_label`."""
     key = user_key(user_id) if not isinstance(user_id, int) else user_id
     user = await db.users.find_one({"_id": key}, {"learned": 1, "goals": 1, "insights": 1,
                                                  "feedback": {"$slice": -1000}}) or {}
     learned = user.get("learned") or {}
-    since = learned.get("processed_until")
+    since = since or learned.get("processed_until")
     if since is not None and since.tzinfo is None:
         since = since.replace(tzinfo=timezone.utc)
     previous = {k: learned[k] for k in LearnedProfile.model_fields if k in learned} or None
@@ -200,8 +253,9 @@ async def collect(db: AsyncDatabase, user_id, max_label: str) -> Activity:
         for m in act.chat:
             m["at"] = _day(m["at"])
 
-        fb = [f for f in user.get("feedback") or [] if _newer(f.get("at"), since)][-MAX_FEEDBACK:]
-        stamps += [f["at"] for f in fb]
+        fb = [f for f in user.get("feedback") or [] if _newer(feedback_stamp(f), since)][-MAX_FEEDBACK:]
+        stamps += [feedback_stamp(f) for f in fb]
+        looked_up = await _rated_texts(db, fb)
         # The rated posts' current tags (from the fixed list), like brain.scripts.rebuild_tag_scores.
         ids = list({f["post_id"] for f in fb if f.get("post_id")})
         current = {p["_id"]: p.get("tags") or [] async for p in db.posts.find({"_id": {"$in": ids}}, {"tags": 1})}
@@ -211,8 +265,8 @@ async def collect(db: AsyncDatabase, user_id, max_label: str) -> Activity:
             "at": _day(f.get("at")), "target": f.get("target_type") or ("digest_item" if f.get("digest_id") else "post"),
             "reaction": f.get("reaction"), "category": f.get("category"),
             "tags": current.get(f.get("post_id"), f.get("tags") or [])[:6],
-            "about": _cut(f.get("about")) if f.get("about") else None, "reasons": f.get("reasons") or None,
-            "comment": _cut(f.get("text")) if f.get("text") else None}.items() if v} for f in fb]
+            "about": _about(f, f.get("about") or looked_up.get(i)), "reasons": f.get("reasons") or None,
+            "comment": _cut(f.get("text")) if f.get("text") else None}.items() if v} for i, f in enumerate(fb)]
     else:
         act.withheld += 1
 
@@ -227,6 +281,9 @@ async def collect(db: AsyncDatabase, user_id, max_label: str) -> Activity:
         act.labels.append(i.get("sensitivity", "internal"))
         stamps.append(i["created_at"])
     act.insights = act.insights[-MAX_INSIGHTS:]
+    done = learned.get("processed_until")          # a reprocess from an earlier date never moves this back
+    if done is not None:
+        stamps.append(done)
     act.until = max((s if s.tzinfo else s.replace(tzinfo=timezone.utc) for s in stamps), default=since)
     return act
 

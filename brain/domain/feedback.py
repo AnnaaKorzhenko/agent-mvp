@@ -8,6 +8,9 @@ can be added to exactly that rating later (feedback_id), without touching scores
 - post: keyed by post_id; digest_id / item_n are null.
 - digest_item: the bot's shape, keyed by (digest_id, item_n); post_id is the item's first source post.
 - answer / suggestion: Claude's own output, described by `about`, with the posts it cited.
+Post and digest-item ratings also keep a copy of what was rated: `about` (the post summary or the item text) and
+`source_urls`, because posts are deleted within days and a comment like «more on this device» means nothing
+without the item (the learning job reads it).
 A new rating of the same post or digest item replaces the earlier MCP rating and reverses its points.
 Only posts and digest items change interest scores. Telegram entries (no `channel`) are never touched.
 """
@@ -33,6 +36,8 @@ FEEDBACK_KEEP = 1000        # same cap as the bot (user_store.FEEDBACK_KEEP)
 MAX_TEXT = 2000
 MAX_TAGS = 10
 MAX_ABOUT = 200
+MAX_RATED_TEXT = 600        # the copy of a rated post summary / digest item text
+MAX_URLS = 5
 MAX_CITED = 20
 
 NO_PROFILE = "No profile for this user yet. Start the Telegram bot once to create it."
@@ -65,6 +70,10 @@ def _reasons(reasons: list[str] | None) -> list[str]:
 
 def _text(text: str | None) -> str:
     return " ".join((text or "").split())[:MAX_TEXT]
+
+
+def _rated_text(text: str | None) -> str:
+    return " ".join((text or "").split())[:MAX_RATED_TEXT]
 
 
 def _confirmation(reaction: str, inc: dict, extra: str = "") -> str:
@@ -102,7 +111,8 @@ async def record_feedback(repos: Repos, ctx: UserContext, *, mcp_channels: list[
         post = await repos.posts.get(oid, ctx.allowed)
         if post is None:
             raise NotFound("Post not found")
-        entry.update(post_id=oid, side=post.source_side, category=post.category, tags=post.tags[:MAX_TAGS])
+        entry.update(post_id=oid, side=post.source_side, category=post.category, tags=post.tags[:MAX_TAGS],
+                     about=_rated_text(post.summary), source_urls=[post.post_url] if post.post_url else [])
         # Older MCP entries have no target_type; digest_id null tells post ratings from digest-item ratings.
         match = {"post_id": oid, "digest_id": None, "channel": {"$in": channels},
                  "target_type": {"$in": [None, "post"]}}
@@ -115,7 +125,8 @@ async def record_feedback(repos: Repos, ctx: UserContext, *, mcp_channels: list[
         posts = await repos.posts.get_many(sources, ctx.allowed)
         tags = list(dict.fromkeys(t for p in item.source_post_ids if p in posts for t in posts[p].tags))
         entry.update(post_id=sources[0] if sources else None, digest_id=to_object_id(digest.id), item_n=item_n,
-                     side=digest.side, category=section.category, tags=tags[:MAX_TAGS])
+                     side=digest.side, category=section.category, tags=tags[:MAX_TAGS],
+                     about=_rated_text(item.text), source_urls=item.source_urls[:MAX_URLS])
         match = {"digest_id": entry["digest_id"], "item_n": item_n, "channel": {"$in": channels}}
     else:
         about = " ".join((about or "").split())[:MAX_ABOUT]

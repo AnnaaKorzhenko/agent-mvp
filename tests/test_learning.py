@@ -193,3 +193,36 @@ async def test_many_goals_are_mapped_a_few_at_a_time_and_kept(test_db, user):
     assert [m["goal"] for m in saved] == goals                     # 10 kept + 2 new; the removed goal dropped
     assert saved[0]["specific"] == ["термін0"] and saved[11]["specific"] == ["новий"]
     assert (await profile.collect(test_db, user, "internal")).empty     # everything mapped: nothing to do
+
+
+def rating(**kw):
+    return {"fid": ObjectId(), "target_type": "digest_item", "reaction": "useful", "text": "", "channel": "claude",
+            "at": datetime.now(timezone.utc), **kw}
+
+
+async def test_a_comment_is_sent_with_what_was_rated(test_db, user):
+    from tests.fixtures.sample_data import DIGEST_UA
+    gone = ObjectId()                                   # the source post was already deleted
+    long = "Спектр-К: " + "дуже довгий опис пристрою " * 30
+    await test_db.users.update_one({"_id": user}, {"$push": {"feedback": {"$each": [
+        rating(post_id=gone, digest_id=DIGEST_UA, item_n=3, text="треба максимум інформації по цьому пристрою"),
+        rating(post_id=gone, about=long),               # a plain 👍: a shorter copy
+        rating(post_id=gone, about="щось", reaction="neutral"),        # 50/50: no copy sent
+    ]}}})
+    fb = (await profile.collect(test_db, user, "internal")).feedback
+    assert fb[0]["about"] == "Brave1 видав гранти на РЕБ." and fb[0]["comment"].startswith("треба")
+    assert len(fb[1]["about"]) == profile.ABOUT_SHORT and "about" not in fb[2]
+
+
+async def test_a_comment_added_later_makes_an_old_rating_new(test_db, user):
+    now = datetime.now(timezone.utc)
+    await test_db.users.update_one({"_id": user}, {"$set": {"learned": {"processed_until": now - timedelta(hours=1)}},
+                                                  "$push": {"feedback": {"$each": [
+        rating(at=now - timedelta(hours=2), text="більше про це", text_at=now - timedelta(minutes=5)),
+        rating(at=now - timedelta(hours=2)),           # old and uncommented: already processed
+    ]}}})
+    act = await profile.collect(test_db, user, "internal")
+    assert [f.get("comment") for f in act.feedback] == ["більше про це"]
+    assert abs(act.until - (now - timedelta(minutes=5))) < timedelta(seconds=1)       # the comment's time
+    again = await profile.collect(test_db, user, "internal", since=now - timedelta(days=1))   # --since: reprocess
+    assert len(again.feedback) == 2
