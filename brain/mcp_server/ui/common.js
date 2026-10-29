@@ -1,6 +1,7 @@
 // Shared by every widget (inlined by brain/mcp_server/widgets.py ahead of the page's own script).
 // A card shows one rated thing with 👍 / 👎 / 50/50; a press calls record_feedback through the host, then
-// offers «Чому?». Every rating made in the widget is sent to the model as context.
+// offers «Чому?». Every rating made in the widget is sent to the model as context. 🔎 puts «Глибше про #N …» into
+// the chat as the user's message: the model then runs deep_dive and searches the web (only it can).
 const { App, applyDocumentTheme, applyHostStyleVariables, applyHostFonts } = globalThis.__mcpExtApps;
 
 const REACTIONS = [["useful", "👍"], ["not_useful", "👎"], ["neutral", "50/50"]];
@@ -77,8 +78,10 @@ function createWidget({ name, where }) {
       type: "button", "aria-pressed": "false", "aria-label": LABEL[reaction], title: LABEL[reaction],
       onclick: () => rate(reaction),
     }, label));
+    const deeper = el("button", { type: "button", class: "deeper", title: "Глибше: знайти більше, зокрема в інтернеті",
+                                  "aria-label": "Глибше", onclick: () => dig() }, "🔎");
 
-    function busy(on) { for (const b of [...buttons, send, skip]) b.disabled = on; }
+    function busy(on) { for (const b of [...buttons, deeper, send, skip]) b.disabled = on; }
     function show(message, kind = "") { status.textContent = message; status.className = "status " + kind; }
 
     async function rate(reaction) {
@@ -118,6 +121,18 @@ function createWidget({ name, where }) {
         show("Не вдалося зберегти коментар: " + (e?.message || e), "error");
       } finally { busy(false); }
     }
+    async function dig() {
+      busy(true);
+      try {
+        const result = await app.sendMessage({ role: "user",
+          content: [{ type: "text", text: `🔎 Глибше про #${ref} «${short(text, 120)}»` }] });
+        if (result?.isError) throw new Error("rejected");
+        show("Запит надіслано в чат", "ok");
+      } catch {
+        show(`Напишіть у чаті: «глибше про #${ref}»`, "error");
+      } finally { busy(false); }
+    }
+
     send.addEventListener("click", () => { const t = box.value.trim(); if (t) followUp(t); else box.focus(); });
     skip.addEventListener("click", () => followUp(""));
 
@@ -125,7 +140,7 @@ function createWidget({ name, where }) {
       el("div", { class: "row" }, el("span", { class: "ref" }, `#${ref}`),
          el("div", { class: "text" }, body,
             el("div", { class: "foot" }, el("div", { class: "links" }, urls.map((u) => link(u))),
-               el("div", { class: "actions" }, status, buttons)))),
+               el("div", { class: "actions" }, status, deeper, buttons)))),
       comment);
   }
 

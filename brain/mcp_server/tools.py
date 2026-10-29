@@ -30,6 +30,7 @@ from brain.domain import insights as insights_domain
 from brain.domain import posts as posts_domain
 from brain.domain import profile as profile_domain
 from brain.domain import sensitivity
+from brain.domain import topics as topics_domain
 from brain.domain.errors import DomainError
 from brain.domain.identity import IdentityError, UserContext, VerifiedToken, resolve_user
 from brain.mcp_server import schemas as out
@@ -143,6 +144,27 @@ def _post_out(v: posts_domain.PostView) -> out.PostOut:
                        channel=out.Channel(username=v.channel.username, country=v.channel.source_country)
                        if v.channel else None,
                        post_url=p.post_url, published_at=p.published_at, importance=p.importance, why=v.why)
+
+
+def _topic_out(t, findings: bool = False) -> out.TopicOut:
+    return out.TopicOut(
+        name=t.name, status=topics_domain.status_of(t),
+        expires_at=topics_domain.utc(t.expires_at).isoformat() if t.expires_at else None,
+        goal=t.goal, specific=t.specific, broader=t.broader, exclude=t.exclude, tags=t.tags,
+        findings_count=t.findings_count if t.findings_count is not None else len(t.findings),
+        findings=[out.FindingOut(title=f.title, url=f.url, source=f.source, date=f.date, summary=f.summary,
+                                 status=f.status) for f in t.findings] if findings else [])
+
+
+DEEP_DIVE_STEPS = (
+    "1) Tell the user what the news base has (subject, source posts, related posts, earlier findings), briefly. "
+    "2) Search the web now: several searches, in Ukrainian, Russian and English, by the names, aliases and "
+    "technical terms; prefer primary sources (developers, officials, OSINT analysts, defense media); skip what "
+    "earlier findings already cover. 3) Answer with a dossier: what it is, specifications, who makes or uses it, "
+    "timeline, how it matters for the user's goals, confirmed versus claimed (Russian sources are claims), what "
+    "is still unknown; cite a link for every fact. 4) Call save_findings with what you found (one entry per "
+    "source, exact URLs). 5) If the topic isn't active yet, ask once whether to follow it in future digests, and "
+    "on yes call track_topic.")
 
 
 class _Call:
@@ -421,6 +443,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
                 top_categories=[out.CategoryScore(side=s, category=c, score=v) for s, c, v in p.top_categories],
                 top_tags=[out.TagScore(tag=t, score=v) for t, v in p.top_tags],
                 insights=out.InsightCount(saved=p.insights_saved, visible_here=p.insights_visible),
+                topics=[_topic_out(t) for t in await topics_domain.list_topics(svc.repos, ctx)],
                 about_user=await insights_domain.about_user(svc.repos, ctx))
         return await call.run(body)
 
@@ -569,7 +592,9 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
             await call.done(items=1)
             return out.FeedbackOut(feedback_id=r.feedback_id, target_type=r.target_type, reaction=r.reaction,
                                    replaced_previous=r.replaced_previous, score_changes=r.score_changes,
-                                   confirmation=r.confirmation)
+                                   confirmation=r.confirmation,
+                                   offer_deep_dive=r.target_type in ("post", "digest_item")
+                                   and topics_domain.wants_more(text, reasons))
         return await call.run(body)
 
     @mcp.tool(title="Add or remove a goal",
@@ -601,4 +626,128 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
                 result = out.GoalsOut(goals=r.goals, removed=r.changed)
             await call.done(items=1)
             return result
+        return await call.run(body)
+
+    @mcp.tool(title="Dig deeper into a news item", annotations=READ_ONLY)
+    async def deep_dive(
+        mcp_ctx: Context,
+        user_message: UserMessage,
+        digest_id: Annotated[str | None, Field(description="A digest item: its digest_id")] = None,
+        item_n: Annotated[int | None, Field(description="A digest item: its n (not ref)")] = None,
+        post_id: Annotated[str | None, Field(description="Or a post: its post_id")] = None,
+        subject: Annotated[str | None, Field(max_length=600, description=(
+            "Or, with no item, what to dig into in words, e.g. «Спектр-К»"))] = None,
+        query: Annotated[str | None, Field(max_length=120, description=(
+            "The thing's name to search the news base for (e.g. «Спектр-К»); default: names quoted in the item"))]
+        = None,
+        name: Annotated[str | None, Field(max_length=80, description=(
+            "The topic's short name if the user already follows it"))] = None,
+        signals: Signals = None,
+    ) -> out.DeepDiveResult:
+        """Start a deep dive when the user wants more on a news item or thing ("більше про це", "надо больше
+        информации", "🔎 Глибше про #N", a comment asking for details): returns what the news base already has
+        (the item, its source posts, related posts, the user's earlier findings on it) and the next steps. The
+        news base rarely has much more on one incident: after this call, search the web yourself, then save what
+        you found with save_findings. Map "#N" to the latest digest or search result's ref and pass its ids."""
+        args = {"digest_id": digest_id, "item_n": item_n, "post_id": post_id, "subject": subject, "query": query,
+                "name": name}
+        call = _Call(svc, "deep_dive", {**args, **_common(user_message, signals)}, mcp_ctx)
+
+        async def body(ctx: UserContext) -> out.DeepDiveResult:
+            seed = await topics_domain.deep_dive(svc.repos, ctx, digest_id=digest_id, item_n=item_n,
+                                                 post_id=post_id, text=subject, query=query, name=name)
+            views = seed.source_posts + seed.related_posts
+            await call.done(items=len(views), labels=[v.post.sensitivity for v in views],
+                            post_ids=[v.post.id for v in views])
+            sub = seed.subject
+            return out.DeepDiveResult(
+                subject=out.DeepDiveSubject(text=sub.text, source_urls=sub.source_urls,
+                                            is_russian_source_claim=sub.is_russian_source_claim,
+                                            digest_id=sub.digest_id, item_n=sub.item_n, post_id=sub.post_id),
+                source_posts=[_post_out(v) for v in seed.source_posts],
+                related_posts=[_post_out(v).model_copy(update={"ref": i}) for i, v in enumerate(seed.related_posts, 1)],
+                searched_for=seed.searched_for, goals=seed.goals,
+                topic=_topic_out(seed.topic, findings=True) if seed.topic else None, next_steps=DEEP_DIVE_STEPS)
+        return await call.run(body)
+
+    @mcp.tool(title="Save what a deep dive found",
+              annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True,
+                                          openWorldHint=False))
+    async def save_findings(
+        mcp_ctx: Context,
+        user_message: UserMessage,
+        topic: Annotated[str, Field(min_length=2, max_length=80, description=(
+            "The topic's short name, the thing itself, e.g. «Спектр-К»; the same name as before for the same thing"))],
+        findings: Annotated[list[out.FindingIn], Field(min_length=1, max_length=15, description=(
+            "What you found on the web: one entry per source, with its exact URL"))],
+        digest_id: Annotated[str | None, Field(description="The item the dive started from: digest_id")] = None,
+        item_n: Annotated[int | None, Field(description="… and its n")] = None,
+        post_id: Annotated[str | None, Field(description="Or the post it started from")] = None,
+        signals: Signals = None,
+    ) -> out.TopicSaved:
+        """Save what you found on the web during a deep dive, on the user's topic (created if new; not followed
+        until the user agrees, see track_topic). Saved findings come back in the next deep_dive and feed the
+        weekly and monthly analysis. Only real search results with their exact URLs; never invent sources."""
+        call = _Call(svc, "save_findings", {"topic": topic, "findings": [f.model_dump() for f in findings],
+                                            "digest_id": digest_id, "item_n": item_n, "post_id": post_id,
+                                            **_common(user_message, signals)}, mcp_ctx)
+
+        async def body(ctx: UserContext) -> out.TopicSaved:
+            r = await topics_domain.save_findings(svc.repos, ctx, topic, [f.model_dump() for f in findings],
+                                                  digest_id=digest_id, item_n=item_n, post_id=post_id)
+            await call.done(items=r.added_findings)
+            note = f" (вже були: {r.duplicate_findings})" if r.duplicate_findings else ""
+            return out.TopicSaved(topic=_topic_out(r.topic), created=r.created, added_findings=r.added_findings,
+                                  duplicate_findings=r.duplicate_findings,
+                                  confirmation=f"Зберіг знахідки по «{r.topic.name}»: {r.added_findings}{note}")
+        return await call.run(body)
+
+    @mcp.tool(title="Follow a topic in future news",
+              annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True,
+                                          openWorldHint=False))
+    async def track_topic(
+        mcp_ctx: Context,
+        user_message: UserMessage,
+        name: Annotated[str, Field(min_length=2, max_length=80, description="The topic's short name, e.g. «Спектр-К»")],
+        action: Annotated[Literal["follow", "stop"], Field(description=(
+            "follow: start or renew following it; stop: stop following it"))] = "follow",
+        specific: Annotated[list[str] | None, Field(max_length=20, description=(
+            "follow: names and aliases as Ukrainian, Russian and English news write them (e.g. «Спектр-К», "
+            "«Spektr-K»); each must point at this thing by itself"))] = None,
+        broader: Annotated[list[str] | None, Field(max_length=20, description=(
+            "follow: short phrases for the thing's area, Ukrainian and Russian forms (e.g. «захист відеоканалу "
+            "від РЕБ», «видеоприемник FPV»)"))] = None,
+        exclude: Annotated[list[str] | None, Field(max_length=20, description=(
+            "follow: words that mark a look-alike that is NOT this topic (other products with a similar name)"))]
+        = None,
+        tags: Annotated[list[str] | None, Field(max_length=4, description=(
+            "follow: 1-4 tags from the fixed tag list that its news would carry"))] = None,
+        goal: Annotated[str | None, Field(max_length=300, description="follow: the user's goal it serves, as "
+                                                                       "get_profile returns it")] = None,
+        days: Annotated[int, Field(ge=1, le=180, description="follow: for how many days (default 30)")] = 30,
+        digest_id: Annotated[str | None, Field(description="The item it started from: digest_id")] = None,
+        item_n: Annotated[int | None, Field(description="… and its n")] = None,
+        post_id: Annotated[str | None, Field(description="Or the post it started from")] = None,
+        signals: Signals = None,
+    ) -> out.TopicSaved:
+        """Follow a specific thing in the user's future digests and searches (or stop following it). Call it only
+        when the user agrees or asks ("так, відстежуй", "стеж за цим"), never on your own judgement. After a deep
+        dive you know the aliases: pass them in specific, the area in broader, look-alikes in exclude."""
+        args = {"name": name, "action": action, "specific": specific, "broader": broader, "exclude": exclude,
+                "tags": tags, "goal": goal, "days": days, "digest_id": digest_id, "item_n": item_n,
+                "post_id": post_id}
+        call = _Call(svc, "track_topic", {**args, **_common(user_message, signals)}, mcp_ctx)
+
+        async def body(ctx: UserContext) -> out.TopicSaved:
+            if action == "stop":
+                r = await topics_domain.stop_topic(svc.repos, ctx, name)
+                confirmation = f"Більше не відстежую «{r.topic.name}» (знахідки збережено)"
+            else:
+                r = await topics_domain.track_topic(svc.repos, ctx, name, specific=specific, broader=broader,
+                                                    exclude=exclude, tags=tags, goal=goal, days=days,
+                                                    digest_id=digest_id, item_n=item_n, post_id=post_id)
+                confirmation = f"Відстежую «{r.topic.name}» до {topics_domain.until_text(r.topic)}"
+            await call.done(items=1)
+            return out.TopicSaved(topic=_topic_out(r.topic), created=r.created, unknown_tags=r.unknown_tags,
+                                  confirmation=confirmation)
         return await call.run(body)

@@ -114,6 +114,47 @@ class InsightLabelDoc(_Doc):
     sensitivity: str = "confidential"
 
 
+class FindingDoc(_Doc):
+    """users.topics[].findings[]: one thing found on the web during a deep dive."""
+    title: str
+    url: str
+    source: str | None = None
+    date: str | None = None
+    summary: str = ""
+    status: str = "unclear"          # confirmed | claim | unclear
+    at: datetime | None = None
+
+
+class TopicOriginDoc(_Doc):
+    digest_id: Id | None = None
+    item_n: int | None = None
+    post_id: Id | None = None
+    text: str = ""
+
+
+class TopicDoc(_Doc):
+    """users.topics[]: one specific thing the user follows now (brain/domain/topics.py)."""
+    id: Id
+    name: str
+    norm: str
+    status: str = "explored"         # explored | active | stopped (active past expires_at reads as expired)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    expires_at: datetime | None = None
+    channel: str | None = None
+    origin: TopicOriginDoc | None = None        # the item that started it
+    goal: str | None = None
+    specific: Annotated[list[str], BeforeValidator(_as_list)] = []
+    broader: Annotated[list[str], BeforeValidator(_as_list)] = []
+    exclude: Annotated[list[str], BeforeValidator(_as_list)] = []
+    tags: Annotated[list[str], BeforeValidator(_as_list)] = []
+    findings: Annotated[list[FindingDoc], BeforeValidator(_as_list)] = []
+    findings_count: int | None = None   # set by light reads, which leave the findings out
+    hits: Annotated[list[dict], BeforeValidator(_as_list)] = []
+    last_hit_at: datetime | None = None
+    sensitivity: str = "internal"
+
+
 class UserProfileDoc(_Doc):
     """users read WITHOUT feedback (see UsersRepo.PROFILE_PROJECTION).
 

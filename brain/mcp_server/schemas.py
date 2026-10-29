@@ -125,6 +125,8 @@ class ProfileOut(MemoryOut):
     top_categories: list[CategoryScore]
     top_tags: list[TagScore]
     insights: InsightCount = InsightCount(saved=0, visible_here=0)
+    topics: list["TopicOut"] = Field(default_factory=list, description="Specific things the user follows or dug "
+                                                                      "into (track_topic / save_findings)")
     about_user: AboutUser = Field(default_factory=dict, description=ABOUT_USER_HELP)
 
 
@@ -182,4 +184,72 @@ class FeedbackOut(MemoryOut):
     reaction: Literal["useful", "not_useful", "neutral"] | str
     replaced_previous: str | None = Field(None, description="The earlier reaction from an AI client, if replaced")
     score_changes: dict[str, float]
+    confirmation: str = Field(description="Short Ukrainian confirmation to tell the user")
+    offer_deep_dive: bool = Field(False, description=(
+        "True: the user asked for more on the rated item. Offer (or, if they plainly asked, start) a deep dive: "
+        "deep_dive, then a web search"))
+
+
+class FindingIn(BaseModel):
+    """One thing found on the web (input to save_findings)."""
+    title: str = Field(min_length=2, max_length=200, description="The page's or article's title")
+    url: str = Field(min_length=8, max_length=500, description="The exact URL it came from; never invent one")
+    source: str | None = Field(None, max_length=80, description="Who published it, e.g. 'Defense Express', "
+                                                                 "'ISW', a Telegram channel")
+    date: str | None = Field(None, max_length=20, description="Publication date YYYY-MM-DD, if known")
+    summary: str = Field(min_length=2, max_length=400, description="One or two sentences: what it adds")
+    status: Literal["confirmed", "claim", "unclear"] = Field("unclear", description=(
+        "confirmed: independent / official confirmation; claim: one side's claim (Russian sources are claims); "
+        "unclear: can't tell"))
+
+
+class FindingOut(BaseModel):
+    title: str
+    url: str
+    source: str | None
+    date: str | None
+    summary: str
+    status: str
+
+
+class TopicOut(BaseModel):
+    name: str
+    status: Literal["explored", "active", "expired", "stopped"] | str = Field(description=(
+        "explored: dug into, not followed; active: followed in digests and search; expired / stopped: no longer"))
+    expires_at: str | None = None
+    goal: str | None = None
+    specific: list[str] = Field(default_factory=list, description="Names and aliases matched first")
+    broader: list[str] = Field(default_factory=list)
+    exclude: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    findings_count: int = 0
+    findings: list[FindingOut] = Field(default_factory=list, description="Saved earlier: build on them, don't "
+                                                                         "search for them again")
+
+
+class DeepDiveSubject(BaseModel):
+    text: str
+    source_urls: list[str]
+    is_russian_source_claim: bool
+    digest_id: str | None = None
+    item_n: int | None = None
+    post_id: str | None = None
+
+
+class DeepDiveResult(MemoryOut):
+    subject: DeepDiveSubject
+    source_posts: list[PostOut] = Field(description="The subject's own source posts still in the news base")
+    related_posts: list[PostOut] = Field(description="Other posts in the news base on the same thing (30 days)")
+    searched_for: list[str] = Field(description="Names the news base was searched for")
+    topic: TopicOut | None = Field(None, description="The user's existing topic on this, with earlier findings")
+    goals: list[str] = Field(description="The user's active goals: say which ones this serves")
+    next_steps: str
+
+
+class TopicSaved(MemoryOut):
+    topic: TopicOut
+    created: bool
+    added_findings: int = 0
+    duplicate_findings: int = Field(0, description="Findings skipped: their URL was already saved")
+    unknown_tags: list[str] = Field(default_factory=list, description="Dropped: not in the fixed tag list")
     confirmation: str = Field(description="Short Ukrainian confirmation to tell the user")

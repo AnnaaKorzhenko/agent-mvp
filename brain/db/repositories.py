@@ -16,7 +16,7 @@ from pydantic import BaseModel, ValidationError
 from pymongo.errors import DuplicateKeyError
 from pymongo.asynchronous.database import AsyncDatabase
 
-from brain.db.models import DigestDoc, InsightDoc, PostDoc, SourceDoc, UserProfileDoc
+from brain.db.models import DigestDoc, InsightDoc, PostDoc, SourceDoc, TopicDoc, UserProfileDoc
 
 logger = logging.getLogger("brain.db")
 
@@ -283,6 +283,43 @@ class UsersRepo:
             {"$set": {"morning_digest": {"key": key, "date": day, "channel": channel,
                                          "at": datetime.now(timezone.utc)}}})
         return result.modified_count == 1
+
+    async def get_topics(self, user_id: UserId, findings: bool = False) -> list[TopicDoc]:
+        """users.topics; without their findings and hits unless asked (those are the bulky part)."""
+        pipeline: list[dict] = [{"$match": {"_id": user_key(user_id)}}, {"$project": {"topics": 1}}]
+        if not findings:                    # the counts stay, the lists go
+            pipeline += [{"$set": {"topics": {"$map": {"input": {"$ifNull": ["$topics", []]}, "in": {"$mergeObjects": [
+                "$$this", {"findings_count": {"$size": {"$ifNull": ["$$this.findings", []]}}}]}}}}},
+                {"$project": {"topics.findings": 0, "topics.hits": 0}}]
+        docs = await (await self.col.aggregate(pipeline)).to_list(1)
+        return [t for t in (parse(TopicDoc, x, "users") for x in (docs[0] if docs else {}).get("topics") or []) if t]
+
+    async def push_topic(self, user_id: UserId, topic: dict, cap: int) -> str:
+        """Appends a topic unless one with the same `norm` exists or the user has `cap`.
+        Returns "ok", "duplicate", "full" or "no_user"."""
+        key = user_key(user_id)
+        result = await self.col.update_one(
+            {"_id": key, f"topics.{cap - 1}": {"$exists": False}, "topics.norm": {"$ne": topic["norm"]}},
+            {"$push": {"topics": topic}})
+        if result.matched_count:
+            return "ok"
+        if await self.col.count_documents({"_id": key, "topics.norm": topic["norm"]}, limit=1):
+            return "duplicate"
+        return "full" if await self.col.count_documents({"_id": key}, limit=1) else "no_user"
+
+    async def update_topic(self, user_id: UserId, norm: str, fields: dict,
+                           findings: list[dict] | None = None, keep: int = 30) -> bool:
+        """Sets `fields` on the topic `norm` and appends `findings` (keeping the newest `keep`)."""
+        update: dict = {}
+        if fields:
+            update["$set"] = {f"topics.$[t].{k}": v for k, v in fields.items()}
+        if findings:
+            update["$push"] = {"topics.$[t].findings": {"$each": findings, "$slice": -keep}}
+        if not update:
+            return True
+        result = await self.col.update_one({"_id": user_key(user_id), "topics.norm": norm}, update,
+                                           array_filters=[{"t.norm": norm}])
+        return result.matched_count == 1
 
     async def get_learned(self, user_id: UserId) -> dict | None:
         """users.learned: the profile the learning job wrote (brain/learning/profile.py), if any."""
