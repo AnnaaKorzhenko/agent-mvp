@@ -34,6 +34,11 @@ function payload(result) {
   try { return JSON.parse(result?.content?.[0]?.text ?? ""); } catch { return null; }
 }
 
+// "Для вас: …": why an item matters to this user (its `why` from the server), or nothing.
+function whyLine(why) {
+  return why?.length ? el("div", { class: "why" }, "Для вас: " + why.join(" · ")) : null;
+}
+
 function errorText(result, fallback) {
   return result?.content?.find?.((c) => c.type === "text")?.text || fallback;
 }

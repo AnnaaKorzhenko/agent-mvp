@@ -143,11 +143,9 @@ async def test_add_goal_rules(repos, user):
     with pytest.raises(InvalidInput, match="already exists"):
         await goals.add_goal(repos, cloud(user), "знайти напрямки для інвестицій у DEFENSE tech")
     await goals.add_goal(repos, cloud(user), "Стара ціль")                       # an inactive goal may return
-    for i in range(3):
+    for i in range(20):                                                          # no limit on goals
         await goals.add_goal(repos, cloud(user), f"ціль {i}")
-    with pytest.raises(InvalidInput, match="Ask which one to remove"):
-        await goals.add_goal(repos, cloud(user), "шоста")
-    assert len((await profile.get_profile(repos, cloud(user))).goals) == goals.MAX_GOALS
+    assert len((await profile.get_profile(repos, cloud(user))).goals) == 22
     with pytest.raises(NotFound):
         await goals.add_goal(repos, cloud(424242), "ціль")
 

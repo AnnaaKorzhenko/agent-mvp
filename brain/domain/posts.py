@@ -7,7 +7,7 @@ TODO(next): semantic search through brain.integrations.embeddings + a VectorInde
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from brain.db.models import PostDoc, SourceDoc
@@ -18,6 +18,7 @@ from brain.domain.identity import UserContext
 
 MAX_DAYS, MAX_LIMIT, MAX_WORDS, CANDIDATES = 30, 25, 8, 200
 W_MATCH, W_RECENCY, W_IMPORTANCE = 0.6, 0.25, 0.15
+W_PERSONAL = 0.2          # × personal relevance (relevance.py), clipped to [-1, 2] and halved
 
 _STOP = set("""
 що як де коли чому хто який яка яке які яких якому яким мені мене мій моя мої моїх про для від цей ця це ці
@@ -42,6 +43,7 @@ class PostView:
     post: PostDoc
     channel: SourceDoc | None
     score: float = 0.0
+    why: list[str] = field(default_factory=list)       # why it matters to this user
 
     @property
     def is_russian_source_claim(self) -> bool:
@@ -125,9 +127,18 @@ async def search(repos: Repos, ctx: UserContext, query: str, side: str = "all", 
     if counts:
         need = min_hits(max(counts.values()))
         candidates = [p for p in candidates if counts[id(p)] >= need]
-    ranked = sorted(candidates, key=lambda p: rank(p, stems, now, days), reverse=True)[:limit]
+    from brain.domain import relevance                       # (relevance imports this module)
+    prefs = await relevance.load(repos, ctx)
+    personal = {id(p): prefs.score(side=p.source_side, category=p.category, text=p.summary, tags=p.tags)
+                for p in candidates}
+
+    def score(p: PostDoc) -> float:
+        rel = max(-1.0, min(2.0, personal[id(p)].score)) / 2
+        return round(rank(p, stems, now, days) + W_PERSONAL * rel, 4)
+
+    ranked = sorted(candidates, key=score, reverse=True)[:limit]
     channels = await repos.sources.get_many([p.channel_id for p in ranked if p.channel_id])
-    return [PostView(p, channels.get(p.channel_id or ""), rank(p, stems, now, days)) for p in ranked], stems
+    return [PostView(p, channels.get(p.channel_id or ""), score(p), personal[id(p)].why) for p in ranked], stems
 
 
 async def get_post(repos: Repos, ctx: UserContext, post_id: str) -> PostView:
@@ -136,4 +147,7 @@ async def get_post(repos: Repos, ctx: UserContext, post_id: str) -> PostView:
     if post is None or not sensitivity.is_allowed(post.sensitivity, ctx.max_sensitivity):
         raise NotFound("Post not found")
     channels = await repos.sources.get_many([post.channel_id] if post.channel_id else [])
-    return PostView(post, channels.get(post.channel_id or ""))
+    from brain.domain import relevance
+    why = (await relevance.load(repos, ctx)).score(side=post.source_side, category=post.category,
+                                                    text=post.summary, tags=post.tags).why
+    return PostView(post, channels.get(post.channel_id or ""), why=why)

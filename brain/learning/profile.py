@@ -12,15 +12,17 @@ from __future__ import annotations
 import json
 import logging
 import re
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from pymongo.asynchronous.database import AsyncDatabase
 
 from brain.db.repositories import user_key
 from brain.domain import sensitivity
+from brain.domain.tag_list import TAG_LIST
 from brain.integrations.backends import ModelBackend, ModelResult
 
 logger = logging.getLogger("brain.learning")
@@ -29,12 +31,33 @@ MAX_CHAT = 300          # newest chat messages per run
 MAX_FEEDBACK = 200
 MAX_INSIGHTS = 300
 MAX_TEXT = 600          # characters per item sent to the model
+MAX_OUTPUT = 8000       # output tokens: goal keywords for several goals are long
+MAP_PER_RUN = 10        # goals mapped to keywords per run; more are mapped by the next runs
+FAILURES = Path(__file__).resolve().parents[1] / "eval" / "results" / "learn_failures"   # git-ignored
 CHAT_LABEL = "internal"         # what the chat, feedback and the learned profile are treated as
 
 
 class Interest(BaseModel):
     topic: str = Field(max_length=80)
     weight: int = Field(ge=1, le=5)
+
+
+class GoalMatch(BaseModel):
+    """How one active goal shows up in the news, at three levels (brain/domain/relevance.py weighs them)."""
+    goal: str = Field(max_length=400, description="The goal's text, copied exactly")
+    specific: list[str] = Field(default_factory=list, max_length=20)
+    broader: list[str] = Field(default_factory=list, max_length=20)
+    tags: list[str] = Field(default_factory=list, max_length=6)
+
+    @field_validator("tags")
+    @classmethod
+    def _only_listed(cls, tags: list[str]) -> list[str]:
+        return [t for t in tags if t in TAG_LIST]               # theme tags must exist in the pipeline's list
+
+    @field_validator("specific", "broader")
+    @classmethod
+    def _short(cls, terms: list[str]) -> list[str]:
+        return [" ".join(t.split())[:60] for t in terms if t and t.strip()]
 
 
 class LearnedProfile(BaseModel):
@@ -45,6 +68,7 @@ class LearnedProfile(BaseModel):
     known: list[str] = Field(default_factory=list, max_length=12)
     avoid: list[str] = Field(default_factory=list, max_length=10)
     goal_candidates: list[str] = Field(default_factory=list, max_length=5)
+    goal_keywords: list[GoalMatch] = Field(default_factory=list, max_length=MAP_PER_RUN)
 
 
 SYSTEM = """You maintain a short profile of one user of a news service about the war in Ukraine and the defense \
@@ -63,10 +87,25 @@ questions count more than one mention). Drop topics with only weak, old evidence
 - avoid: topics or kinds of news they rated as not useful repeatedly or said they don't want.
 - goal_candidates: goals they expressed that are not in their active goals.
 - summary: 2-4 sentences: who they are (work, role, organization if stated) and what they need from the service.
+- goal_keywords: ONLY for each goal in goals_to_map (copy its text exactly into "goal"); the other active goals \
+are mapped already. How news relevant to the goal would be worded. \
+The news is written in Ukrainian and Russian, whatever the goal's language. Three levels:
+  - specific: names of systems, models, weapons, companies, programs, places, written as Ukrainian and Russian \
+news writes them (e.g. «Герань», «Геран», «Шахед», «Brave1»); 5-15 terms;
+  - broader: short phrases and concepts covering the goal's whole area, so news that names nothing specific \
+still matches (e.g. «ударні дрони», «ударные беспилотники», «протидія дронам», «нова модифікація»); 5-15 terms, \
+Ukrainian and Russian forms;
+  - tags: 1-4 tags from tag_list (in the data) that this goal's news would carry; only tags from that list.
+  Terms are matched on word starts in post summaries: prefer 1-3 word terms; avoid generic words alone \
+(«новини», «технології», «Україна»). A specific term must point at the goal by itself: no country, region or \
+city names alone, no broad field names («ППО», «дрони»): put those into a broader phrase instead \
+(«дрони над аеропортом», «ППО збила нову модифікацію»).
 - Only state what the evidence supports; no guesses. Write the texts in Ukrainian, short.
-Answer with one JSON object only, no other text, with exactly these keys:
+Answer with one JSON object only, no other text. Inside strings never use the " character: write quotes as «…». \
+Exactly these keys:
 {"summary": str, "preferences": [str], "interests": [{"topic": str, "weight": 1-5}], "known": [str], \
-"avoid": [str], "goal_candidates": [str]}"""
+"avoid": [str], "goal_candidates": [str], \
+"goal_keywords": [{"goal": str, "specific": [str], "broader": [str], "tags": [str]}]}"""
 
 
 @dataclass
@@ -80,6 +119,7 @@ class Activity:
     until: datetime | None = None          # the newest timestamp included: the next run starts after it
     withheld: int = 0                      # items above the backend's label, not sent
     labels: list[str] = field(default_factory=list)    # labels of everything sent
+    goals_without_keywords: list[str] = field(default_factory=list)   # active goals the profile doesn't map yet
 
     @property
     def label(self) -> str:
@@ -88,14 +128,22 @@ class Activity:
 
     @property
     def empty(self) -> bool:
-        return not (self.chat or self.feedback or self.insights)
+        return not (self.chat or self.feedback or self.insights or self.goals_without_keywords)
 
     def payload(self) -> dict:
-        return {"previous_profile": self.previous or {}, "active_goals": self.goals,
+        # The previous profile without its goal mappings (long; kept and merged by save()), and only the goals
+        # that still need one: each run stays small however many goals the user has.
+        previous = {k: v for k, v in (self.previous or {}).items() if k != "goal_keywords"}
+        return {"previous_profile": previous, "active_goals": self.goals,
+                "goals_to_map": self.goals_without_keywords[:MAP_PER_RUN], "tag_list": list(TAG_LIST),
                 "chat_messages": self.chat, "ratings": self.feedback, "insights": self.insights}
 
     def size(self) -> int:
         return len(json.dumps(self.payload(), ensure_ascii=False))
+
+
+def _norm(text: str) -> str:
+    return " ".join(str(text).lower().split())
 
 
 def _cut(text: Any) -> str:
@@ -131,6 +179,10 @@ async def collect(db: AsyncDatabase, user_id, max_label: str) -> Activity:
                    goals=[g["text"] for g in user.get("goals") or [] if g.get("active")])
     if previous:
         act.labels.append(learned.get("sensitivity", CHAT_LABEL))
+    mapped = {_norm(g.get("goal", "")) for g in (previous or {}).get("goal_keywords") or []}
+    act.goals_without_keywords = [g for g in act.goals if _norm(g) not in mapped]
+    if act.goals_without_keywords and not act.labels:
+        act.labels.append(CHAT_LABEL)
     stamps: list[datetime] = []
 
     chat_allowed = sensitivity.is_allowed(CHAT_LABEL, max_label)
@@ -150,11 +202,15 @@ async def collect(db: AsyncDatabase, user_id, max_label: str) -> Activity:
 
         fb = [f for f in user.get("feedback") or [] if _newer(f.get("at"), since)][-MAX_FEEDBACK:]
         stamps += [f["at"] for f in fb]
+        # The rated posts' current tags (from the fixed list), like brain.scripts.rebuild_tag_scores.
+        ids = list({f["post_id"] for f in fb if f.get("post_id")})
+        current = {p["_id"]: p.get("tags") or [] async for p in db.posts.find({"_id": {"$in": ids}}, {"tags": 1})}
         if act.chat or fb:
             act.labels.append(CHAT_LABEL)
         act.feedback = [{k: v for k, v in {
             "at": _day(f.get("at")), "target": f.get("target_type") or ("digest_item" if f.get("digest_id") else "post"),
-            "reaction": f.get("reaction"), "category": f.get("category"), "tags": (f.get("tags") or [])[:6],
+            "reaction": f.get("reaction"), "category": f.get("category"),
+            "tags": current.get(f.get("post_id"), f.get("tags") or [])[:6],
             "about": _cut(f.get("about")) if f.get("about") else None, "reasons": f.get("reasons") or None,
             "comment": _cut(f.get("text")) if f.get("text") else None}.items() if v} for f in fb]
     else:
@@ -173,6 +229,13 @@ async def collect(db: AsyncDatabase, user_id, max_label: str) -> Activity:
     act.insights = act.insights[-MAX_INSIGHTS:]
     act.until = max((s if s.tzinfo else s.replace(tzinfo=timezone.utc) for s in stamps), default=since)
     return act
+
+
+def _save_failure(user_id, attempt: int, text: str) -> Path:
+    FAILURES.mkdir(parents=True, exist_ok=True)
+    path = FAILURES / f"{user_id}_{datetime.now(timezone.utc):%Y%m%dT%H%M%S%fZ}_{attempt}.txt"
+    path.write_text(text, encoding="utf-8")
+    return path
 
 
 def parse(text: str) -> LearnedProfile:
@@ -197,23 +260,40 @@ async def learn(backend: ModelBackend, act: Activity) -> Outcome:
                                                                          default=str)}]
     calls: list[ModelResult] = []
     for attempt in (1, 2):
-        result = await backend.complete(messages, system=SYSTEM, max_tokens=2000, sensitivity=label,
+        result = await backend.complete(messages, system=SYSTEM, max_tokens=MAX_OUTPUT, sensitivity=label,
                                         user_id=str(act.user_id))
         calls.append(result)
         try:
             return Outcome(parse(result.text), calls)
         except (ValueError, ValidationError) as e:
+            cut = result.stop_reason == "max_tokens"
+            saved = _save_failure(act.user_id, attempt, result.text)
+            problem = (f"the answer was cut off at {MAX_OUTPUT} tokens" if cut else str(e)[:300])
             if attempt == 2:
-                raise ValueError(f"the model's answer didn't match the profile format twice: {e}") from e
+                raise ValueError(f"the model's answer didn't match the profile format twice ({problem}); "
+                                 f"answers saved in {saved.parent}") from e
+            hint = ("It was too long: keep every list within its limit and the texts short." if cut else
+                    "Check that every string is closed and contains no \" character (use «…»).")
             messages += [{"role": "assistant", "content": result.text},
-                         {"role": "user", "content": f"That didn't match the format ({str(e)[:300]}). "
+                         {"role": "user", "content": f"That wasn't valid JSON for the format ({problem}). {hint} "
                                                      "Answer again with only the JSON object."}]
     raise RuntimeError("unreachable")
 
 
+def merged_goal_keywords(act: Activity, new: list[GoalMatch]) -> list[dict]:
+    """Earlier mappings of goals that are still active, plus this run's (which win for the same goal)."""
+    active = {_norm(g) for g in act.goals}
+    fresh = {_norm(m.goal): m.model_dump() for m in new if _norm(m.goal) in active}
+    kept = [m for m in (act.previous or {}).get("goal_keywords") or []
+            if _norm(m.get("goal", "")) in active and _norm(m.get("goal", "")) not in fresh]
+    return kept + list(fresh.values())
+
+
 async def save(db: AsyncDatabase, act: Activity, outcome: Outcome) -> None:
     last = outcome.calls[-1]
-    doc = {**outcome.profile.model_dump(), "processed_until": act.until, "updated_at": datetime.now(timezone.utc),
+    profile = outcome.profile.model_dump()
+    profile["goal_keywords"] = merged_goal_keywords(act, outcome.profile.goal_keywords)
+    doc = {**profile, "processed_until": act.until, "updated_at": datetime.now(timezone.utc),
            "backend": last.backend, "model": last.model, "sensitivity": act.label,
            "input": {"chat": len(act.chat), "feedback": len(act.feedback), "insights": len(act.insights)}}
     await db.users.update_one({"_id": act.user_id}, {"$set": {"learned": doc}})

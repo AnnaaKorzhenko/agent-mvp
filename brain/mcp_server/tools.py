@@ -122,8 +122,8 @@ def _digest_out(res: digests_domain.DigestResultView, cls: type[out.DigestResult
             period_end=v.digest.period_end, hidden_items=v.hidden_items,
             sections=[out.DigestSectionOut(category=s.category, title=s.title, items=[
                 out.DigestItemOut(ref=next(refs), n=v.number(i), text=i.text, source_urls=i.source_urls,
-                                  source_post_ids=i.source_post_ids,
-                                  is_russian_source_claim=v.digest.side == "ru") for i in items])
+                                  source_post_ids=i.source_post_ids, is_russian_source_claim=v.digest.side == "ru",
+                                  why=v.why(i).why, relevance=v.why(i).score) for i in items])
                 for s, items in v.sections])
         for v in res.digests])
 
@@ -141,7 +141,7 @@ def _post_out(v: posts_domain.PostView) -> out.PostOut:
                        source_side=p.source_side, is_russian_source_claim=v.is_russian_source_claim,
                        channel=out.Channel(username=v.channel.username, country=v.channel.source_country)
                        if v.channel else None,
-                       post_url=p.post_url, published_at=p.published_at, importance=p.importance)
+                       post_url=p.post_url, published_at=p.published_at, importance=p.importance, why=v.why)
 
 
 class _Call:
@@ -164,6 +164,10 @@ class _Call:
             await self.svc.audit.event("access_denied", mcp_session_id=self.session_id, tool=self.name,
                                        reason=str(e))
             raise ToolError(str(e)) from None
+        try:
+            await self.svc.repos.users.touch(self.ctx.user_id)
+        except Exception as e:             # noqa: BLE001 - last_seen must never break a tool
+            logger.error(f"last_seen update failed: {type(e).__name__}: {e}")
         return self.ctx
 
     async def done(self, items: int = 0, labels: list[str | None] | None = None, outcome: str = "ok",
@@ -579,7 +583,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
             "remove: the goal's text exactly as get_profile returns it"))],
         signals: Signals = None,
     ) -> out.GoalsOut:
-        """Add or remove one of the user's goals (what they most want to achieve; at most 5). Goals shape which
+        """Add or remove one of the user's goals (what they most want to achieve; any number). Goals shape which
         news matter to them. Call it only when the user explicitly asks to set, change or drop a goal, never on
         your own judgement. To change a goal, remove the old one and add the new one."""
         call = _Call(svc, "set_goal", {"action": action, "text": text, **_common(user_message, signals)},

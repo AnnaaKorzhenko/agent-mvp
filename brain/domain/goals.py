@@ -1,8 +1,8 @@
 """The user's goals, added and removed by MCP clients with the bot's rules and goal shape.
 
-Same limits as the bot (user_store.add_goal / remove_goal): at most MAX_GOALS active goals, no duplicate
-active goal (case-insensitive), text squashed to one line of at most 300 characters. Removing a goal only
-marks it inactive, so the history stays. Entries also carry `channel`, the client that wrote them.
+The bot's rules (user_store.add_goal / remove_goal) except its 5-goal limit: any number of active goals (users
+focus on many at once; decided 2026-10-29), no duplicate active goal (case-insensitive), text squashed to one
+line of at most 300 characters. Removing a goal only marks it inactive, so the history stays. Entries also carry `channel`, the client that wrote them.
 """
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from brain.db.repositories import Repos
 from brain.domain.errors import InvalidInput, NotFound
 from brain.domain.identity import UserContext
 
-MAX_GOALS = 5               # same as user_store.MAX_GOALS
 MAX_TEXT = 300              # same as user_store.add_goal
 
 NO_PROFILE = "No profile for this user yet. Start the Telegram bot once to create it."
@@ -43,9 +42,6 @@ async def add_goal(repos: Repos, ctx: UserContext, text: str | None) -> GoalsRes
     active = [g.text for g in (await _profile(repos, ctx)).goals if g.active]
     if any(g.lower() == text.lower() for g in active):
         raise InvalidInput(f"This goal already exists: {text}")
-    if len(active) >= MAX_GOALS:
-        raise InvalidInput(f"The user already has {MAX_GOALS} goals. Ask which one to remove first: "
-                           + "; ".join(active))
     goal = {"text": text, "active": True, "source": "user", "created_at": datetime.now(timezone.utc),
             "channel": ctx.channel}
     if not await repos.users.push_goal(ctx.user_id, goal):

@@ -90,3 +90,12 @@ async def test_feedback_report_skips_ratings_without_a_digest(store):
     report = await us.feedback_report()
     assert report and all(row["_id"]["digest_id"] is not None for row in report)
     assert any(row["_id"] == {"digest_id": DIGEST_UA, "item_n": 1} and row["dislikes"] >= 1 for row in report)
+
+
+async def test_goals_have_no_limit_but_no_duplicates(store):
+    us, db = store
+    for i in range(8):
+        assert await us.add_goal(UID, f"ціль {i}")
+    assert not await us.add_goal(UID, "ЦІЛЬ 3")                       # a duplicate is still refused
+    user = await db["users"].find_one({"_id": UID})
+    assert len(us.active_goals(user)) == 8
