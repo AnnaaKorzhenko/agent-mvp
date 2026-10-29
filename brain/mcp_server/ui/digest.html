@@ -25,7 +25,7 @@ const widget = createWidget({ name: "News brain digest", where: "у віджет
 
 function itemCard(digest, item) {
   return widget.card({
-    key: `${digest.digest_id}:${item.n}`, ref: item.ref, text: item.text, body: item.text,
+    key: `${digest.digest_id}:${item.n}`, ref: item.ref, text: item.text, body: [item.text, whyLine(item.why)],
     urls: item.source_urls || [],
     target: { target_type: "digest_item", digest_id: digest.digest_id, item_n: item.n },
   });

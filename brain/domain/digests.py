@@ -11,9 +11,10 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from brain.db.models import DigestDoc, DigestItemDoc, DigestSectionDoc, UserProfileDoc
+from brain.db.models import DigestDoc, DigestItemDoc, DigestSectionDoc, PostDoc, UserProfileDoc
 from brain.db.repositories import Repos
-from brain.domain import scoring, sensitivity
+from brain.domain import relevance, scoring, sensitivity
+from brain.domain.relevance import Interests, Relevance
 from brain.domain.errors import InvalidInput
 from brain.domain.identity import UserContext
 
@@ -28,9 +29,13 @@ class DigestView:
     hidden_items: int = 0
     side_note: str | None = None
     numbers: dict[int, int] = field(default_factory=dict)     # id(item) -> item number (see item_number)
+    relevance: dict[int, "Relevance"] = field(default_factory=dict)     # id(item) -> personal relevance
 
     def number(self, item: DigestItemDoc) -> int:
         return self.numbers[id(item)]
+
+    def why(self, item: DigestItemDoc) -> "Relevance":
+        return self.relevance.get(id(item)) or Relevance()
 
 
 @dataclass
@@ -82,13 +87,14 @@ async def get_digests(repos: Repos, ctx: UserContext, side: str = "both", day: s
     wanted = parse_date(day)
     start, end = kyiv_day_bounds(wanted) if wanted else (None, None)
     profile = await repos.users.get_profile(ctx.user_id)
+    prefs = await relevance.load(repos, ctx, profile)
     result = DigestResultView(date=wanted.isoformat() if wanted else None)
     for s in sides:
         digest = await repos.digests.latest(s, "day", start, end)
         if digest is None or not sensitivity.is_allowed(digest.sensitivity, ctx.max_sensitivity):
             result.missing_sides.append(s)
             continue
-        result.digests.append(await _view(repos, ctx, digest, profile))
+        result.digests.append(await _view(repos, ctx, digest, profile, prefs))
     if result.date is None and result.digests:
         result.date = result.digests[0].digest.created_at.astimezone(KYIV).date().isoformat()
     return result
@@ -116,10 +122,15 @@ async def morning_digest(repos: Repos, ctx: UserContext, now: datetime | None = 
     return Morning("new", res)
 
 
-async def _source_labels(repos: Repos, items: list[DigestItemDoc]) -> dict[str, str]:
-    # Labels of the source posts, read with all labels allowed: only used to decide what to hide.
+async def _source_posts(repos: Repos, items: list[DigestItemDoc]) -> dict[str, PostDoc]:
+    # The source posts, read with all labels allowed: their labels decide what to hide, their tags feed relevance
+    # (only for items that are shown).
     ids = [pid for it in items for pid in it.source_post_ids]
-    return {pid: p.sensitivity for pid, p in (await repos.posts.get_many(ids, list(sensitivity.LEVELS))).items()}
+    return await repos.posts.get_many(ids, list(sensitivity.LEVELS))
+
+
+async def _source_labels(repos: Repos, items: list[DigestItemDoc]) -> dict[str, str]:
+    return {pid: p.sensitivity for pid, p in (await _source_posts(repos, items)).items()}
 
 
 def _item_allowed(digest: DigestDoc, item: DigestItemDoc, labels: dict[str, str], ctx: UserContext) -> bool:
@@ -148,18 +159,43 @@ async def find_item(repos: Repos, ctx: UserContext, digest_id: str | None,
     return None
 
 
-async def _view(repos: Repos, ctx: UserContext, digest: DigestDoc, profile: UserProfileDoc | None) -> DigestView:
-    labels = await _source_labels(repos, [it for sec in digest.sections for it in sec.items])
-    view = DigestView(digest, [], side_note=RU_NOTE if digest.side == "ru" else None)
+FOR_YOU = DigestSectionDoc(category="for_you", title="⭐ Для вас")
+FOR_YOU_MIN = 1.2        # relevance needed for «Для вас»: a goal or interest match, not a favourite category alone
+FOR_YOU_MAX = 8          # items per side in it
+
+
+async def _view(repos: Repos, ctx: UserContext, digest: DigestDoc, profile: UserProfileDoc | None,
+                prefs: Interests | None = None) -> DigestView:
+    """Items the caller may see, ordered for this user: first «⭐ Для вас», the most relevant items by personal
+    relevance (goals, interests, rated topics); then the remaining items in their sections, today's picked
+    categories first (as the bot does), each section by relevance. Without any signal: the digest's own order."""
     items = [it for sec in digest.sections for it in sec.items]          # the digest's own order
+    posts = await _source_posts(repos, items)
+    labels = {pid: p.sensitivity for pid, p in posts.items()}
+    view = DigestView(digest, [], side_note=RU_NOTE if digest.side == "ru" else None)
     view.numbers = {id(it): item_number(it, pos) for pos, it in enumerate(items, 1)}
-    for section in order_sections(digest.sections, profile, digest.side):
+    chosen = set(todays_choice(profile, digest.side))
+    ordered = []
+    for base, section in enumerate(order_sections(digest.sections, profile, digest.side)):
         kept = []
         for item in section.items:
-            if _item_allowed(digest, item, labels, ctx):
-                kept.append(item)
-            else:
+            if not _item_allowed(digest, item, labels, ctx):
                 view.hidden_items += 1
+                continue
+            kept.append(item)
+            if prefs is not None:
+                tags = [t for pid in item.source_post_ids if pid in posts for t in posts[pid].tags]
+                view.relevance[id(item)] = prefs.score(side=digest.side, category=section.category,
+                                                       category_label=section.title, text=item.text, tags=tags)
         if kept:
-            view.sections.append((section, kept))
+            kept.sort(key=lambda it: -view.why(it).score)                 # stable
+            ordered.append(((0 if section.category in chosen else 1, base), section, kept))
+    sections = [(section, kept) for _, section, kept in sorted(ordered, key=lambda x: x[0])]
+    picked = sorted((it for _, kept in sections for it in kept if view.why(it).score >= FOR_YOU_MIN),
+                    key=lambda it: -view.why(it).score)[:FOR_YOU_MAX]
+    if picked:
+        taken = {id(it) for it in picked}
+        sections = [(FOR_YOU, picked)] + [(s, [it for it in kept if id(it) not in taken]) for s, kept in sections]
+        sections = [(s, kept) for s, kept in sections if kept]
+    view.sections = sections
     return view

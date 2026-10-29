@@ -26,8 +26,13 @@ class MemoryOut(BaseModel):
         "Only on the first call of a conversation: " + ABOUT_USER_HELP))
 
 
+WHY_HELP = ("Why this matters to this user (their goals, interests, rated topics), strongest first; empty if "
+            "nothing personal matches. Use it to explain relevance and to lead with goal-related items")
+
+
 class PostOut(BaseModel):
     ref: int | None = Field(None, description="Number shown to the user in this result (#1, #2, …): «третя» = ref 3")
+    why: list[str] = Field(default_factory=list, description=WHY_HELP)
     post_id: str
     summary: str
     tags: list[str]
@@ -58,6 +63,8 @@ class DigestItemOut(BaseModel):
     source_urls: list[str]
     source_post_ids: list[str] = Field(description="Ids usable with get_post and record_feedback")
     is_russian_source_claim: bool
+    why: list[str] = Field(default_factory=list, description=WHY_HELP)
+    relevance: float = Field(0.0, description="Personal relevance score; items are already ordered by it")
 
 
 class DigestSectionOut(BaseModel):

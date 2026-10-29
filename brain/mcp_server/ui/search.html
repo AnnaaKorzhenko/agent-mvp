@@ -35,7 +35,7 @@ function postCard(post) {
     post.published_at ? el("span", {}, when(post.published_at)) : null,
     post.is_russian_source_claim ? el("span", { class: "claim" }, "заява рос. каналу, не факт") : null);
   return widget.card({
-    key: post.post_id, ref: post.ref, text: post.summary, body: [meta, post.summary],
+    key: post.post_id, ref: post.ref, text: post.summary, body: [meta, post.summary, whyLine(post.why)],
     urls: post.post_url ? [post.post_url] : [],
     target: { target_type: "post", post_id: post.post_id },
   });

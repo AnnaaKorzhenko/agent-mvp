@@ -122,8 +122,8 @@ def _digest_out(res: digests_domain.DigestResultView, cls: type[out.DigestResult
             period_end=v.digest.period_end, hidden_items=v.hidden_items,
             sections=[out.DigestSectionOut(category=s.category, title=s.title, items=[
                 out.DigestItemOut(ref=next(refs), n=v.number(i), text=i.text, source_urls=i.source_urls,
-                                  source_post_ids=i.source_post_ids,
-                                  is_russian_source_claim=v.digest.side == "ru") for i in items])
+                                  source_post_ids=i.source_post_ids, is_russian_source_claim=v.digest.side == "ru",
+                                  why=v.why(i).why, relevance=v.why(i).score) for i in items])
                 for s, items in v.sections])
         for v in res.digests])
 
@@ -141,7 +141,7 @@ def _post_out(v: posts_domain.PostView) -> out.PostOut:
                        source_side=p.source_side, is_russian_source_claim=v.is_russian_source_claim,
                        channel=out.Channel(username=v.channel.username, country=v.channel.source_country)
                        if v.channel else None,
-                       post_url=p.post_url, published_at=p.published_at, importance=p.importance)
+                       post_url=p.post_url, published_at=p.published_at, importance=p.importance, why=v.why)
 
 
 class _Call:

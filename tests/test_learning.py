@@ -21,7 +21,10 @@ _ids = itertools.count(1)
 
 ANSWER = {"summary": "Працює у фонді, що інвестує в НРК.", "preferences": ["коротші відповіді"],
           "interests": [{"topic": "НРК", "weight": 5}, {"topic": "морські дрони", "weight": 2}],
-          "known": ["Brave1"], "avoid": ["новини про спорт"], "goal_candidates": ["знайти 3 НРК-компанії"]}
+          "known": ["Brave1"], "avoid": ["новини про спорт"], "goal_candidates": ["знайти 3 НРК-компанії"],
+          "goal_keywords": [{"goal": "Знайти напрямки для інвестицій у defense tech",
+                             "specific": ["Brave1", "НРК"], "broader": ["інвестиції в оборонку"],
+                             "tags": ["інвестиції", "не з переліку"]}]}
 
 
 class FakeBackend(_AuditedBackend):
@@ -142,3 +145,15 @@ async def test_learned_profile_reaches_the_client_first(test_db, user):
 async def test_users_with_activity(test_db, user):
     await say(test_db, user, "привіт")
     assert user in await profile.users_with_activity(test_db)
+
+
+
+def test_goal_keywords_keep_listed_tags_only():
+    p = profile.LearnedProfile.model_validate(ANSWER)
+    assert p.goal_keywords[0].tags == ["інвестиції"]                       # "не з переліку" dropped
+
+
+async def test_a_goal_without_keywords_is_work_to_do(test_db, user):
+    act = await profile.collect(test_db, user, "internal")
+    assert act.goals_without_keywords == ["Знайти напрямки для інвестицій у defense tech"] and not act.empty
+    assert "оборонні технології" in act.payload()["tag_list"]
