@@ -164,6 +164,10 @@ class _Call:
             await self.svc.audit.event("access_denied", mcp_session_id=self.session_id, tool=self.name,
                                        reason=str(e))
             raise ToolError(str(e)) from None
+        try:
+            await self.svc.repos.users.touch(self.ctx.user_id)
+        except Exception as e:             # noqa: BLE001 - last_seen must never break a tool
+            logger.error(f"last_seen update failed: {type(e).__name__}: {e}")
         return self.ctx
 
     async def done(self, items: int = 0, labels: list[str | None] | None = None, outcome: str = "ok",
@@ -579,7 +583,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
             "remove: the goal's text exactly as get_profile returns it"))],
         signals: Signals = None,
     ) -> out.GoalsOut:
-        """Add or remove one of the user's goals (what they most want to achieve; at most 5). Goals shape which
+        """Add or remove one of the user's goals (what they most want to achieve; any number). Goals shape which
         news matter to them. Call it only when the user explicitly asks to set, change or drop a goal, never on
         your own judgement. To change a goal, remove the old one and add the new one."""
         call = _Call(svc, "set_goal", {"action": action, "text": text, **_common(user_message, signals)},

@@ -54,7 +54,7 @@ Then choose "Streamable HTTP" with the URL `http://127.0.0.1:8000/mcp`.
 | `get_post(post_id)` | One post |
 | `get_profile()` | Goals, today's categories, top categories and tags. Never feedback. |
 | `record_feedback(target_type, reaction, post_id / digest_id+item_n / about+cited_post_ids, reasons, text, feedback_id)` | Saves 👍 / 👎 / 50/50 on a post, digest item, answer or suggestion (`docs/FEEDBACK_PLAN.md`); only news ratings change scores. `feedback_id` adds a comment later |
-| `set_goal(action, text)` | Adds or removes a goal with the bot's rules (max 5 active, no duplicates; removing keeps history) |
+| `set_goal(action, text)` | Adds or removes a goal with the bot's rules (any number, no duplicates; removing keeps history) |
 | `save_insight(text, area, tags, sensitivity)` | Saves knowledge the user shares, verbatim, in `users.insights`; `confidential` by default |
 | `get_insights(query, area)` | Recalls saved insights this client may read (sensitivity filter) |
 | `log_turn(user_message, previous_reply, signals)` | Records a message that needs no other tool |

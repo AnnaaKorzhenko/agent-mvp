@@ -15,7 +15,6 @@ posts_collection = db["posts"]
 
 FEEDBACK_KEEP = 1000   # скільки останніх реакцій тримати в документі
 TEXT_SNIPPET = 300
-MAX_GOALS = 5
 
 # Бали інтересу рахує спільний модуль brain/domain/scoring.py (той самий код використовує MCP-сервер)
 _key = scoring.tag_key
@@ -129,7 +128,7 @@ async def add_goal(user_id: int, text: str, source: str = "user") -> bool:
         return False
     user = await users_collection.find_one({"_id": user_id}, {"goals": 1}) or {}
     active = [g for g in user.get("goals", []) if g.get("active")]
-    if len(active) >= MAX_GOALS or any(g["text"].lower() == text.lower() for g in active):
+    if any(g["text"].lower() == text.lower() for g in active):     # any number of goals; no duplicates
         return False
     await users_collection.update_one({"_id": user_id}, {"$push": {"goals": {
         "text": text, "active": True, "source": source, "created_at": _now()}}})

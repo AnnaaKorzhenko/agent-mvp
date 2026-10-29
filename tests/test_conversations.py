@@ -201,3 +201,32 @@ async def test_successful_logging_writes_nothing_to_audit_log(log, test_db):
     before = await test_db.audit_log.count_documents({})
     await log.log(user_id=uid(), channel="claude", mcp_session_id=None, client=None, record=call())
     assert await test_db.audit_log.count_documents({}) == before
+
+
+async def test_parallel_calls_without_a_session_id_share_one_document(log, test_db):
+    u = uid()
+    await asyncio.gather(*(log.log(user_id=u, channel="claude", mcp_session_id=None, client=None, record=call())
+                           for _ in range(5)))
+    [d] = await docs(test_db, u)
+    assert d["message_count"] == 5 and d["session_key"] == "anon:claude:first"
+    # After a quiet spell, parallel calls again start one new document, named after the one it follows.
+    await test_db.conversations.update_one({"_id": d["_id"]}, {"$set": {
+        "updated_at": datetime.now(timezone.utc) - timedelta(minutes=45)}})
+    await asyncio.gather(*(log.log(user_id=u, channel="claude", mcp_session_id=None, client=None, record=call())
+                           for _ in range(4)))
+    first, second = await docs(test_db, u)
+    assert second["session_key"] == f"anon:claude:after:{first['_id']}" and second["message_count"] == 4
+
+
+async def test_last_seen_is_refreshed_at_most_every_five_minutes(test_db):
+    user = 800_200_000 + next(_users)
+    old = datetime.now(timezone.utc) - timedelta(days=2)
+    await test_db.users.insert_one({**copy.deepcopy(USERS[0]), "_id": user, "last_seen": old})
+    svc = Services(settings=make_settings(DEV_USER_ID=user), repos=Repos(test_db), audit=AuditLog(test_db),
+                   token=lambda: None)
+    async with Client(create_server(svc)) as c:
+        await c.call_tool("get_post", {"user_message": "тест", "post_id": str(P_DRONES)})
+        seen = (await test_db.users.find_one({"_id": user}))["last_seen"]
+        assert seen > old + timedelta(days=1)
+        await c.call_tool("get_post", {"user_message": "тест", "post_id": str(P_DRONES)})
+        assert (await test_db.users.find_one({"_id": user}))["last_seen"] == seen     # throttled

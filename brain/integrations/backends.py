@@ -24,6 +24,7 @@ class ModelResult:
     output_tokens: int
     model: str
     backend: str
+    stop_reason: str | None = None        # e.g. "max_tokens" when the answer was cut off
 
 
 class ModelBackend(Protocol):
@@ -121,7 +122,8 @@ class AnthropicBackend(_AuditedBackend):
             raise RuntimeError(f"Model declined the request (category: "
                                f"{getattr(resp.stop_details, 'category', None)})")
         text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
-        return ModelResult(text, resp.usage.input_tokens, resp.usage.output_tokens, resp.model, self.name)
+        return ModelResult(text, resp.usage.input_tokens, resp.usage.output_tokens, resp.model, self.name,
+                           resp.stop_reason)
 
 
 def get_backend(settings: Settings, audit: AuditLog) -> ModelBackend:

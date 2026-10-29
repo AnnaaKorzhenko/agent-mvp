@@ -39,9 +39,11 @@ class FakeBackend(_AuditedBackend):
     async def _model_name(self):
         return "fake-model"
 
+    stop = "end_turn"
+
     async def _call(self, messages, system, max_tokens, temperature):
-        self.sent.append(messages)
-        return ModelResult(self.answers.pop(0), 1000, 200, "fake-model", self.name)
+        self.sent.append(list(messages))
+        return ModelResult(self.answers.pop(0), 1000, 200, "fake-model", self.name, self.stop)
 
 
 @pytest.fixture
@@ -110,15 +112,28 @@ async def test_learn_save_and_learn_again_from_new_items_only(test_db, user):
     assert again.payload()["previous_profile"]["summary"] == ANSWER["summary"]
 
 
-async def test_an_unreadable_answer_is_retried_once(test_db, user):
+async def test_an_unreadable_answer_is_retried_once(test_db, user, tmp_path, monkeypatch):
+    monkeypatch.setattr(profile, "FAILURES", tmp_path)
     await say(test_db, user, "привіт")
     act = await profile.collect(test_db, user, "internal")
     ok = FakeBackend(AuditLog(test_db), ["Ось профіль:", json.dumps(ANSWER, ensure_ascii=False)])
     assert (await profile.learn(ok, act)).profile.known == ["Brave1"] and len(ok.sent) == 2
-    assert "didn't match the format" in ok.sent[1][-1]["content"]
-    bad = FakeBackend(AuditLog(test_db), ["{}", '{"summary": 3}'])
+    assert "wasn't valid JSON" in ok.sent[1][-1]["content"]
+    bad = FakeBackend(AuditLog(test_db), ["{}", '{"summary": "проект "Рассвет""}'])
     with pytest.raises(ValueError, match="twice"):
         await profile.learn(bad, act)
+    assert len(list(tmp_path.iterdir())) == 3                       # every failed answer is kept for a look
+
+
+async def test_a_cut_off_answer_says_so(test_db, user, tmp_path, monkeypatch):
+    monkeypatch.setattr(profile, "FAILURES", tmp_path)
+    await say(test_db, user, "привіт")
+    act = await profile.collect(test_db, user, "internal")
+    cut = FakeBackend(AuditLog(test_db), ['{"summary": "Працює у', '{"summary": "Працює у фонді'])
+    cut.stop = "max_tokens"
+    with pytest.raises(ValueError, match="cut off"):
+        await profile.learn(cut, act)
+    assert "too long" in cut.sent[1][-1]["content"]
 
 
 async def test_a_cloud_backend_never_gets_confidential_data(test_db, user):
@@ -157,3 +172,24 @@ async def test_a_goal_without_keywords_is_work_to_do(test_db, user):
     act = await profile.collect(test_db, user, "internal")
     assert act.goals_without_keywords == ["Знайти напрямки для інвестицій у defense tech"] and not act.empty
     assert "оборонні технології" in act.payload()["tag_list"]
+
+
+async def test_many_goals_are_mapped_a_few_at_a_time_and_kept(test_db, user):
+    goals = [f"ціль номер {i}" for i in range(12)]
+    old = [{"goal": g, "specific": [f"термін{i}"], "broader": [], "tags": []} for i, g in enumerate(goals[:10])]
+    old.append({"goal": "видалена ціль", "specific": ["x"], "broader": [], "tags": []})
+    await test_db.users.update_one({"_id": user}, {"$set": {
+        "goals": [{"text": g, "active": True} for g in goals],
+        "learned": {**ANSWER, "goal_keywords": old, "sensitivity": "internal",
+                    "processed_until": datetime.now(timezone.utc)}}})
+    act = await profile.collect(test_db, user, "internal")
+    sent = act.payload()
+    assert sent["goals_to_map"] == goals[10:] and "goal_keywords" not in sent["previous_profile"]
+    answer = {**ANSWER, "goal_keywords": [{"goal": g, "specific": ["новий"], "broader": [], "tags": []}
+                                          for g in goals[10:]]}
+    backend = FakeBackend(AuditLog(test_db), [json.dumps(answer, ensure_ascii=False)])
+    await profile.save(test_db, act, await profile.learn(backend, act))
+    saved = (await test_db.users.find_one({"_id": user}))["learned"]["goal_keywords"]
+    assert [m["goal"] for m in saved] == goals                     # 10 kept + 2 new; the removed goal dropped
+    assert saved[0]["specific"] == ["термін0"] and saved[11]["specific"] == ["новий"]
+    assert (await profile.collect(test_db, user, "internal")).empty     # everything mapped: nothing to do

@@ -198,7 +198,13 @@ class ConversationLog:
             push = {"$push": {"messages": {"$each": msgs}}, "$inc": {"message_count": len(msgs)},
                     "$set": updates}
         part = current["part"] + 1 if current and mcp_session_id else 1
-        key = f"{mcp_session_id}:{part}" if mcp_session_id else f"anon:{ObjectId()}"
+        # Deterministic keys: calls racing to start the next document compute the same key, and the unique
+        # (user_id, session_key) index makes them share it. Without a session id, the key names the document
+        # it follows.
+        if mcp_session_id:
+            key = f"{mcp_session_id}:{part}"
+        else:
+            key = f"anon:{channel}:after:{current['_id']}" if current else f"anon:{channel}:first"
         new = {"channel": channel, "client": client, "mcp_session_id": mcp_session_id, "part": part,
                "started_at": now}
         for attempt in (1, 2):

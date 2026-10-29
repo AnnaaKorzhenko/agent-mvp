@@ -6,7 +6,7 @@ is logged with the exact field and skipped, so one bad document never breaks a w
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TypeVar
 
 from bson import ObjectId
@@ -174,6 +174,13 @@ class UsersRepo:
     async def get_profile(self, user_id: UserId) -> UserProfileDoc | None:
         doc = await self.col.find_one({"_id": user_key(user_id)}, self.PROFILE_PROJECTION)
         return parse(UserProfileDoc, doc, "users")
+
+    async def touch(self, user_id: UserId, every: timedelta = timedelta(minutes=5)) -> None:
+        """Sets last_seen to now, at most once per `every` (one cheap conditional write, not one per call)."""
+        now = datetime.now(timezone.utc)
+        await self.col.update_one({"_id": user_key(user_id), "$or": [{"last_seen": {"$lt": now - every}},
+                                                                    {"last_seen": {"$exists": False}}]},
+                                  {"$set": {"last_seen": now}})
 
     async def find_by_identity(self, provider: str, subject: str) -> UserId | None:
         doc = await self.col.find_one({"identities": {"$elemMatch": {"provider": provider, "subject": subject}}},

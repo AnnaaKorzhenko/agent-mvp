@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -30,6 +31,9 @@ MAX_CHAT = 300          # newest chat messages per run
 MAX_FEEDBACK = 200
 MAX_INSIGHTS = 300
 MAX_TEXT = 600          # characters per item sent to the model
+MAX_OUTPUT = 8000       # output tokens: goal keywords for several goals are long
+MAP_PER_RUN = 10        # goals mapped to keywords per run; more are mapped by the next runs
+FAILURES = Path(__file__).resolve().parents[1] / "eval" / "results" / "learn_failures"   # git-ignored
 CHAT_LABEL = "internal"         # what the chat, feedback and the learned profile are treated as
 
 
@@ -64,7 +68,7 @@ class LearnedProfile(BaseModel):
     known: list[str] = Field(default_factory=list, max_length=12)
     avoid: list[str] = Field(default_factory=list, max_length=10)
     goal_candidates: list[str] = Field(default_factory=list, max_length=5)
-    goal_keywords: list[GoalMatch] = Field(default_factory=list, max_length=10)
+    goal_keywords: list[GoalMatch] = Field(default_factory=list, max_length=MAP_PER_RUN)
 
 
 SYSTEM = """You maintain a short profile of one user of a news service about the war in Ukraine and the defense \
@@ -83,7 +87,8 @@ questions count more than one mention). Drop topics with only weak, old evidence
 - avoid: topics or kinds of news they rated as not useful repeatedly or said they don't want.
 - goal_candidates: goals they expressed that are not in their active goals.
 - summary: 2-4 sentences: who they are (work, role, organization if stated) and what they need from the service.
-- goal_keywords: for EACH active goal (copy its text exactly into "goal"), how news relevant to it would be worded. \
+- goal_keywords: ONLY for each goal in goals_to_map (copy its text exactly into "goal"); the other active goals \
+are mapped already. How news relevant to the goal would be worded. \
 The news is written in Ukrainian and Russian, whatever the goal's language. Three levels:
   - specific: names of systems, models, weapons, companies, programs, places, written as Ukrainian and Russian \
 news writes them (e.g. «Герань», «Геран», «Шахед», «Brave1»); 5-15 terms;
@@ -96,7 +101,8 @@ Ukrainian and Russian forms;
 city names alone, no broad field names («ППО», «дрони»): put those into a broader phrase instead \
 («дрони над аеропортом», «ППО збила нову модифікацію»).
 - Only state what the evidence supports; no guesses. Write the texts in Ukrainian, short.
-Answer with one JSON object only, no other text, with exactly these keys:
+Answer with one JSON object only, no other text. Inside strings never use the " character: write quotes as «…». \
+Exactly these keys:
 {"summary": str, "preferences": [str], "interests": [{"topic": str, "weight": 1-5}], "known": [str], \
 "avoid": [str], "goal_candidates": [str], \
 "goal_keywords": [{"goal": str, "specific": [str], "broader": [str], "tags": [str]}]}"""
@@ -125,7 +131,11 @@ class Activity:
         return not (self.chat or self.feedback or self.insights or self.goals_without_keywords)
 
     def payload(self) -> dict:
-        return {"previous_profile": self.previous or {}, "active_goals": self.goals, "tag_list": list(TAG_LIST),
+        # The previous profile without its goal mappings (long; kept and merged by save()), and only the goals
+        # that still need one: each run stays small however many goals the user has.
+        previous = {k: v for k, v in (self.previous or {}).items() if k != "goal_keywords"}
+        return {"previous_profile": previous, "active_goals": self.goals,
+                "goals_to_map": self.goals_without_keywords[:MAP_PER_RUN], "tag_list": list(TAG_LIST),
                 "chat_messages": self.chat, "ratings": self.feedback, "insights": self.insights}
 
     def size(self) -> int:
@@ -221,6 +231,13 @@ async def collect(db: AsyncDatabase, user_id, max_label: str) -> Activity:
     return act
 
 
+def _save_failure(user_id, attempt: int, text: str) -> Path:
+    FAILURES.mkdir(parents=True, exist_ok=True)
+    path = FAILURES / f"{user_id}_{datetime.now(timezone.utc):%Y%m%dT%H%M%S%fZ}_{attempt}.txt"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
 def parse(text: str) -> LearnedProfile:
     """The model's answer as a LearnedProfile: tolerates ```json fences and text around the object."""
     cleaned = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
@@ -243,23 +260,40 @@ async def learn(backend: ModelBackend, act: Activity) -> Outcome:
                                                                          default=str)}]
     calls: list[ModelResult] = []
     for attempt in (1, 2):
-        result = await backend.complete(messages, system=SYSTEM, max_tokens=2000, sensitivity=label,
+        result = await backend.complete(messages, system=SYSTEM, max_tokens=MAX_OUTPUT, sensitivity=label,
                                         user_id=str(act.user_id))
         calls.append(result)
         try:
             return Outcome(parse(result.text), calls)
         except (ValueError, ValidationError) as e:
+            cut = result.stop_reason == "max_tokens"
+            saved = _save_failure(act.user_id, attempt, result.text)
+            problem = (f"the answer was cut off at {MAX_OUTPUT} tokens" if cut else str(e)[:300])
             if attempt == 2:
-                raise ValueError(f"the model's answer didn't match the profile format twice: {e}") from e
+                raise ValueError(f"the model's answer didn't match the profile format twice ({problem}); "
+                                 f"answers saved in {saved.parent}") from e
+            hint = ("It was too long: keep every list within its limit and the texts short." if cut else
+                    "Check that every string is closed and contains no \" character (use «…»).")
             messages += [{"role": "assistant", "content": result.text},
-                         {"role": "user", "content": f"That didn't match the format ({str(e)[:300]}). "
+                         {"role": "user", "content": f"That wasn't valid JSON for the format ({problem}). {hint} "
                                                      "Answer again with only the JSON object."}]
     raise RuntimeError("unreachable")
 
 
+def merged_goal_keywords(act: Activity, new: list[GoalMatch]) -> list[dict]:
+    """Earlier mappings of goals that are still active, plus this run's (which win for the same goal)."""
+    active = {_norm(g) for g in act.goals}
+    fresh = {_norm(m.goal): m.model_dump() for m in new if _norm(m.goal) in active}
+    kept = [m for m in (act.previous or {}).get("goal_keywords") or []
+            if _norm(m.get("goal", "")) in active and _norm(m.get("goal", "")) not in fresh]
+    return kept + list(fresh.values())
+
+
 async def save(db: AsyncDatabase, act: Activity, outcome: Outcome) -> None:
     last = outcome.calls[-1]
-    doc = {**outcome.profile.model_dump(), "processed_until": act.until, "updated_at": datetime.now(timezone.utc),
+    profile = outcome.profile.model_dump()
+    profile["goal_keywords"] = merged_goal_keywords(act, outcome.profile.goal_keywords)
+    doc = {**profile, "processed_until": act.until, "updated_at": datetime.now(timezone.utc),
            "backend": last.backend, "model": last.model, "sensitivity": act.label,
            "input": {"chat": len(act.chat), "feedback": len(act.feedback), "insights": len(act.insights)}}
     await db.users.update_one({"_id": act.user_id}, {"$set": {"learned": doc}})

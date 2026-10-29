@@ -867,7 +867,7 @@ def _goals_view(goals: list[str]) -> tuple[str, InlineKeyboardMarkup | None]:
     lines = "\n".join(f"{i}. {html.escape(g, quote=False)}" for i, g in enumerate(goals, 1))
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"🗑 Видалити {i}", callback_data=f"goaldel:{i}")] for i in range(1, len(goals) + 1)])
-    return f"<b>Ваші цілі</b>\n{lines}\n\nДодати: <code>/goal текст</code> (до {store.MAX_GOALS})", kb
+    return f"<b>Ваші цілі</b>\n{lines}\n\nДодати: <code>/goal текст</code>", kb
 
 
 @dp.message(Command("goals"))
@@ -892,7 +892,7 @@ async def cmd_goal(message: Message, command: CommandObject) -> None:
         await message.answer("Ціль збережено ✅\n\n" + text, reply_markup=kb)
     else:
         await message.answer(
-            f"Не вдалося додати: така ціль уже є або їх уже {store.MAX_GOALS}. Видаліть зайву в /goals.")
+            "Не вдалося додати: така ціль уже є (див. /goals).")
 
 
 @dp.callback_query(F.data.startswith("goaldel:"))
