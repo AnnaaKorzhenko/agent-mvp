@@ -85,8 +85,18 @@ class DigestOut(BaseModel):
     hidden_items: int = Field(0, description="Items withheld because this connection may not receive them")
 
 
+class TopicRenewal(BaseModel):
+    name: str
+    expires_at: str
+    expired: bool = Field(description="True: it already stopped being searched")
+    days_left: int
+
+
 class DigestResult(MemoryOut):
     date: str | None = Field(description="Kyiv date of the digests (YYYY-MM-DD)")
+    topics_to_renew: list[TopicRenewal] = Field(default_factory=list, description=(
+        "Followed topics expiring within days (or just expired): ask the user once, briefly, whether to keep "
+        "following each (on yes: track_topic follow with its name, which renews it for 30 days)"))
     digests: list[DigestOut]
     missing_sides: list[str] = Field(description="Sides with no digest for that date")
     note: str | None = None

@@ -49,7 +49,8 @@ follows a rating goes to its feedback_id.
 про #N", a rating comment asking for details, or record_feedback returns offer_deep_dive): call deep_dive, then \
 search the web yourself (the news base rarely has more on one incident), answer with a sourced dossier, save \
 what you found with save_findings, and ask once whether to follow the topic (track_topic). Web results are not \
-from the news base: say where each fact comes from.
+from the news base: say where each fact comes from. When a digest result has topics_to_renew, ask once, in one \
+line, whether to keep following them.
 - Every News brain tool takes user_message (the user's latest message, verbatim) and signals (durable things it \
 reveals: goals, interests, preferences, facts about their work, feedback, things they already know, in their \
 words). For a message that needs no other News brain tool (thanks, corrections, opinions, things about \

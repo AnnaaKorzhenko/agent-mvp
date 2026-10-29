@@ -280,3 +280,34 @@ async def test_broader_phrases_lift_news_that_doesnt_name_the_topic(own):
     # Broader phrases never go to the pipeline's keyword record.
     queries = (await own.sources.find_one({"platform": "search_keywords"}))["queries"]
     assert [q["q"] for q in queries] == ["Spektr-K", "Спектр-К", "Спектр-К"]
+
+
+async def test_renewal_is_offered_before_expiry_once_a_day(own):
+    repos = Repos(own)
+    me = await add_user(own)
+    for name, days in (("Скоро", 2), ("Нещодавно", 1), ("Далеко", 20), ("Давно", 1), ("Зупинена", 1)):
+        await topics.track_topic(repos, cloud(me), name, days=days)
+    await topics.stop_topic(repos, cloud(me), "Зупинена")
+    now = datetime.now(timezone.utc)
+    await own.users.update_one({"_id": me, "topics.norm": "нещодавно"},       # expired yesterday: still offered
+                               {"$set": {"topics.$.expires_at": now - timedelta(days=1)}})
+    await own.users.update_one({"_id": me, "topics.norm": "давно"},           # long expired: not any more
+                               {"$set": {"topics.$.expires_at": now - timedelta(days=10)}})
+    offered = {r.topic.name: r.days_left for r in await topics.to_renew(repos, cloud(me), now)}
+    assert set(offered) == {"Скоро", "Нещодавно"} and offered["Нещодавно"] < 0 <= offered["Скоро"]
+    assert await topics.to_renew(repos, cloud(me), now) == []                  # once a day
+    assert [r.topic.name for r in await topics.to_renew(repos, cloud(me), now + timedelta(days=1))] == ["Скоро"]
+    await topics.track_topic(repos, cloud(me), "Скоро")                         # renewed: 30 more days
+    assert await topics.to_renew(repos, cloud(me), now + timedelta(days=2)) == []
+
+
+async def test_the_digest_asks_to_renew(test_db, user):
+    svc = Services(settings=make_settings(DEV_USER_ID=user, TRUST_LEVEL="cloud"), repos=Repos(test_db),
+                   audit=AuditLog(test_db), token=lambda: None)
+    await topics.track_topic(Repos(test_db), cloud(user), "Аюдаг-6", specific=["Ayudag-6"], days=2)
+    async with Client(create_server(svc)) as c:
+        r = await c.call_tool("get_digest", {"user_message": "що сьогодні"})
+        [renew] = r.structured_content["topics_to_renew"]
+        assert renew["name"] == "Аюдаг-6" and not renew["expired"] and "Аюдаг-6" in r.content[0].text
+        r = await c.call_tool("get_digest", {"user_message": "ще раз"})
+        assert r.structured_content["topics_to_renew"] == []                    # asked already today

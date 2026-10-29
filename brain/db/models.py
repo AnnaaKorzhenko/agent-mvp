@@ -152,6 +152,7 @@ class TopicDoc(_Doc):
     findings_count: int | None = None   # set by light reads, which leave the findings out
     hits: Annotated[list[dict], BeforeValidator(_as_list)] = []
     last_hit_at: datetime | None = None
+    renew_offered_on: str | None = None      # Kyiv date the client was last asked to offer renewal
     sensitivity: str = "internal"
 
 

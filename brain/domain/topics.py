@@ -14,7 +14,9 @@ about who follows what. Region by the term's script: Latin -> world; Cyrillic ->
 the spelling has letters only that language uses (і ї є ґ / ы э ъ ё). The pipeline searches the web for them, keeps
 what it finds in posts and builds a digest with trigger "topics"; get_digest shows each user the items that match
 their own topics, first (brain/domain/digests.py).
-An active topic past expires_at reads as `expired`; nothing rewrites it. Topics are keyed by their normalized
+An active topic past expires_at reads as `expired`; nothing rewrites it. From RENEW_NOTICE_DAYS before expiry
+until RENEW_GRACE_DAYS after, the digest asks the client to offer renewal, at most once a day per topic
+(to_renew(); `renew_offered_on` records the Kyiv date it was offered). Topics are keyed by their normalized
 name, so the same name never makes two topics. Web findings are public information; a topic is `internal`.
 """
 from __future__ import annotations
@@ -118,6 +120,31 @@ async def sync_queries(repos: Repos, now: datetime | None = None) -> bool:
         return False
     await repos.sources.set_keyword_queries(queries)
     return True
+
+
+RENEW_NOTICE_DAYS = 3
+RENEW_GRACE_DAYS = 2
+
+
+@dataclass
+class Renewal:
+    topic: TopicDoc
+    days_left: int            # whole days until expiry; negative once expired
+
+
+async def to_renew(repos: Repos, ctx: UserContext, now: datetime | None = None) -> list[Renewal]:
+    """Followed topics expiring soon (or just expired) not yet offered for renewal today; marks them offered."""
+    now = now or datetime.now(timezone.utc)
+    today = now.astimezone(digests.KYIV).date().isoformat()
+    out = []
+    for t in await repos.users.get_topics(ctx.user_id):
+        if t.status != "active" or not t.expires_at or t.renew_offered_on == today:
+            continue
+        left = utc(t.expires_at) - now
+        if -timedelta(days=RENEW_GRACE_DAYS) <= left <= timedelta(days=RENEW_NOTICE_DAYS):
+            await repos.users.update_topic(ctx.user_id, t.norm, {"renew_offered_on": today})
+            out.append(Renewal(t, left.days))
+    return out
 
 
 SYNC_EVERY = timedelta(minutes=30)

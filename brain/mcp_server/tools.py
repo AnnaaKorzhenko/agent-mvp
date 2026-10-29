@@ -130,6 +130,30 @@ def _digest_out(res: digests_domain.DigestResultView, cls: type[out.DigestResult
         for v in res.digests])
 
 
+async def _renewals(svc: "Services", ctx: UserContext, result: out.DigestResult) -> None:
+    """Adds the followed topics to offer for renewal. Never breaks the digest."""
+    try:
+        result.topics_to_renew = [
+            out.TopicRenewal(name=r.topic.name, expires_at=topics_domain.until_text(r.topic),
+                             expired=r.days_left < 0, days_left=r.days_left)
+            for r in await topics_domain.to_renew(svc.repos, ctx)]
+    except Exception as e:                 # noqa: BLE001
+        logger.error(f"renewal check failed: {type(e).__name__}: {e}")
+
+
+def _model_text(result: out.DigestResult, prefix: str = "") -> str:
+    """What the model reads: a short index when the cards are on screen, else the full digest."""
+    if not result.shown_in_widget:
+        return prefix + result.model_dump_json()
+    text = prefix + widgets.digest_index(result)
+    if result.topics_to_renew:
+        text += "\nFollowed topics about to expire (ask once, briefly, whether to keep following; on yes call " \
+                "track_topic follow with the name): " + "; ".join(
+                    f"«{r.name}» " + ("expired " if r.expired else "until ") + r.expires_at
+                    for r in result.topics_to_renew)
+    return text
+
+
 async def _digest_done(call: "_Call", res: digests_domain.DigestResultView, result: out.DigestResult) -> None:
     n = sum(len(s.items) for d in result.digests for s in d.sections)
     await call.done(items=n, labels=[v.digest.sensitivity for v in res.digests],
@@ -323,10 +347,9 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
             if not result.digests:
                 result.note = "No digest found for this date. Say so; do not invent news."
             result.shown_in_widget = widget and bool(result.digests)
+            await _renewals(svc, ctx, result)
             await _digest_done(call, res, result)
-            # What the model reads: a short index when the cards are on screen, else the full digest.
-            text = widgets.digest_index(result) if result.shown_in_widget else result.model_dump_json()
-            return CallToolResult(content=[TextContent(type="text", text=text)],
+            return CallToolResult(content=[TextContent(type="text", text=_model_text(result))],
                                   structured_content=result.model_dump(mode="json"))
         return await call.run(body)
 
@@ -360,9 +383,9 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
                                       structured_content=result.model_dump(mode="json"))
             result = _digest_out(m.result, out.MorningDigestResult, status="new")
             result.shown_in_widget = widget and bool(result.digests)
+            await _renewals(svc, ctx, result)
             await _digest_done(call, m.result, result)
-            text = widgets.digest_index(result) if result.shown_in_widget else result.model_dump_json()
-            return CallToolResult(content=[TextContent(type="text", text="status: new\n" + text)],
+            return CallToolResult(content=[TextContent(type="text", text=_model_text(result, "status: new\n"))],
                                   structured_content=result.model_dump(mode="json"))
         return await call.run(body)
 
