@@ -5,6 +5,8 @@ Run locally (dev user, sample data):
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 
 from mcp.server import MCPServer
@@ -19,6 +21,7 @@ from brain.db.client import get_db
 from brain.db.repositories import Repos
 from brain.mcp_server.auth import auth_settings, token_provider, token_verifier
 from brain.mcp_server.widgets import apps_extension
+from brain.learning.auto import learner
 from brain.mcp_server.tools import Services, register_tools
 
 INSTRUCTIONS = """\
@@ -81,7 +84,8 @@ def build_services(settings: Settings) -> Services:
         raise SystemExit("Refusing to start: set OAUTH_ISSUER + PUBLIC_BASE_URL (Auth0), "
                          "or DEV_USER_ID for local development on 127.0.0.1.")
     db = get_db(settings)
-    return Services(settings=settings, repos=Repos(db), audit=AuditLog(db), token=token_provider(settings))
+    return Services(settings=settings, repos=Repos(db), audit=AuditLog(db), token=token_provider(settings),
+                    learner=learner(db, settings) if settings.learning_auto else None)
 
 
 def transport_security(settings: Settings) -> TransportSecuritySettings | None:
@@ -94,8 +98,30 @@ def create_app():
     """ASGI app for uvicorn: `uvicorn brain.mcp_server.server:create_app --factory`."""
     settings = get_settings()
     logging.basicConfig(level=settings.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    mcp = create_server(build_services(settings))
+    svc = build_services(settings)
+    mcp = create_server(svc)
     logger.info(f"MCP server: db={settings.mongo_db} trust={settings.trust_level} "
                 + (f"dev user {settings.dev_user_id}" if settings.dev_mode
                    else f"OAuth issuer {settings.oauth_issuer}, resource {settings.resource_url}"))
-    return mcp.streamable_http_app(transport_security=transport_security(settings))
+    app = mcp.streamable_http_app(transport_security=transport_security(settings))
+    if svc.learner is not None:
+        _start_with(app, svc.learner.watch)
+    return app
+
+
+def _start_with(app, task_factory) -> None:
+    """Runs a background task for the app's lifetime, around the SDK's own lifespan (its session manager)."""
+    inner = app.router.lifespan_context
+
+    @contextlib.asynccontextmanager
+    async def lifespan(a):
+        task = asyncio.create_task(task_factory())
+        try:
+            async with inner(a) as state:
+                yield state
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    app.router.lifespan_context = lifespan

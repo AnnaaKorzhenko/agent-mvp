@@ -10,7 +10,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Annotated, Awaitable, Callable, Literal
+from typing import Annotated, Any, Awaitable, Callable, Literal
 
 from bson import ObjectId
 from mcp.server import MCPServer
@@ -46,6 +46,7 @@ class Services:
     audit: AuditLog               # security events only
     token: TokenProvider          # the verified OAuth token (None in dev mode)
     conversations: ConversationLog | None = field(default=None)
+    learner: Any = None           # brain.learning.auto.Learner when LEARNING_AUTO is on: set_goal nudges it
 
     def __post_init__(self) -> None:
         if self.conversations is None:
@@ -593,6 +594,8 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
             if action == "add":
                 r = await goals_domain.add_goal(svc.repos, ctx, text)
                 result = out.GoalsOut(goals=r.goals, added=r.changed)
+                if svc.learner is not None:                # map the new goal to keywords soon (auto.py)
+                    svc.learner.nudge(user_key(ctx.user_id))
             else:
                 r = await goals_domain.remove_goal(svc.repos, ctx, text)
                 result = out.GoalsOut(goals=r.goals, removed=r.changed)

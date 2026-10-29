@@ -53,6 +53,14 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = Field(None, alias="ANTHROPIC_API_KEY")
     anthropic_model: str = Field("claude-opus-5-5", alias="ANTHROPIC_MODEL")
 
+    # --- Automatic learning (brain/learning/auto.py): runs inside the MCP service ---
+    learning_auto: bool = Field(False, alias="LEARNING_AUTO")
+    learning_feedback_threshold: int = Field(20, ge=1, alias="LEARNING_FEEDBACK_THRESHOLD")
+    learning_goal_delay_minutes: int = Field(2, ge=0, alias="LEARNING_GOAL_DELAY_MINUTES")
+    learning_cooldown_minutes: int = Field(30, ge=0, alias="LEARNING_COOLDOWN_MINUTES")
+    learning_max_runs_per_day: int = Field(20, ge=0, alias="LEARNING_MAX_RUNS_PER_DAY")
+    learning_backend: Literal["local", "anthropic"] | None = Field(None, alias="LEARNING_BACKEND")  # default: MODEL_BACKEND
+
     # --- Audit and conversation log ---
     audit_ttl_days: int = Field(180, alias="AUDIT_TTL_DAYS")
     # A new conversations document after this much inactivity, or once one holds this many messages
