@@ -1,10 +1,11 @@
-"""The user's profile as the MCP server may show it: choices, goals, top interests. Never feedback."""
+"""The user's profile as the MCP server may show it: choices, goals, top interests, a count of saved insights.
+Never feedback, never insight texts."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 from brain.db.repositories import Repos
-from brain.domain import scoring
+from brain.domain import scoring, sensitivity
 from brain.domain.digests import todays_choice
 from brain.domain.errors import NotFound
 from brain.domain.identity import UserContext
@@ -18,6 +19,8 @@ class ProfileView:
     goals: list[str]
     top_categories: list[tuple[str, str, float]] = field(default_factory=list)   # (side, category, score)
     top_tags: list[tuple[str, float]] = field(default_factory=list)
+    insights_saved: int = 0
+    insights_visible: int = 0          # of those, how many this client may read (get_insights)
 
 
 async def get_profile(repos: Repos, ctx: UserContext) -> ProfileView:
@@ -33,4 +36,6 @@ async def get_profile(repos: Repos, ctx: UserContext) -> ProfileView:
         goals=[g.text for g in profile.goals if g.active],
         top_categories=cats[:TOP],
         top_tags=[(t["tag"], t["score"]) for t in tags],
+        insights_saved=len(profile.insights),
+        insights_visible=sum(sensitivity.is_allowed(i.sensitivity, ctx.max_sensitivity) for i in profile.insights),
     )

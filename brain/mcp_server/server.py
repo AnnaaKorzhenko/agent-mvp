@@ -18,6 +18,7 @@ from brain.config import Settings, get_settings
 from brain.db.client import get_db
 from brain.db.repositories import Repos
 from brain.mcp_server.auth import auth_settings, token_provider, token_verifier
+from brain.mcp_server.widgets import apps_extension
 from brain.mcp_server.tools import Services, register_tools
 
 INSTRUCTIONS = """\
@@ -33,12 +34,22 @@ gaps from general knowledge without saying clearly that it is not from the data.
 present them as facts.
 - After showing a digest, offer short follow-ups: a shorter version, more detail on item N, or the sources.
 - Reply in the user's language; Ukrainian by default.
-- Show digest and search items with their ref numbers (#1, #2, …).
+- If a tool result says the user already sees it as interactive cards (shown_in_widget), don't repeat, list \
+or summarize it; one short sentence at most, unless the user asked something specific.
+- Show digest and search items with their ref numbers (#1, #2, …) when you present them in text.
 - Call record_feedback only when the user clearly rates something: a news item, or your own answer or \
 suggestion. "The third one" is ref 3 of the most recent digest or search result; if it's unclear which item \
 is meant, ask. Never invent ids. One message with several ratings means several calls; a comment that \
 follows a rating goes to its feedback_id.
 - Call set_goal only when the user explicitly asks to set, change or drop a goal.
+- Every News brain tool takes user_message (the user's latest message, verbatim) and signals (durable things it \
+reveals: goals, interests, preferences, facts about their work, feedback, things they already know, in their \
+words). For a message that needs no other News brain tool (thanks, corrections, opinions, things about \
+themselves), call log_turn with it.
+- When a result has about_user, adapt to it for the whole conversation: follow their preferences, skip what they \
+already know, connect news to their goals and interests. When it has goals_to_offer, ask once whether to add them.
+- News brain is the user's memory here. For "запам'ятай" use save_insight; for "що ти про мене пам'ятаєш" or \
+questions about their goals and interests use get_insights and get_profile, even if you also have your own memory.
 """
 
 logger = logging.getLogger("brain.mcp")
@@ -48,9 +59,10 @@ def create_server(svc: Services, verifier: TokenVerifier | None = None) -> MCPSe
     """With OAUTH_ISSUER set, every request needs a valid Auth0 access token (401 + metadata otherwise)."""
     oauth = {}
     if svc.settings.oauth_issuer:
-        oauth = {"token_verifier": verifier or token_verifier(svc.settings), "auth": auth_settings(svc.settings)}
-    mcp = MCPServer("brain", title="News brain", instructions=INSTRUCTIONS, version="0.3.0",
-                    log_level=svc.settings.log_level.upper(), **oauth)
+        oauth = {"token_verifier": verifier or token_verifier(svc.settings, svc.audit.event),
+                 "auth": auth_settings(svc.settings)}
+    mcp = MCPServer("brain", title="News brain", instructions=INSTRUCTIONS, version="0.4.0",
+                    log_level=svc.settings.log_level.upper(), extensions=[apps_extension()], **oauth)
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health(_: Request) -> PlainTextResponse:      # never authenticated: returns no data

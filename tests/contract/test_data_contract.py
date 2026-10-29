@@ -37,7 +37,8 @@ async def _sample(db) -> dict[str, list[dict]]:
     channel_ids = list({p["channel_id"] for p in posts if isinstance(p.get("channel_id"), ObjectId)})
     sources = await db.sources.find({"_id": {"$in": channel_ids}}).to_list(None)
     users = await db.users.find({}, {"_id": 1, "interests": 1, "daily.date": 1, "daily.selected": 1, "goals": 1,
-                                     "feedback": {"$slice": -50}, "identities": 1}).to_list(None)
+                                     "feedback": {"$slice": -50}, "identities": 1,
+                                     "insights": {"$slice": -50}}).to_list(None)
     return {"posts": posts, "digests": digests, "sources": sources, "users": users}
 
 

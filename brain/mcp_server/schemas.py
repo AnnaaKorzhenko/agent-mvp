@@ -11,6 +11,21 @@ class Channel(BaseModel):
     country: str | None = Field(None, description="UA or RU")
 
 
+AboutUser = dict[str, list[str]]
+ABOUT_USER_HELP = ("What News brain knows about the user, by kind: summary (learned from all their activity), "
+                   "preference, goal, interest, known, avoid, fact, feedback. Follow their preferences, skip what "
+                   "they already know and what they avoid, connect news to their goals and interests")
+
+
+class MemoryOut(BaseModel):
+    """On every tool result: what the server learned from this call's user_message / signals."""
+    goals_to_offer: list[str] = Field(default_factory=list, description=(
+        "Goals detected in the user's messages that aren't active yet: ask the user once whether to add them "
+        "(set_goal)"))
+    about_user: AboutUser | None = Field(None, description=(
+        "Only on the first call of a conversation: " + ABOUT_USER_HELP))
+
+
 class PostOut(BaseModel):
     ref: int | None = Field(None, description="Number shown to the user in this result (#1, #2, …): «третя» = ref 3")
     post_id: str
@@ -25,12 +40,14 @@ class PostOut(BaseModel):
     importance: int
 
 
-class SearchResult(BaseModel):
+class SearchResult(MemoryOut):
     query: str
     search_words: list[str] = Field(description="Word stems actually searched for")
     days: int
     results: list[PostOut]
     note: str | None = None
+    shown_in_widget: bool = Field(False, description="True: the user already sees these results as cards with "
+                                                     "links; cite them as #N instead of listing them")
 
 
 class DigestItemOut(BaseModel):
@@ -60,11 +77,23 @@ class DigestOut(BaseModel):
     hidden_items: int = Field(0, description="Items withheld because this connection may not receive them")
 
 
-class DigestResult(BaseModel):
+class DigestResult(MemoryOut):
     date: str | None = Field(description="Kyiv date of the digests (YYYY-MM-DD)")
     digests: list[DigestOut]
     missing_sides: list[str] = Field(description="Sides with no digest for that date")
     note: str | None = None
+    shown_in_widget: bool = Field(False, description="True: the user already sees this digest as an interactive "
+                                                     "widget; do not repeat or summarize it in your reply")
+
+
+class MorningDigestResult(DigestResult):
+    status: Literal["new", "not_ready", "already_sent"] = Field(description=(
+        "new: today's digest, delivered now (present it); not_ready: no complete digest for today yet; "
+        "already_sent: today's digest was delivered before (don't present it again)"))
+
+
+class PostDetail(PostOut, MemoryOut):
+    """get_post's result: the post plus the memory fields."""
 
 
 class CategoryScore(BaseModel):
@@ -78,20 +107,69 @@ class TagScore(BaseModel):
     score: float
 
 
-class ProfileOut(BaseModel):
+class InsightCount(BaseModel):
+    saved: int = Field(description="Insights the user has saved")
+    visible_here: int = Field(description="Of those, how many this connection may read with get_insights")
+
+
+class ProfileOut(MemoryOut):
     categories_today: dict[str, list[str]] = Field(description="Categories the user picked this morning, per side")
     goals: list[str]
     top_categories: list[CategoryScore]
     top_tags: list[TagScore]
+    insights: InsightCount = InsightCount(saved=0, visible_here=0)
+    about_user: AboutUser = Field(default_factory=dict, description=ABOUT_USER_HELP)
 
 
-class GoalsOut(BaseModel):
+SignalKind = Literal["goal", "interest", "preference", "fact", "feedback", "known"]
+
+
+class Signal(BaseModel):
+    """Something durable the user revealed in a message (input to log_turn)."""
+    kind: SignalKind = Field(description=(
+        "goal: what they want to achieve; interest: topics they care about; preference: how they want answers "
+        "or news (length, language, format, what to skip); fact: about their work, organization, people, "
+        "situation; feedback: about your answers or the service; known: something they already know"))
+    text: str = Field(min_length=2, max_length=500, description=(
+        "The user's own words for it (quote them; a minimal paraphrase only if needed), in their language"))
+    private: bool = Field(False, description="True only if the user said it's private / not to be recalled")
+
+
+class TurnLogged(MemoryOut):
+    saved: int = Field(description="Signals saved as new insights")
+    duplicates: int = Field(0, description="Signals already saved before")
+
+
+class InsightSaved(MemoryOut):
+    insight_id: str
+    sensitivity: Literal["public", "internal", "confidential", "restricted"] | str
+    visible_here: bool = Field(description="False: saved, but this connection can't read it back (its label is "
+                                           "above what this connection may receive)")
+    confirmation: str = Field(description="Short Ukrainian confirmation to tell the user")
+
+
+class InsightOut(BaseModel):
+    insight_id: str
+    text: str = Field(description="The user's own words, verbatim")
+    area: str | None
+    tags: list[str]
+    sensitivity: str
+    created_at: str | None
+
+
+class InsightsResult(MemoryOut):
+    insights: list[InsightOut]
+    hidden: int = Field(0, description="Matching insights this connection may not read")
+    note: str | None = None
+
+
+class GoalsOut(MemoryOut):
     goals: list[str] = Field(description="The user's active goals after the change")
     added: str | None = None
     removed: str | None = None
 
 
-class FeedbackOut(BaseModel):
+class FeedbackOut(MemoryOut):
     feedback_id: str = Field(description="Id of this rating; pass it back to add the user's comment or reasons")
     target_type: Literal["post", "digest_item", "answer", "suggestion"] | str
     reaction: Literal["useful", "not_useful", "neutral"] | str

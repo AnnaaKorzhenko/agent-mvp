@@ -94,6 +94,26 @@ class InterestsDoc(_Doc):
     tag_scores: dict[str, float] = {}
 
 
+class InsightDoc(_Doc):
+    """users.insights[]: what the user shared (save_insight) or the client model detected (log_turn)."""
+    id: Id
+    kind: str = "other"
+    origin: str = "explicit"
+    text: str
+    area: str | None = None
+    tags: Annotated[list[str], BeforeValidator(_as_list)] = []
+    sensitivity: str = "internal"
+    created_at: datetime | None = None
+    channel: str | None = None
+    conversation_id: Id | None = None
+    message_id: Id | None = None
+
+
+class InsightLabelDoc(_Doc):
+    """What get_profile reads of an insight: only its label, for the count (never the text)."""
+    sensitivity: str = "confidential"
+
+
 class UserProfileDoc(_Doc):
     """users read WITHOUT feedback (see UsersRepo.PROFILE_PROJECTION).
 
@@ -105,6 +125,7 @@ class UserProfileDoc(_Doc):
     interests: InterestsDoc = InterestsDoc()
     goals: Annotated[list[GoalDoc], BeforeValidator(_as_list)] = []
     identities: Annotated[list[IdentityDoc], BeforeValidator(_as_list)] = []
+    insights: Annotated[list[InsightLabelDoc], BeforeValidator(_as_list)] = []
 
     def as_scoring_user(self) -> dict:
         """The plain dict shape that brain.domain.scoring functions expect."""

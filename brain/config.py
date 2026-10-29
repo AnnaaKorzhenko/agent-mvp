@@ -53,8 +53,11 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = Field(None, alias="ANTHROPIC_API_KEY")
     anthropic_model: str = Field("claude-opus-5-5", alias="ANTHROPIC_MODEL")
 
-    # --- Audit ---
+    # --- Audit and conversation log ---
     audit_ttl_days: int = Field(180, alias="AUDIT_TTL_DAYS")
+    # A new conversations document after this much inactivity, or once one holds this many messages
+    conversation_idle_minutes: int = Field(30, ge=1, alias="CONVERSATION_IDLE_MINUTES")
+    conversation_max_messages: int = Field(500, ge=10, alias="CONVERSATION_MAX_MESSAGES")
     log_level: str = Field("INFO", alias="LOG_LEVEL")
 
     @field_validator("dev_user_id", mode="before")

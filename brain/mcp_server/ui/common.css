@@ -1,0 +1,63 @@
+/* Shared by every widget: Claude's style variables when the host sends them, else the fallbacks. */
+  :root {
+    --bg: var(--color-background-primary, #ffffff);
+    --card: var(--color-background-secondary, #f6f5f2);
+    --text: var(--color-text-primary, #1f1e1d);
+    --muted: var(--color-text-secondary, #6b6a66);
+    --border: var(--color-border-tertiary, #e3e1db);
+    --accent: var(--color-text-info, #2f6fb3);
+    --ok: var(--color-text-success, #2e7d4f);
+    --bad: var(--color-text-danger, #b3261e);
+    --warn-bg: var(--color-background-warning, #fbf1d9);
+    --radius: var(--border-radius-lg, 12px);
+    --font: var(--font-sans, system-ui, -apple-system, "Segoe UI", sans-serif);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--color-background-primary, #1f1e1d); --card: var(--color-background-secondary, #2a2927);
+      --text: var(--color-text-primary, #ecebe8); --muted: var(--color-text-secondary, #a8a6a0);
+      --border: var(--color-border-tertiary, #3a3936); --accent: var(--color-text-info, #7fb0e8);
+      --ok: var(--color-text-success, #79c79a); --bad: var(--color-text-danger, #f08a80);
+      --warn-bg: var(--color-background-warning, #3d3420);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--color-background-primary, #1f1e1d); --card: var(--color-background-secondary, #2a2927);
+    --text: var(--color-text-primary, #ecebe8); --muted: var(--color-text-secondary, #a8a6a0);
+    --border: var(--color-border-tertiary, #3a3936); --accent: var(--color-text-info, #7fb0e8);
+    --ok: var(--color-text-success, #79c79a); --bad: var(--color-text-danger, #f08a80);
+    --warn-bg: var(--color-background-warning, #3d3420);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 4px 0 8px; background: transparent; color: var(--text); font: 14px/1.45 var(--font); }
+  .side { margin: 0 0 16px; }
+  .side h2 { font-size: 15px; margin: 4px 0 8px; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; }
+  .note { font-size: 12px; color: var(--muted); font-weight: 400; }
+  .claim { background: var(--warn-bg); border-radius: 6px; padding: 1px 6px; font-size: 12px; font-weight: 500; }
+  .section h3 { font-size: 13px; color: var(--muted); font-weight: 600; margin: 12px 0 6px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; margin: 0 0 6px; }
+  .row { display: flex; gap: 8px; align-items: flex-start; }
+  .ref { flex: none; font-weight: 700; color: var(--muted); min-width: 2.2em; }
+  .text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .foot { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; justify-content: space-between;
+          margin-top: 6px; }
+  .links { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; min-width: 0; }
+  .links a { color: var(--accent); text-decoration: none; }
+  .links a:hover { text-decoration: underline; }
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .more { margin: 2px 0 0; }
+  [hidden] { display: none !important; }
+  button { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
+           border-radius: 999px; padding: 2px 10px; min-height: 30px; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:disabled { opacity: .5; cursor: default; }
+  button[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); font-weight: 600; }
+  .status { font-size: 12px; color: var(--muted); }
+  .status.ok { color: var(--ok); }
+  .status.error { color: var(--bad); }
+  .comment { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+  textarea { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border);
+             border-radius: 8px; padding: 6px 8px; width: 100%; min-height: 56px; resize: vertical; }
+  .empty { color: var(--muted); padding: 8px 0; }
+  @media (max-width: 420px) { body { font-size: 15px; } button { min-height: 40px; padding: 6px 14px; } }
+  .meta { font-size: 12px; color: var(--muted); margin: 0 0 2px; display: flex; flex-wrap: wrap; gap: 2px 8px; }

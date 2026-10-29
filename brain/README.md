@@ -49,14 +49,19 @@ Then choose "Streamable HTTP" with the URL `http://127.0.0.1:8000/mcp`.
 
 | Tool | What it returns |
 |---|---|
-| `get_digest(side, date)` | The daily digest(s) in the user's order, with links and post ids. Russian items are flagged as claims. |
-| `search_posts(query, side, category, days, limit)` | Ranked posts: summary, tags, channel, `post_url` |
+| `get_digest(side, date, as_text)` | The daily digest(s) in the user's order, with links and post ids. Russian items are flagged as claims. Shown as rating cards where the client renders MCP Apps; the model then gets only a short index unless `as_text` |
+| `search_posts(query, side, category, days, limit)` | Ranked posts: summary, tags, channel, `post_url`. Shown as rating cards where supported; the model is told to cite them as #N, not list them |
 | `get_post(post_id)` | One post |
 | `get_profile()` | Goals, today's categories, top categories and tags. Never feedback. |
 | `record_feedback(target_type, reaction, post_id / digest_id+item_n / about+cited_post_ids, reasons, text, feedback_id)` | Saves 👍 / 👎 / 50/50 on a post, digest item, answer or suggestion (`docs/FEEDBACK_PLAN.md`); only news ratings change scores. `feedback_id` adds a comment later |
 | `set_goal(action, text)` | Adds or removes a goal with the bot's rules (max 5 active, no duplicates; removing keeps history) |
+| `save_insight(text, area, tags, sensitivity)` | Saves knowledge the user shares, verbatim, in `users.insights`; `confidential` by default |
+| `get_insights(query, area)` | Recalls saved insights this client may read (sensitivity filter) |
+| `log_turn(user_message, previous_reply, signals)` | Records a message that needs no other tool |
 
-Every call is written to `audit_log`. Run `python -m brain.scripts.setup_indexes` once per database for the TTL index.
+Every tool takes `user_message` (required, the user's message verbatim) and `signals` (what it reveals: goals, interests, preferences, facts, feedback, things known), saved as detected insights. Results carry `goals_to_offer`, and `about_user` on the first call of a conversation. The learning job (`python -m brain.scripts.learn_profiles`, `docs/LEARNING_PLAN.md`) turns it all into `users.learned`.
+
+Every call is logged per user and session in `conversations` (`brain/audit/conversations.py`): sanitized arguments, a result summary with references only, and the user's own words verbatim. `audit_log` keeps security events only. Run `python -m brain.scripts.setup_indexes` once per database (see `docs/CONVERSATIONS_PLAN.md` §1.3 for production).
 
 ## Eval baseline
 

@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Зведення</title>
+<style>
+/*__COMMON_CSS__*/
+</style>
+</head>
+<body>
+<div id="root"><div class="empty">Завантаження зведення…</div></div>
+
+<script type="module">
+/*__EXT_APPS__*/
+</script>
+
+<script type="module">
+/*__COMMON_JS__*/
+
+const SIDE = { ua: "Українські джерела", ru: "Російські джерела" };
+const FIRST = 6;                // items shown per side before «Показати ще»
+const widget = createWidget({ name: "News brain digest", where: "у віджеті зведення" });
+
+function itemCard(digest, item) {
+  return widget.card({
+    key: `${digest.digest_id}:${item.n}`, ref: item.ref, text: item.text, body: item.text,
+    urls: item.source_urls || [],
+    target: { target_type: "digest_item", digest_id: digest.digest_id, item_n: item.n },
+  });
+}
+
+function render(data) {
+  root.replaceChildren();
+  if (!data?.digests?.length) {
+    root.append(el("div", { class: "empty" }, "Зведення за цю дату немає."));
+    return;
+  }
+  for (const digest of data.digests) {
+    const heading = el("h2", {}, SIDE[digest.side] || digest.side,
+      digest.side === "ru" ? el("span", { class: "claim" }, "заяви рос. каналів, не факти") : null,
+      data.date ? el("span", { class: "note" }, data.date) : null);
+    let shown = 0;
+    const folded = [];
+    const sections = digest.sections.map((s) => {
+      const cards = s.items.map((i) => {
+        const c = itemCard(digest, i);
+        if (++shown > FIRST) { c.hidden = true; folded.push(c); }
+        return c;
+      });
+      const section = el("div", { class: "section" }, el("h3", {}, s.title || s.category), cards);
+      if (cards.every((c) => c.hidden)) { section.hidden = true; folded.push(section); }
+      return section;
+    });
+    const rest = shown - FIRST;
+    const more = rest > 0 ? el("button", { type: "button", class: "more", onclick: () => {
+      folded.forEach((n) => { n.hidden = false; }); more.remove(); } }, `Показати ще ${rest}`) : null;
+    const hidden = digest.hidden_items
+      ? el("div", { class: "note" }, `Ще ${digest.hidden_items} пункт(и) приховано для цього підключення.`) : null;
+    root.append(el("div", { class: "side" }, heading, sections, more, hidden));
+  }
+  if (data.missing_sides?.length) {
+    root.append(el("div", { class: "note" }, "Немає зведення: " + data.missing_sides.map((s) => SIDE[s] || s).join(", ")));
+  }
+}
+
+await widget.start(render);
+</script>
+</body>
+</html>
