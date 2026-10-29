@@ -94,6 +94,28 @@ async def get_digests(repos: Repos, ctx: UserContext, side: str = "both", day: s
     return result
 
 
+MORNING_WAIT_UNTIL = 12       # Kyiv hour: until then, wait for both sides before delivering
+
+
+@dataclass
+class Morning:
+    status: str                   # "new" | "not_ready" | "already_sent"
+    result: DigestResultView | None = None
+
+
+async def morning_digest(repos: Repos, ctx: UserContext, now: datetime | None = None) -> Morning:
+    """Today's digest for the scheduled morning delivery, once per user: new only if it wasn't delivered
+    before. Before MORNING_WAIT_UNTIL it waits until both sides are in, so the user gets one complete delivery."""
+    now = (now or datetime.now(KYIV)).astimezone(KYIV)
+    res = await get_digests(repos, ctx, "both", now.date().isoformat())
+    if not res.digests or (res.missing_sides and now.hour < MORNING_WAIT_UNTIL):
+        return Morning("not_ready", res)
+    key = ",".join(sorted(v.digest.id for v in res.digests))
+    if not await repos.users.claim_morning_digest(ctx.user_id, key, now.date().isoformat(), ctx.channel):
+        return Morning("already_sent", res)
+    return Morning("new", res)
+
+
 async def _source_labels(repos: Repos, items: list[DigestItemDoc]) -> dict[str, str]:
     # Labels of the source posts, read with all labels allowed: only used to decide what to hide.
     ids = [pid for it in items for pid in it.source_post_ids]

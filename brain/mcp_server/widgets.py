@@ -7,6 +7,7 @@ connector's own sign-in, so it needs no stable origin of its own.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from functools import lru_cache
@@ -24,8 +25,6 @@ EXT_APPS = UI_DIR / "vendor" / "ext-apps-1.7.5" / "app-with-deps.js"
 PLACEHOLDER = "/*__EXT_APPS__*/"
 COMMON = {"/*__COMMON_CSS__*/": UI_DIR / "common.css", "/*__COMMON_JS__*/": UI_DIR / "common.js"}
 
-DIGEST_UI = "ui://news-brain/digest.html"
-SEARCH_UI = "ui://news-brain/search.html"
 
 
 def tool_meta(resource_uri: str) -> dict:
@@ -106,6 +105,18 @@ SEARCH_NOTE = (
     "👍 / 👎 / 50/50 buttons). Answer the user's question from them in your own words, citing items as #N; do "
     "NOT list the posts one by one or repeat their links. Ratings made with the buttons are already saved; they "
     "reach you as context, not as messages.\n")
+
+
+def _versioned(name: str) -> str:
+    """The widget's ui:// address with a hash of its content: hosts cache a resource's HTML by address, so a
+    changed widget gets a new address and is fetched again instead of running a stale copy."""
+    digest = hashlib.sha256(widget_html(name).encode()).hexdigest()[:10]
+    stem = name.rsplit(".", 1)[0]
+    return f"ui://news-brain/{stem}-{digest}.html"
+
+
+DIGEST_UI = _versioned("digest.html")
+SEARCH_UI = _versioned("search.html")
 
 
 def apps_extension() -> Apps:

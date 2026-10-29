@@ -86,6 +86,12 @@ class DigestResult(MemoryOut):
                                                      "widget; do not repeat or summarize it in your reply")
 
 
+class MorningDigestResult(DigestResult):
+    status: Literal["new", "not_ready", "already_sent"] = Field(description=(
+        "new: today's digest, delivered now (present it); not_ready: no complete digest for today yet; "
+        "already_sent: today's digest was delivered before (don't present it again)"))
+
+
 class PostDetail(PostOut, MemoryOut):
     """get_post's result: the post plus the memory fields."""
 

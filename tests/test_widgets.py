@@ -30,6 +30,13 @@ def server(test_db):
     return create_server(svc)
 
 
+def test_widget_addresses_change_with_their_content():
+    """Hosts cache a ui:// resource's HTML by address: a new widget version must get a new address."""
+    assert re.fullmatch(r"ui://news-brain/digest-[0-9a-f]{10}\.html", widgets.DIGEST_UI)
+    assert re.fullmatch(r"ui://news-brain/search-[0-9a-f]{10}\.html", widgets.SEARCH_UI)
+    assert widgets.DIGEST_UI != "ui://news-brain/digest.html"           # the cached address of the old cards
+
+
 def test_vendored_bundle_is_the_pinned_file():
     assert hashlib.sha256(widgets.EXT_APPS.read_bytes()).hexdigest() == BUNDLE_SHA256
     assert BUNDLE_SHA256 in (widgets.EXT_APPS.parent / "SOURCE.md").read_text()

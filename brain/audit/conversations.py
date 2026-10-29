@@ -43,6 +43,7 @@ USER_WORDS: dict[str, dict[str, str]] = {
 }
 CHAT_ARG = "user_message"         # on every tool: the user's latest chat message, verbatim
 WIDGET_PREFIX = "[widget]"        # user_message sent by a widget button, not typed by the user
+SCHEDULE_PREFIX = "[schedule]"    # user_message of a scheduled task (e.g. the morning digest), not typed
 # Text the client model wrote about its own replies (stored as role "assistant", never as the user's words).
 MODEL_WORDS: dict[str, dict[str, str]] = {
     "log_turn": {"previous_reply": "reply_summary"},
@@ -66,7 +67,11 @@ def _texts(mapping: dict[str, dict[str, str]], tool: str, args: dict) -> list[tu
     pairs = list(mapping.get(tool, {}).items())
     if mapping is USER_WORDS:
         text = args.get(CHAT_ARG)
-        pairs.insert(0, (CHAT_ARG, "widget" if isinstance(text, str) and text.startswith(WIDGET_PREFIX) else "chat"))
+        via = "chat"
+        if isinstance(text, str):
+            via = "widget" if text.startswith(WIDGET_PREFIX) else "schedule" if text.startswith(SCHEDULE_PREFIX) \
+                else "chat"
+        pairs.insert(0, (CHAT_ARG, via))
     for arg, via in pairs:
         text = args.get(arg)
         if isinstance(text, str) and text.strip():

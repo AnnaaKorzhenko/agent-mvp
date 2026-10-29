@@ -172,10 +172,18 @@ async def test_every_tool_requires_the_users_message(test_db, user):
                    token=lambda: None)
     async with Client(create_server(svc)) as c:
         tools = (await c.list_tools()).tools
-        assert all("user_message" in (t.input_schema.get("required") or []) for t in tools), \
-            [t.name for t in tools if "user_message" not in (t.input_schema.get("required") or [])]
+        optional = [t.name for t in tools if "user_message" not in (t.input_schema.get("required") or [])]
+        assert optional == ["record_feedback"]                     # rating cards call it directly
+        assert all("user_message" in t.input_schema["properties"] for t in tools)
         assert all("signals" in t.input_schema["properties"] for t in tools)
         assert (await c.call_tool("get_profile", {})).is_error                     # missing: refused
+        # A card opened before cards sent a message still works; the press is logged as a button press.
+        from tests.fixtures.sample_data import DIGEST_UA
+        r = await c.call_tool("record_feedback", {"target_type": "digest_item", "digest_id": str(DIGEST_UA),
+                                                  "item_n": 1, "reaction": "useful"})
+        assert not r.is_error
+    [conv] = await test_db.conversations.find({"user_id": user}).to_list(None)
+    assert [m["via"] for m in conv["messages"] if m["role"] == "user"] == ["widget"]
 
 
 async def test_any_tool_saves_signals_and_brings_the_profile_first(test_db, user):
@@ -193,16 +201,20 @@ async def test_any_tool_saves_signals_and_brings_the_profile_first(test_db, user
         assert d["goals_to_offer"] == ["знайти, куди інвестувати в морські дрони"]
         assert d["about_user"]["preference"] == ["Люблю короткі відповіді"]          # first call: the profile
         assert "About the user" in s1.content[0].text
-        # A second tool for the same message: no second copy of the message; no profile again.
-        s2 = await c.call_tool("get_digest", {"user_message": said})
+        # A second tool for the same message: no second copy of the message; no profile again (search) ...
+        s2 = await c.call_tool("search_posts", {"query": "морські дрони", "days": 30, "user_message": said})
         assert s2.structured_content.get("about_user") is None
+        # ... except the digest and the profile, which usually open a new chat: they always bring it.
+        d2 = await c.call_tool("get_digest", {"user_message": "```markdown\nПокажи зведення\n```"})
+        assert d2.structured_content["about_user"]["preference"] == ["Люблю короткі відповіді"]
         # A button press in the cards.
         await c.call_tool("record_feedback", {"target_type": "digest_item", "digest_id": str(DIGEST_UA),
                                               "item_n": 1, "reaction": "useful",
                                               "user_message": "[widget] 👍 корисно #1 «Морські дрони»"})
     [conv] = await test_db.conversations.find({"user_id": user}).to_list(None)
     users = [(m["via"], m["content"]) for m in conv["messages"] if m["role"] == "user"]
-    assert users == [("chat", said), ("search_query", "морські дрони"),
+    assert users == [("chat", said), ("search_query", "морські дрони"), ("search_query", "морські дрони"),
+                     ("chat", "Покажи зведення"),                       # the code fence removed
                      ("widget", "[widget] 👍 корисно #1 «Морські дрони»")]
     chat_id = conv["messages"][1]["id"]
     doc = await test_db.users.find_one({"_id": user})

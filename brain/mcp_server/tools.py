@@ -7,6 +7,7 @@ from __future__ import annotations
 import itertools
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Annotated, Awaitable, Callable, Literal
@@ -18,7 +19,7 @@ from mcp.server.mcpserver import Context
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import Field
 
-from brain.audit.conversations import CallRecord, ConversationLog
+from brain.audit.conversations import WIDGET_PREFIX, CallRecord, ConversationLog
 from brain.audit.log import AuditLog
 from brain.config import Settings
 from brain.db.repositories import Repos, user_key
@@ -83,8 +84,23 @@ Signals = Annotated[list[out.Signal] | None, Field(max_length=10, description=(
     "empty for plain requests, and when you already passed them for this message in another call"))]
 
 
-def _common(user_message: str, signals: list[out.Signal] | None) -> dict:
-    return {"user_message": user_message, **({"signals": [sig.model_dump() for sig in signals]} if signals else {})}
+_FENCE = re.compile(r"^```[\w-]*\s*\n(.*?)\n?```\s*$", re.S)
+
+
+def clean_message(text: str) -> str:
+    """The message as the user typed it: clients sometimes wrap it in a ```markdown code fence."""
+    text = text.strip()
+    match = _FENCE.match(text)
+    return match.group(1).strip() if match else text
+
+
+def _common(user_message: str | None, signals: list[out.Signal] | None) -> dict:
+    # No message only on record_feedback from a widget card opened before cards sent one: a button press.
+    message = clean_message(user_message) if user_message is not None else f"{WIDGET_PREFIX} (кнопка в картці)"
+    return {"user_message": message, **({"signals": [sig.model_dump() for sig in signals]} if signals else {})}
+
+
+ALWAYS_ABOUT = {"get_digest", "get_profile"}
 
 
 @dataclass
@@ -94,6 +110,29 @@ class Memory:
     duplicates: int = 0
     goals_to_offer: list[str] = field(default_factory=list)
     about_user: dict | None = None
+
+
+def _digest_out(res: digests_domain.DigestResultView, cls: type[out.DigestResult] = out.DigestResult,
+                **extra) -> out.DigestResult:
+    refs = itertools.count(1)       # one numbering across both sides: «третя» is unambiguous
+    return cls(date=res.date, missing_sides=res.missing_sides, **extra, digests=[
+        out.DigestOut(
+            side=v.digest.side, side_note=v.side_note, digest_id=v.digest.id,
+            created_at=v.digest.created_at.isoformat(), period_start=v.digest.period_start,
+            period_end=v.digest.period_end, hidden_items=v.hidden_items,
+            sections=[out.DigestSectionOut(category=s.category, title=s.title, items=[
+                out.DigestItemOut(ref=next(refs), n=v.number(i), text=i.text, source_urls=i.source_urls,
+                                  source_post_ids=i.source_post_ids,
+                                  is_russian_source_claim=v.digest.side == "ru") for i in items])
+                for s, items in v.sections])
+        for v in res.digests])
+
+
+async def _digest_done(call: "_Call", res: digests_domain.DigestResultView, result: out.DigestResult) -> None:
+    n = sum(len(s.items) for d in result.digests for s in d.sections)
+    await call.done(items=n, labels=[v.digest.sensitivity for v in res.digests],
+                    digest_ids=[d.digest_id for d in result.digests], widget=result.shown_in_widget,
+                    hidden=sum(d.hidden_items for d in result.digests))
 
 
 def _post_out(v: posts_domain.PostView) -> out.PostOut:
@@ -169,7 +208,9 @@ class _Call:
             if goals:
                 active = {g.lower() for g in (await profile_domain.get_profile(self.svc.repos, ctx)).goals}
                 self.memory.goals_to_offer = [g for g in goals if g.lower() not in active]
-            if first:
+            # The digest and the profile usually open a chat, and a new chat can't be told from the last one
+            # without a session id: they always bring the profile; other tools only after a quiet spell.
+            if first or self.name in ALWAYS_ABOUT:
                 self.memory.about_user = await insights_domain.about_user(self.svc.repos, ctx) or None
         except Exception as e:             # noqa: BLE001 - memory must never break a tool
             logger.error(f"remember() failed in {self.name}: {type(e).__name__}: {e}")
@@ -248,28 +289,49 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
 
         async def body(ctx: UserContext) -> CallToolResult:
             res = await digests_domain.get_digests(svc.repos, ctx, side, date)
-            refs = itertools.count(1)       # one numbering across both sides: «третя» is unambiguous
-            result = out.DigestResult(date=res.date, missing_sides=res.missing_sides, digests=[
-                out.DigestOut(
-                    side=v.digest.side, side_note=v.side_note, digest_id=v.digest.id,
-                    created_at=v.digest.created_at.isoformat(), period_start=v.digest.period_start,
-                    period_end=v.digest.period_end, hidden_items=v.hidden_items,
-                    sections=[out.DigestSectionOut(category=s.category, title=s.title, items=[
-                        out.DigestItemOut(ref=next(refs), n=v.number(i), text=i.text, source_urls=i.source_urls,
-                                          source_post_ids=i.source_post_ids,
-                                          is_russian_source_claim=v.digest.side == "ru") for i in items])
-                        for s, items in v.sections])
-                for v in res.digests])
+            result = _digest_out(res)
             if not result.digests:
                 result.note = "No digest found for this date. Say so; do not invent news."
             result.shown_in_widget = widget and bool(result.digests)
-            n = sum(len(s.items) for d in result.digests for s in d.sections)
-            await call.done(items=n, labels=[v.digest.sensitivity for v in res.digests],
-                            digest_ids=[d.digest_id for d in result.digests], widget=result.shown_in_widget,
-                            hidden=sum(d.hidden_items for d in result.digests))
+            await _digest_done(call, res, result)
             # What the model reads: a short index when the cards are on screen, else the full digest.
             text = widgets.digest_index(result) if result.shown_in_widget else result.model_dump_json()
             return CallToolResult(content=[TextContent(type="text", text=text)],
+                                  structured_content=result.model_dump(mode="json"))
+        return await call.run(body)
+
+    @mcp.tool(title="Morning digest, if new", meta=widgets.tool_meta(widgets.DIGEST_UI),
+              annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False,
+                                          openWorldHint=False))
+    async def get_morning_digest(
+        mcp_ctx: Context,
+        user_message: UserMessage,
+        signals: Signals = None,
+    ) -> Annotated[CallToolResult, out.MorningDigestResult]:
+        """For a scheduled morning delivery: today's digest, only if it is new for this user. status new: present
+        it (it's marked delivered now); not_ready: today's digest isn't complete yet, say nothing about news;
+        already_sent: it was delivered before, don't present it again. For a user asking for the digest in
+        chat, use get_digest instead. Present a new digest as get_digest describes (cards when shown_in_widget,
+        else text with #numbers, links, Russian items as claims)."""
+        call = _Call(svc, "get_morning_digest", _common(user_message, signals), mcp_ctx)
+        widget = widgets.client_shows_widgets(mcp_ctx)
+
+        async def body(ctx: UserContext) -> CallToolResult:
+            m = await digests_domain.morning_digest(svc.repos, ctx)
+            if m.status != "new":
+                result = out.MorningDigestResult(
+                    status=m.status, date=m.result.date if m.result else None, digests=[],
+                    missing_sides=m.result.missing_sides if m.result else [],
+                    note=("Today's digest isn't complete yet." if m.status == "not_ready"
+                          else "Today's digest was already delivered.") + " Don't present any news.")
+                await call.done(items=0)
+                return CallToolResult(content=[TextContent(type="text", text=result.model_dump_json())],
+                                      structured_content=result.model_dump(mode="json"))
+            result = _digest_out(m.result, out.MorningDigestResult, status="new")
+            result.shown_in_widget = widget and bool(result.digests)
+            await _digest_done(call, m.result, result)
+            text = widgets.digest_index(result) if result.shown_in_widget else result.model_dump_json()
+            return CallToolResult(content=[TextContent(type="text", text="status: new\n" + text)],
                                   structured_content=result.model_dump(mode="json"))
         return await call.run(body)
 
@@ -451,7 +513,11 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
                                           openWorldHint=False))
     async def record_feedback(
         mcp_ctx: Context,
-        user_message: UserMessage,
+        # Optional here only: the rating cards call this tool directly (older cards sent no message). Claude
+        # should always pass it, as with every other tool.
+        user_message: Annotated[str | None, Field(max_length=8000, description=(
+            "The user's latest chat message, verbatim and complete: the message that led to this call. "
+            "Always pass it"))] = None,
         reaction: Annotated[Literal["useful", "not_useful", "neutral", "like", "dislike", "skip"] | None, Field(
             description="useful (👍), not_useful (👎) or neutral (50/50). Omit only to add a comment to an earlier "
                         "rating (feedback_id, or the rated item's ids with text)")] = None,

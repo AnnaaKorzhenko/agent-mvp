@@ -268,6 +268,15 @@ class UsersRepo:
             fields["insights.$.message_id"] = message_id
         await self.col.update_one({"_id": user_key(user_id), "insights.id": insight_id}, {"$set": fields})
 
+    async def claim_morning_digest(self, user_id: UserId, key: str, day: str, channel: str) -> bool:
+        """Marks today's digest (`key`: its digest ids) as delivered to the user by the morning delivery.
+        Atomic: True only for the one call that delivers it; False if it was delivered before."""
+        result = await self.col.update_one(
+            {"_id": user_key(user_id), "morning_digest.key": {"$ne": key}},
+            {"$set": {"morning_digest": {"key": key, "date": day, "channel": channel,
+                                         "at": datetime.now(timezone.utc)}}})
+        return result.modified_count == 1
+
     async def get_learned(self, user_id: UserId) -> dict | None:
         """users.learned: the profile the learning job wrote (brain/learning/profile.py), if any."""
         doc = await self.col.find_one({"_id": user_key(user_id)}, {"learned": 1})
