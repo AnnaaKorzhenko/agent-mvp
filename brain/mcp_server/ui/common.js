@@ -127,7 +127,8 @@ function createWidget({ name, where }) {
         const result = await app.sendMessage({ role: "user",
           content: [{ type: "text", text: `🔎 Глибше про #${ref} «${short(text, 120)}»` }] });
         if (result?.isError) throw new Error("rejected");
-        show("Запит надіслано в чат", "ok");
+        // Claude puts it into the message box rather than sending it: the user presses Enter.
+        show("Запит у полі повідомлення: надішліть його", "ok");
       } catch {
         show(`Напишіть у чаті: «глибше про #${ref}»`, "error");
       } finally { busy(false); }

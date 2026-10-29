@@ -8,11 +8,18 @@ inferred like a learned interest), and it expires. It lives through three steps:
   chooses to follow it), so the next dive and the period analysis build on it instead of starting over;
 - track_topic(): the user confirms; the topic becomes `active` with names / broader terms / exclusions that later
   phases match against digests and posts. It expires after `days` (default TTL_DAYS) unless renewed.
+Following feeds the pipeline: every followed, unexpired topic's names go into one `sources` record
+(platform "search_keywords", name "User interests", queries [{q, region}]), the union over all users and nothing
+about who follows what. Region by the term's script: Latin -> world; Cyrillic -> ua and ru, or only ua / ru when
+the spelling has letters only that language uses (і ї є ґ / ы э ъ ё). The pipeline searches the web for them, keeps
+what it finds in posts and builds a digest with trigger "topics"; get_digest shows each user the items that match
+their own topics, first (brain/domain/digests.py).
 An active topic past expires_at reads as `expired`; nothing rewrites it. Topics are keyed by their normalized
 name, so the same name never makes two topics. Web findings are public information; a topic is `internal`.
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -39,6 +46,7 @@ RELATED_DAYS = 30
 RELATED_LIMIT = 10
 STATUSES = ("confirmed", "claim", "unclear")
 
+logger = logging.getLogger("brain.topics")
 NO_PROFILE = "No profile for this user yet. Start the Telegram bot once to create it."
 _QUOTED = re.compile(r"[«\"“]([^»\"”]{2,60})[»\"”]")
 
@@ -67,6 +75,93 @@ def _terms(values: list[str] | None) -> list[str]:
 
 def utc(dt: datetime | None) -> datetime | None:
     return dt.replace(tzinfo=timezone.utc) if dt is not None and dt.tzinfo is None else dt
+
+
+_LATIN = re.compile(r"[a-z]", re.I)
+_CYRILLIC = re.compile(r"[а-яіїєґёыэъ]", re.I)
+_ONLY_UA = re.compile(r"[іїєґ]", re.I)
+_ONLY_RU = re.compile(r"[ёыэъ]", re.I)
+REGIONS = ("ua", "ru", "world")
+
+
+def regions(term: str) -> list[str]:
+    """Where to search the web for a term, by its spelling."""
+    if _CYRILLIC.search(term):
+        if _ONLY_UA.search(term):
+            return ["ua"]
+        return ["ru"] if _ONLY_RU.search(term) else ["ua", "ru"]
+    return ["world"] if _LATIN.search(term) else []
+
+
+def missing_regions(terms: list[str]) -> list[str]:
+    """Regions none of the terms reaches: the client should add those spellings (e.g. a Latin one for world)."""
+    covered = {r for t in terms for r in regions(t)}
+    return [r for r in REGIONS if r not in covered]
+
+
+def keyword_queries(active: list[TopicDoc]) -> list[dict]:
+    """The pipeline's queries for these topics: {q, region} for each name once per region, sorted (stable for
+    comparing). Only names: broader phrases and look-alike words stay in the brain, which uses them for matching."""
+    out: dict[tuple[str, str], dict] = {}
+    for t in active:
+        for term in t.specific:
+            for region in regions(term):
+                out.setdefault((term.lower(), region), {"q": term, "region": region})
+    return [out[k] for k in sorted(out)]
+
+
+async def sync_queries(repos: Repos, now: datetime | None = None) -> bool:
+    """Rewrites the pipeline's keyword record from all followed, unexpired topics. True if it changed."""
+    now = now or datetime.now(timezone.utc)
+    queries = keyword_queries(await repos.users.all_active_topics(now))
+    if await repos.sources.get_keyword_queries() == queries:
+        return False
+    await repos.sources.set_keyword_queries(queries)
+    return True
+
+
+SYNC_EVERY = timedelta(minutes=30)
+_last_sync: datetime | None = None
+
+
+async def sync_if_due(repos: Repos) -> None:
+    """sync_queries at most every SYNC_EVERY per process, from digest reads: expired topics drop out of the
+    pipeline's record without a job of their own. Never raises."""
+    global _last_sync
+    now = datetime.now(timezone.utc)
+    if _last_sync is not None and now - _last_sync < SYNC_EVERY:
+        return
+    _last_sync = now
+    try:
+        await sync_queries(repos, now)
+    except Exception as e:                 # noqa: BLE001 - the digest must never fail on this
+        logger.error(f"topic keyword sync failed: {type(e).__name__}: {e}")
+
+
+_DASHES = str.maketrans({"‐": "-", "‑": "-", "–": "-", "—": "-", "’": "'", "ʼ": "'"})
+
+
+def _flat(text: str) -> str:
+    return " ".join((text or "").lower().translate(_DASHES).replace("ё", "е").split())
+
+
+def excluded(topic: TopicDoc, text: str) -> bool:
+    """A look-alike word of the topic is in the text: whatever else matches, it isn't this topic."""
+    flat = _flat(text)
+    return any(_flat(x) in flat for x in topic.exclude if x)
+
+
+def matched_term(topic: TopicDoc, text: str) -> str | None:
+    """The topic's name or alias found in the text (whole term, case-, dash- and ё-insensitive), unless a
+    look-alike word of the topic is there too."""
+    flat = _flat(text)
+    if excluded(topic, text):
+        return None
+    for term in topic.specific or [topic.name]:
+        t = _flat(term)
+        if t and re.search(rf"(?<![\w]){re.escape(t)}(?![\w])", flat):
+            return term
+    return None
 
 
 def until_text(topic: TopicDoc) -> str:
@@ -270,6 +365,7 @@ async def track_topic(repos: Repos, ctx: UserContext, name: str, *, specific: li
     if goal is not None:
         fields["goal"] = _clean(goal, 300) or None
     await repos.users.update_topic(ctx.user_id, topic.norm, fields)
+    await sync_queries(repos, now)
     return TopicResult(await _get(repos, ctx, topic.norm), created, unknown_tags=unknown)
 
 
@@ -281,8 +377,15 @@ async def stop_topic(repos: Repos, ctx: UserContext, name: str) -> TopicResult:
         raise NotFound("No such topic. The user's topics: " + ("; ".join(names) or "none"))
     await repos.users.update_topic(ctx.user_id, topic.norm, {"status": "stopped",
                                                              "updated_at": datetime.now(timezone.utc)})
+    await sync_queries(repos)
     return TopicResult(await _get(repos, ctx, topic.norm), False)
 
 
 async def list_topics(repos: Repos, ctx: UserContext) -> list[TopicDoc]:
     return await repos.users.get_topics(ctx.user_id)
+
+
+async def followed(repos: Repos, ctx: UserContext, now: datetime | None = None) -> list[TopicDoc]:
+    """The user's active, unexpired topics."""
+    now = now or datetime.now(timezone.utc)
+    return [t for t in await repos.users.get_topics(ctx.user_id) if status_of(t, now) == "active"]

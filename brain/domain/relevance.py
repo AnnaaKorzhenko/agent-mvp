@@ -2,6 +2,9 @@
 morning delivery), to rank search results, and to tell the client model why an item matters.
 
 Signals, strongest first:
+- topics the user follows (users.topics, track_topic): their name or an alias in the item, W_TRACKED each; else
+  one of their broader phrases (news on the thing that doesn't name it), W_TRACKED_NEAR; neither when a look-alike
+  word of the topic is there;
 - active goals (users.goals) and detected goals (insights kind goal). A goal matches at three levels, from the
   learned profile's goal_keywords: specific names (full weight), broader concepts (60%), themes from the fixed tag
   list (35%); and by its own words. Only the best match per goal counts, and `why` names the matched word;
@@ -26,6 +29,8 @@ W_CATEGORY = 1.0
 W_TAGS = 0.5
 W_TOPIC = 1.5            # × weight / 5, per matched topic
 W_GOAL = 2.0             # an active goal
+W_TRACKED = 3.0          # a followed topic named in the item: above any goal, so it leads «Для вас»
+W_TRACKED_NEAR = 1.5     # … or only its area (a broader phrase): still into «Для вас», below the named ones
 LEVELS = {"specific": 1.0, "broader": 0.6, "tag": 0.35}        # share of W_GOAL per match level
 TOPIC_CAP = 3.0
 W_AVOID = -1.5
@@ -96,10 +101,13 @@ class Interests:
     topics: list[Topic] = field(default_factory=list)
     avoid: list[Topic] = field(default_factory=list)
     known: list[Topic] = field(default_factory=list)
+    tracked: list = field(default_factory=list)           # TopicDoc: the user's followed topics
+    near: list[list[Topic]] = field(default_factory=list)  # per tracked topic: its broader phrases as Topics
 
     @property
     def empty(self) -> bool:
-        return not (self.categories or self.tags or self.goals or self.topics or self.avoid or self.known)
+        return not (self.categories or self.tags or self.goals or self.topics or self.avoid or self.known
+                    or self.tracked)
 
     def score(self, *, side: str | None, category: str | None, text: str, tags: list[str] = (),
               category_label: str | None = None) -> Relevance:
@@ -125,6 +133,16 @@ class Interests:
                 best = max(liked)
                 if best[0] >= 0.5 * top and part >= 0.25:           # only a strongly rated tag is a reason
                     positive.append((part, f"тема, яку ви оцінювали: {best[1]}"))
+        if self.tracked:
+            from brain.domain.topics import matched_term       # (topics imports this module through digests)
+            from brain.domain.topics import excluded
+            for t, near in zip(self.tracked, self.near):
+                if matched_term(t, haystack):
+                    r.score += W_TRACKED
+                    positive.append((W_TRACKED + 10, f"тема, яку ви відстежуєте: {t.name}"))
+                elif near and any(n.matches(haystack, tagset) for n in near) and not excluded(t, haystack):
+                    r.score += W_TRACKED_NEAR
+                    positive.append((W_TRACKED_NEAR + 10, f"близько до теми «{t.name}»"))
         topic_score = 0.0
         best: dict[str, Topic] = {}                          # per goal: its strongest matching level
         for t in self.goals:
@@ -207,6 +225,9 @@ async def load(repos: Repos, ctx: UserContext, profile: UserProfileDoc | None = 
             add(out.avoid, "уникати", a, 5)
         for k in learned.get("known") or []:
             add(out.known, "відомо", k, 5)
+    from brain.domain.topics import followed
+    out.tracked = await followed(repos, ctx)
+    out.near = [[n for b in t.broader if (n := _topic("тема", b, W_TRACKED_NEAR))] for t in out.tracked]
     for i in await repos.users.get_insights(ctx.user_id):
         if not sensitivity.is_allowed(i.sensitivity, ctx.max_sensitivity):
             continue

@@ -74,7 +74,8 @@ class DigestSectionOut(BaseModel):
 
 
 class DigestOut(BaseModel):
-    side: Literal["ua", "ru"] | str
+    side: Literal["ua", "ru", "topics"] | str = Field(description=(
+        "topics: today's news on the topics the user follows (sections per topic), shown first"))
     side_note: str | None = None
     digest_id: str
     created_at: str
@@ -252,4 +253,7 @@ class TopicSaved(MemoryOut):
     added_findings: int = 0
     duplicate_findings: int = Field(0, description="Findings skipped: their URL was already saved")
     unknown_tags: list[str] = Field(default_factory=list, description="Dropped: not in the fixed tag list")
+    missing_regions: list[str] = Field(default_factory=list, description=(
+        "Regions (ua / ru / world) no name of the topic reaches, so the web search there finds nothing: call "
+        "track_topic again adding those spellings (world: Latin; ua: Ukrainian; ru: Russian)"))
     confirmation: str = Field(description="Short Ukrainian confirmation to tell the user")

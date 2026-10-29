@@ -119,12 +119,12 @@ def _digest_out(res: digests_domain.DigestResultView, cls: type[out.DigestResult
     refs = itertools.count(1)       # one numbering across both sides: «третя» is unambiguous
     return cls(date=res.date, missing_sides=res.missing_sides, **extra, digests=[
         out.DigestOut(
-            side=v.digest.side, side_note=v.side_note, digest_id=v.digest.id,
+            side=v.side, side_note=v.side_note, digest_id=v.digest.id,
             created_at=v.digest.created_at.isoformat(), period_start=v.digest.period_start,
             period_end=v.digest.period_end, hidden_items=v.hidden_items,
             sections=[out.DigestSectionOut(category=s.category, title=s.title, items=[
                 out.DigestItemOut(ref=next(refs), n=v.number(i), text=i.text, source_urls=i.source_urls,
-                                  source_post_ids=i.source_post_ids, is_russian_source_claim=v.digest.side == "ru",
+                                  source_post_ids=i.source_post_ids, is_russian_source_claim=v.claim(i),
                                   why=v.why(i).why, relevance=v.why(i).score) for i in items])
                 for s, items in v.sections])
         for v in res.digests])
@@ -292,8 +292,9 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
     async def get_digest(
         mcp_ctx: Context,
         user_message: UserMessage,
-        side: Annotated[Literal["ua", "ru", "both"], Field(
-            description="ua: Ukrainian sources; ru: Russian sources (claims, not facts); both: both")] = "both",
+        side: Annotated[Literal["ua", "ru", "topics", "both"], Field(
+            description="ua: Ukrainian sources; ru: Russian sources (claims, not facts); topics: only news on the "
+                        "topics the user follows; both: all of it (the default)")] = "both",
         date: Annotated[str | None, Field(
             description="Kyiv date YYYY-MM-DD; omit for the latest digest")] = None,
         as_text: Annotated[bool, Field(description=(
@@ -301,7 +302,8 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
         signals: Signals = None,
     ) -> Annotated[CallToolResult, out.DigestResult]:
         """Get the user's daily news digest: sections ordered by the user's interests, every item with its
-        source links (source_urls) and post ids (source_post_ids).
+        source links (source_urls) and post ids (source_post_ids). If the user follows topics (track_topic), the
+        first digest (side "topics") holds today's news on them, one section per topic: lead with it.
 
         If the result says shown_in_widget, the user already sees the digest as interactive cards with rating
         buttons: do not repeat, list or summarize it; reply with one short sentence at most, unless the user
@@ -315,6 +317,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
         widget = not as_text and widgets.client_shows_widgets(mcp_ctx)
 
         async def body(ctx: UserContext) -> CallToolResult:
+            await topics_domain.sync_if_due(svc.repos)
             res = await digests_domain.get_digests(svc.repos, ctx, side, date)
             result = _digest_out(res)
             if not result.digests:
@@ -344,6 +347,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
         widget = widgets.client_shows_widgets(mcp_ctx)
 
         async def body(ctx: UserContext) -> CallToolResult:
+            await topics_domain.sync_if_due(svc.repos)
             m = await digests_domain.morning_digest(svc.repos, ctx)
             if m.status != "new":
                 result = out.MorningDigestResult(
@@ -713,10 +717,15 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
             "follow: start or renew following it; stop: stop following it"))] = "follow",
         specific: Annotated[list[str] | None, Field(max_length=20, description=(
             "follow: names and aliases as Ukrainian, Russian and English news write them (e.g. «Спектр-К», "
-            "«Spektr-K»); each must point at this thing by itself"))] = None,
+            "«Spektr-K», «Spectr-K»); each must point at this thing by itself. The news pipeline searches the "
+            "web for exactly these: Cyrillic ones in Ukrainian and Russian sources, Latin ones worldwide, so "
+            "give at least one Latin spelling and the Ukrainian and Russian forms where they differ. If the topic "
+            "is an area rather than a named thing (e.g. «оптоволоконні FPV»), its key phrases are its names: "
+            "put them here, in all three languages"))] = None,
         broader: Annotated[list[str] | None, Field(max_length=20, description=(
             "follow: short phrases for the thing's area, Ukrainian and Russian forms (e.g. «захист відеоканалу "
-            "від РЕБ», «видеоприемник FPV»)"))] = None,
+            "від РЕБ», «видеоприемник FPV»): they lift news on it that doesn't name it; never searched on the web"))]
+        = None,
         exclude: Annotated[list[str] | None, Field(max_length=20, description=(
             "follow: words that mark a look-alike that is NOT this topic (other products with a similar name)"))]
         = None,
@@ -748,6 +757,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
                                                     digest_id=digest_id, item_n=item_n, post_id=post_id)
                 confirmation = f"Відстежую «{r.topic.name}» до {topics_domain.until_text(r.topic)}"
             await call.done(items=1)
+            missing = topics_domain.missing_regions(r.topic.specific) if action == "follow" else []
             return out.TopicSaved(topic=_topic_out(r.topic), created=r.created, unknown_tags=r.unknown_tags,
-                                  confirmation=confirmation)
+                                  missing_regions=missing, confirmation=confirmation)
         return await call.run(body)

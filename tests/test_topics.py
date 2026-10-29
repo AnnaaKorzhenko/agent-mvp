@@ -136,3 +136,147 @@ def test_the_cards_have_the_deeper_button():
     for name in ("digest.html", "search.html"):
         html = widgets.widget_html(name)
         assert "app.sendMessage" in html and "🔎 Глибше про #" in html
+
+
+# ---- phase C: the pipeline's keyword record and the tracked-topics digest ---------------------------------
+
+from bson import ObjectId                                                        # noqa: E402
+
+from brain.domain import digests                                                 # noqa: E402
+from tests.fixtures.sample_data import NOW, load_samples                         # noqa: E402
+
+_own = itertools.count()
+P_SPEKTR = ObjectId("66a0000000000000000000a1")
+
+
+@pytest.fixture
+async def own(test_db):
+    """A database of its own with the sample data: the keyword record spans all users, and the topics digest
+    must not reach other tests."""
+    db = test_db.client[f"{test_db.name}_t{next(_own)}"]
+    await load_samples(db)
+    yield db
+    await test_db.client.drop_database(db.name)
+
+
+async def add_user(db):
+    doc = copy.deepcopy(USERS[0])
+    doc["_id"] = next(_ids)
+    await db.users.insert_one(doc)
+    return doc["_id"]
+
+
+def test_regions_by_spelling():
+    assert topics.regions("Спектр-К") == ["ua", "ru"]
+    assert topics.regions("відеоприймач Спектр") == ["ua"] and topics.regions("видеоприёмник") == ["ru"]
+    assert topics.regions("Spektr-K") == ["world"] and topics.regions("12") == []
+    assert topics.missing_regions(["Спектр-К"]) == ["world"]
+    assert topics.missing_regions(["Спектр-К", "Spektr-K"]) == []
+
+
+def test_a_topic_is_named_in_the_text_not_a_look_alike():
+    t = topics.TopicDoc(id="1", name="Спектр-К", norm="спектр-к", specific=["Спектр-К", "Spektr-K"],
+                        exclude=["Спектр-ТВ"])
+    assert topics.matched_term(t, "Видеоприемники «Спектр‑К» работают выше 12 ГГц") == "Спектр-К"   # other dash
+    assert topics.matched_term(t, "SPEKTR-K receivers") == "Spektr-K"
+    assert topics.matched_term(t, "Спектр-КА") is None and topics.matched_term(t, "спектр частот") is None
+    assert topics.matched_term(t, "Спектр-К і Спектр-ТВ") is None                    # a look-alike is mentioned
+
+
+async def test_the_keyword_record_follows_every_users_active_topics(own):
+    repos = Repos(own)
+    a, b, c = await add_user(own), await add_user(own), await add_user(own)
+    await topics.track_topic(repos, cloud(a), "Спектр-К", specific=["Spektr-K", "Spectr-K"], exclude=["Спектр-ТВ"])
+    await topics.track_topic(repos, cloud(b), "спектр-к")                           # the same name, another user
+    await topics.track_topic(repos, cloud(b), "Магура", specific=["Magura V5"])
+    await topics.track_topic(repos, cloud(c), "Ланцет")
+    await topics.stop_topic(repos, cloud(c), "Ланцет")                               # stopped: out
+    await topics.save_findings(repos, cloud(c), "Герань-5", FOUND[:1])              # explored only: out
+    doc = await own.sources.find_one({"platform": "search_keywords", "name": "User interests"})
+    assert sorted(doc) == ["_id", "name", "platform", "queries"]                    # exactly the agreed shape
+    assert doc["queries"] == [
+        {"q": "Magura V5", "region": "world"}, {"q": "Spectr-K", "region": "world"},
+        {"q": "Spektr-K", "region": "world"}, {"q": "Магура", "region": "ru"}, {"q": "Магура", "region": "ua"},
+        {"q": "Спектр-К", "region": "ru"}, {"q": "Спектр-К", "region": "ua"}]
+    assert await topics.sync_queries(repos) is False                                # unchanged: no write
+    # An expired topic drops out at the next sync.
+    await own.users.update_one({"_id": b, "topics.norm": "магура"},
+                               {"$set": {"topics.$.expires_at": datetime.now(timezone.utc) - timedelta(hours=1)}})
+    assert await topics.sync_queries(repos) is True
+    queries = (await own.sources.find_one({"platform": "search_keywords"}))["queries"]
+    assert not any(q["q"].startswith(("Магура", "Magura")) for q in queries)
+
+
+async def test_each_user_sees_their_own_topics_first(own):
+    repos = Repos(own)
+    await own.posts.insert_one({"_id": P_SPEKTR, "post_url": "https://t.me/ru_war_channel/9", "channel_id": None,
+                                "published_at": NOW.isoformat(), "summary": "Видеоприемники «Спектр-К» для FPV.",
+                                "source_side": "ru", "category": "ru_tech", "tags": [], "processed": True})
+    await own.digests.insert_one({
+        "_id": ObjectId(), "period": "day", "trigger": "topics", "side": "ua", "created_at": NOW,
+        "sections": [{"category": "topics", "title": "Теми", "items": [
+            {"text": "Нова партія приймачів для FPV.", "source_urls": ["https://x.org/1"],
+             "source_post_ids": [P_SPEKTR], "n": 1},                                 # named only in its post
+            {"text": "Магура V5 уразила ціль.", "source_urls": ["https://x.org/2"], "source_post_ids": [], "n": 2},
+            {"text": "Brave1 оголосив новий грант.", "source_urls": ["https://x.org/3"], "source_post_ids": [],
+             "n": 3}]}]})
+    me, other = await add_user(own), await add_user(own)
+    await topics.track_topic(repos, cloud(me), "Brave1")
+    await topics.track_topic(repos, cloud(me), "Спектр-К")
+    await topics.track_topic(repos, cloud(other), "Магура")
+
+    res = await digests.get_digests(repos, cloud(me), "both")
+    first, *rest = res.digests
+    assert first.kind == "topics" and [s.title for s, _ in first.sections] == ["⭐ Brave1", "⭐ Спектр-К"]
+    assert [[i.text for i in items] for _, items in first.sections] == [
+        ["Brave1 оголосив новий грант."], ["Нова партія приймачів для FPV."]]          # not the other user's
+    spektr = first.sections[1][1][0]
+    assert first.claim(spektr) and not first.claim(first.sections[0][1][0])          # its source is Russian
+    assert first.why(spektr).why == ["тема, яку ви відстежуєте: Спектр-К"]
+    # The sides keep their own digests (the newer topics digest has side "ua", yet isn't the ua digest).
+    assert [v.digest.id for v in rest] == [str(DIGEST_UA), str((await own.digests.find_one({"side": "ru"}))["_id"])]
+    ua = rest[0]
+    brave = next(i for s, items in ua.sections for i in items if "Brave1" in i.text)
+    assert ua.why(brave).why[0] == "тема, яку ви відстежуєте: Brave1" and ua.sections[0][0].title == "⭐ Для вас"
+    only = await digests.get_digests(repos, cloud(me), "topics")
+    assert [v.kind for v in only.digests] == ["topics"] and only.missing_sides == []
+    # Someone without topics gets the digest as before; nothing from the topics digest.
+    plain = await digests.get_digests(repos, cloud(await add_user(own)), "both")
+    assert [v.kind for v in plain.digests] == [None, None]
+    # The morning delivery's key is the sides' digests: a topics digest doesn't make it new again.
+    m = await digests.morning_digest(repos, cloud(me), datetime.now(digests.KYIV).replace(hour=13))
+    assert m.status == "new" and str(DIGEST_UA) in (await own.users.find_one({"_id": me}))["morning_digest"]["key"]
+    key = (await own.users.find_one({"_id": me}))["morning_digest"]["key"]
+    assert "," in key and all(v.digest.id in key for v in rest) and first.digest.id not in key
+
+
+async def test_track_topic_reports_missing_spellings(test_db, user):
+    svc = Services(settings=make_settings(DEV_USER_ID=user, TRUST_LEVEL="cloud"), repos=Repos(test_db),
+                   audit=AuditLog(test_db), token=lambda: None)
+    async with Client(create_server(svc)) as c:
+        r = await c.call_tool("track_topic", {"user_message": "стеж", "name": "Аюдаг-6"})
+        assert r.structured_content["missing_regions"] == ["world"]
+        r = await c.call_tool("track_topic", {"user_message": "стеж", "name": "Аюдаг-6",
+                                              "specific": ["Ayudag-6"]})
+        assert r.structured_content["missing_regions"] == []
+
+
+async def test_broader_phrases_lift_news_that_doesnt_name_the_topic(own):
+    from brain.domain import relevance
+    repos = Repos(own)
+    me = await add_user(own)
+    await topics.track_topic(repos, cloud(me), "Спектр-К", specific=["Spektr-K"],
+                             broader=["відеоприймач FPV", "захист відеоканалу від РЕБ"], exclude=["Спектр-ТВ"])
+    prefs = await relevance.load(repos, cloud(me))
+
+    def why(text):
+        return prefs.score(side="ua", category="other", text=text)
+
+    named, near = why("Нові приймачі «Спектр-К» на фронті"), why("Росіяни отримали нові відеоприймачі для FPV")
+    assert named.why[0] == "тема, яку ви відстежуєте: Спектр-К" and named.score >= relevance.W_TRACKED
+    assert near.why[0] == "близько до теми «Спектр-К»" and relevance.W_TRACKED_NEAR <= near.score < named.score
+    assert near.score >= digests.FOR_YOU_MIN                                      # still into «Для вас»
+    assert why("Відеоприймач FPV від Спектр-ТВ").why == [] and why("Новини про погоду").why == []
+    # Broader phrases never go to the pipeline's keyword record.
+    queries = (await own.sources.find_one({"platform": "search_keywords"}))["queries"]
+    assert [q["q"] for q in queries] == ["Spektr-K", "Спектр-К", "Спектр-К"]

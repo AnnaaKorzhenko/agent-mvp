@@ -122,6 +122,18 @@ class SourcesRepo:
                 out[src.id] = src
         return out
 
+    # The one record the pipeline reads for web searches on users' tracked topics (agreed 2026-10-29).
+    KEYWORDS = {"platform": "search_keywords", "name": "User interests"}
+
+    async def get_keyword_queries(self) -> list[dict] | None:
+        doc = await self.col.find_one(self.KEYWORDS, {"queries": 1})
+        return None if doc is None else doc.get("queries") or []
+
+    async def set_keyword_queries(self, queries: list[dict]) -> None:
+        """Replaces the queries of the keywords record (created on first use). Exactly the agreed shape:
+        {platform, name, queries: [{q, region}]}, nothing else, no user data."""
+        await self.col.update_one(self.KEYWORDS, {"$set": {"queries": queries}}, upsert=True)
+
 
 class DigestsRepo:
     def __init__(self, db: AsyncDatabase):
@@ -133,11 +145,23 @@ class DigestsRepo:
         base: dict = {"period": period, "side": side}
         if start or end:
             base["created_at"] = {**({"$gte": start} if start else {}), **({"$lt": end} if end else {})}
-        for query in ({**base, "trigger": "scheduled"}, base):
+        # trigger "topics" is the pipeline's digest of users' tracked topics: never a side's digest.
+        for query in ({**base, "trigger": "scheduled"}, {**base, "trigger": {"$ne": "topics"}}):
             async for doc in self.col.find(query).sort("created_at", -1).limit(5):
                 digest = parse(DigestDoc, doc, "digests")
                 if digest and digest.sections:
                     return digest
+        return None
+
+    async def latest_topics(self, start: datetime | None = None, end: datetime | None = None) -> DigestDoc | None:
+        """The latest digest of tracked topics (trigger "topics"), any side and period."""
+        query: dict = {"trigger": "topics"}
+        if start or end:
+            query["created_at"] = {**({"$gte": start} if start else {}), **({"$lt": end} if end else {})}
+        async for doc in self.col.find(query).sort("created_at", -1).limit(5):
+            digest = parse(DigestDoc, doc, "digests")
+            if digest and digest.sections:
+                return digest
         return None
 
     async def get(self, digest_id: str | ObjectId) -> DigestDoc | None:
@@ -320,6 +344,16 @@ class UsersRepo:
         result = await self.col.update_one({"_id": user_key(user_id), "topics.norm": norm}, update,
                                            array_filters=[{"t.norm": norm}])
         return result.matched_count == 1
+
+    async def all_active_topics(self, now: datetime) -> list[TopicDoc]:
+        """Every user's followed, unexpired topics: names and terms only (for the pipeline's keyword record)."""
+        pipeline = [{"$match": {"topics.status": "active"}}, {"$unwind": "$topics"},
+                    {"$match": {"topics.status": "active", "topics.expires_at": {"$gt": now}}},
+                    {"$project": {"_id": 0, "id": "$topics.id", "name": "$topics.name", "norm": "$topics.norm",
+                                  "status": "$topics.status", "specific": "$topics.specific",
+                                  "exclude": "$topics.exclude"}}]
+        docs = await (await self.col.aggregate(pipeline)).to_list(None)
+        return [t for t in (parse(TopicDoc, d, "users") for d in docs) if t]
 
     async def get_learned(self, user_id: UserId) -> dict | None:
         """users.learned: the profile the learning job wrote (brain/learning/profile.py), if any."""

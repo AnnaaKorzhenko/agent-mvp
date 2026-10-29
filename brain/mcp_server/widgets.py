@@ -88,11 +88,12 @@ def digest_index(result: out.DigestResult) -> str:
         "Ratings made with the buttons are already saved; they reach you as context, not as messages.",
         "Index (ref · side · category · digest_id/n · source post ids · opening words · why it matters to the "
         "user). Items are ordered by the user's goals and interests; items marked RU are claims of Russian "
-        "channels, not facts:",
+        "channels, not facts; items marked TOPIC are news on topics the user follows (category = the topic):",
     ]
     for d, s, i in items:
         why = f" · для користувача: {'; '.join(i.why)}" if i.why else ""
-        lines.append(f"#{i.ref} {'RU' if d.side == 'ru' else 'UA'} · {s.category} · {d.digest_id}/{i.n} · "
+        origin = ("TOPIC " if d.side == "topics" else "") + ("RU" if i.is_russian_source_claim else "UA")
+        lines.append(f"#{i.ref} {origin} · {s.title if d.side == 'topics' else s.category} · {d.digest_id}/{i.n} · "
                      f"{','.join(i.source_post_ids[:3])} · «{_short(i.text)}»{why}")
     for d in result.digests:
         if d.hidden_items:
