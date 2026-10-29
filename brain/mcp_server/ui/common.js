@@ -1,11 +1,13 @@
 // Shared by every widget (inlined by brain/mcp_server/widgets.py ahead of the page's own script).
 // A card shows one rated thing with 👍 / 👎 / 50/50; a press calls record_feedback through the host, then
 // offers «Чому?». Every rating made in the widget is sent to the model as context. 🔎 puts «Глибше про #N …» into
-// the chat as the user's message: the model then runs deep_dive and searches the web (only it can).
+// the chat as the user's message: the model then runs deep_dive and searches the web (only it can). 📌 puts
+// «Відстежувати тему з #N …»: the model names the topic in three languages and calls track_topic.
 const { App, applyDocumentTheme, applyHostStyleVariables, applyHostFonts } = globalThis.__mcpExtApps;
 
 const REACTIONS = [["useful", "👍"], ["not_useful", "👎"], ["neutral", "50/50"]];
 const LABEL = { useful: "👍 корисно", not_useful: "👎 не корисно", neutral: "50/50" };
+const TRACKED = "тема, яку ви відстежуєте: ";      // the server's `why` for an item naming a followed topic
 const root = document.getElementById("root");
 
 function el(tag, attrs = {}, ...children) {
@@ -67,8 +69,9 @@ function createWidget({ name, where }) {
   }
 
   // key: unique per rated thing; ref: the number the user sees; text: what the model is told was rated;
-  // body: nodes above the buttons; urls: source links; target: record_feedback ids for this thing.
-  function card({ key, ref, text, body, urls = [], target }) {
+  // body: nodes above the buttons; urls: source links; target: record_feedback ids for this thing;
+  // why: the server's reasons (an item already naming a followed topic shows 📌 as done).
+  function card({ key, ref, text, body, urls = [], target, why = [] }) {
     const status = el("span", { class: "status", role: "status" });
     const box = el("textarea", { placeholder: "Чому? (необов'язково)", maxlength: "2000", "aria-label": "Коментар" });
     const send = el("button", { type: "button" }, "Надіслати");
@@ -79,9 +82,20 @@ function createWidget({ name, where }) {
       onclick: () => rate(reaction),
     }, label));
     const deeper = el("button", { type: "button", class: "deeper", title: "Глибше: знайти більше, зокрема в інтернеті",
-                                  "aria-label": "Глибше", onclick: () => dig() }, "🔎");
+                                  "aria-label": "Глибше", onclick: () => toChat(`🔎 Глибше про #${ref} «${short(text, 120)}»`,
+                                                                               `глибше про #${ref}`) }, "🔎");
+    const followed = why.find((w) => w.startsWith(TRACKED))?.slice(TRACKED.length);
+    const track = el("button", { type: "button", class: "deeper",
+      title: followed ? `Уже відстежується: ${followed}` : "Відстежувати цю тему в наступних зведеннях",
+      "aria-label": followed ? "Уже відстежується" : "Відстежувати тему", "aria-pressed": followed ? "true" : "false",
+      onclick: () => toChat(`📌 Відстежувати тему з #${ref} «${short(text, 120)}»`, `відстежуй тему з #${ref}`),
+    }, "📌");
+    if (followed) track.disabled = true;
 
-    function busy(on) { for (const b of [...buttons, deeper, send, skip]) b.disabled = on; }
+    function busy(on) {
+      for (const b of [...buttons, deeper, send, skip]) b.disabled = on;
+      track.disabled = on || Boolean(followed);
+    }
     function show(message, kind = "") { status.textContent = message; status.className = "status " + kind; }
 
     async function rate(reaction) {
@@ -121,16 +135,16 @@ function createWidget({ name, where }) {
         show("Не вдалося зберегти коментар: " + (e?.message || e), "error");
       } finally { busy(false); }
     }
-    async function dig() {
+    // A request for the model, as the user's message. fallback: what to type if the host refuses.
+    async function toChat(message, fallback) {
       busy(true);
       try {
-        const result = await app.sendMessage({ role: "user",
-          content: [{ type: "text", text: `🔎 Глибше про #${ref} «${short(text, 120)}»` }] });
+        const result = await app.sendMessage({ role: "user", content: [{ type: "text", text: message }] });
         if (result?.isError) throw new Error("rejected");
         // Claude puts it into the message box rather than sending it: the user presses Enter.
         show("Запит у полі повідомлення: надішліть його", "ok");
       } catch {
-        show(`Напишіть у чаті: «глибше про #${ref}»`, "error");
+        show(`Напишіть у чаті: «${fallback}»`, "error");
       } finally { busy(false); }
     }
 
@@ -141,7 +155,7 @@ function createWidget({ name, where }) {
       el("div", { class: "row" }, el("span", { class: "ref" }, `#${ref}`),
          el("div", { class: "text" }, body,
             el("div", { class: "foot" }, el("div", { class: "links" }, urls.map((u) => link(u))),
-               el("div", { class: "actions" }, status, deeper, buttons)))),
+               el("div", { class: "actions" }, status, deeper, track, buttons)))),
       comment);
   }
 

@@ -89,6 +89,9 @@ questions count more than one mention). Drop topics with only weak, old evidence
 «this topic» mean what "about" names). A comment asking for more on something specific is strong evidence: add \
 an interest named by that specific thing itself (the system, model, company or event from "about", written as \
 «назва: що саме цікавить»), weight 4-5, not a general «wants details».
+- followed_topics: specific things the user chose to follow in their news (strong, explicit evidence): each \
+should be among the interests, named by the topic itself, weight 4-5, while it is followed; drop such an \
+interest once the topic is no longer followed unless other evidence keeps it.
 - goal_candidates: goals they expressed that are not in their active goals.
 - summary: 2-4 sentences: who they are (work, role, organization if stated) and what they need from the service.
 - goal_keywords: ONLY for each goal in goals_to_map (copy its text exactly into "goal"); the other active goals \
@@ -124,6 +127,8 @@ class Activity:
     withheld: int = 0                      # items above the backend's label, not sent
     labels: list[str] = field(default_factory=list)    # labels of everything sent
     goals_without_keywords: list[str] = field(default_factory=list)   # active goals the profile doesn't map yet
+    # Topics the user follows now: context for every run, not new activity (following one doesn't start a run).
+    followed_topics: list[dict] = field(default_factory=list)
 
     @property
     def label(self) -> str:
@@ -140,7 +145,8 @@ class Activity:
         previous = {k: v for k, v in (self.previous or {}).items() if k != "goal_keywords"}
         return {"previous_profile": previous, "active_goals": self.goals,
                 "goals_to_map": self.goals_without_keywords[:MAP_PER_RUN], "tag_list": list(TAG_LIST),
-                "chat_messages": self.chat, "ratings": self.feedback, "insights": self.insights}
+                "followed_topics": self.followed_topics, "chat_messages": self.chat, "ratings": self.feedback,
+                "insights": self.insights}
 
     def size(self) -> int:
         return len(json.dumps(self.payload(), ensure_ascii=False))
@@ -220,7 +226,9 @@ async def collect(db: AsyncDatabase, user_id, max_label: str, since: datetime | 
     at or below `max_label`."""
     key = user_key(user_id) if not isinstance(user_id, int) else user_id
     user = await db.users.find_one({"_id": key}, {"learned": 1, "goals": 1, "insights": 1,
-                                                 "feedback": {"$slice": -1000}}) or {}
+                                                 "feedback": {"$slice": -1000}, "topics.name": 1,
+                                                 "topics.status": 1, "topics.expires_at": 1, "topics.goal": 1,
+                                                 "topics.created_at": 1, "topics.origin.text": 1}) or {}
     learned = user.get("learned") or {}
     since = since or learned.get("processed_until")
     if since is not None and since.tzinfo is None:
@@ -230,12 +238,21 @@ async def collect(db: AsyncDatabase, user_id, max_label: str, since: datetime | 
         previous = None                     # learned from data this backend may not see: start fresh
     act = Activity(user_id=key, previous=previous,
                    goals=[g["text"] for g in user.get("goals") or [] if g.get("active")])
+    now = datetime.now(timezone.utc)
+    for t in user.get("topics") or []:
+        ends = t.get("expires_at")
+        if t.get("status") == "active" and ends and (ends if ends.tzinfo else ends.replace(tzinfo=timezone.utc)) > now:
+            act.followed_topics.append({k: v for k, v in {
+                "name": t.get("name"), "since": _day(t.get("created_at")), "goal": t.get("goal"),
+                "started_from": _cut((t.get("origin") or {}).get("text")) or None}.items() if v})
     if previous:
         act.labels.append(learned.get("sensitivity", CHAT_LABEL))
     mapped = {_norm(g.get("goal", "")) for g in (previous or {}).get("goal_keywords") or []}
     act.goals_without_keywords = [g for g in act.goals if _norm(g) not in mapped]
     if act.goals_without_keywords and not act.labels:
         act.labels.append(CHAT_LABEL)
+    if act.followed_topics:
+        act.labels.append("internal")                  # topics are internal (brain/domain/topics.py)
     stamps: list[datetime] = []
 
     chat_allowed = sensitivity.is_allowed(CHAT_LABEL, max_label)

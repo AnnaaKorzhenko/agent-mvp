@@ -135,7 +135,7 @@ def test_the_cards_have_the_deeper_button():
     from brain.mcp_server import widgets
     for name in ("digest.html", "search.html"):
         html = widgets.widget_html(name)
-        assert "app.sendMessage" in html and "🔎 Глибше про #" in html
+        assert "app.sendMessage" in html and "🔎 Глибше про #" in html and "📌 Відстежувати тему з #" in html
 
 
 # ---- phase C: the pipeline's keyword record and the tracked-topics digest ---------------------------------
@@ -311,3 +311,24 @@ async def test_the_digest_asks_to_renew(test_db, user):
         assert renew["name"] == "Аюдаг-6" and not renew["expired"] and "Аюдаг-6" in r.content[0].text
         r = await c.call_tool("get_digest", {"user_message": "ще раз"})
         assert r.structured_content["topics_to_renew"] == []                    # asked already today
+
+
+async def test_followed_topics_reach_about_user_and_the_learning_job(own):
+    from brain.domain import insights
+    from brain.learning import profile
+    repos = Repos(own)
+    me = await add_user(own)
+    await topics.track_topic(repos, cloud(me), "Спектр-К", specific=["Spektr-K"], goal="Track new technology",
+                             digest_id=str(DIGEST_UA), item_n=3)
+    await topics.track_topic(repos, cloud(me), "Ланцет")
+    await topics.stop_topic(repos, cloud(me), "Ланцет")                          # stopped: neither
+    await topics.save_findings(repos, cloud(me), "Герань-5", FOUND[:1])         # explored only: neither
+    about = await insights.about_user(repos, cloud(me))
+    [line] = about["tracked"]
+    assert line.startswith("Спектр-К (до ") and "Track new technology" in line
+    act = await profile.collect(own, me, "internal")
+    assert act.followed_topics == [{"name": "Спектр-К", "since": act.followed_topics[0]["since"],
+                                    "goal": "Track new technology", "started_from": "Brave1 видав гранти на РЕБ."}]
+    assert act.payload()["followed_topics"] == act.followed_topics
+    await own.users.update_one({"_id": me}, {"$set": {"feedback": [], "goals": []}})
+    assert (await profile.collect(own, me, "internal")).empty   # context only: following doesn't start a run

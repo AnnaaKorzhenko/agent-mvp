@@ -37,7 +37,7 @@ function postCard(post) {
   return widget.card({
     key: post.post_id, ref: post.ref, text: post.summary, body: [meta, post.summary, whyLine(post.why)],
     urls: post.post_url ? [post.post_url] : [],
-    target: { target_type: "post", post_id: post.post_id },
+    target: { target_type: "post", post_id: post.post_id }, why: post.why || [],
   });
 }
 

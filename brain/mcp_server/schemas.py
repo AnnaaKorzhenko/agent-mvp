@@ -13,8 +13,9 @@ class Channel(BaseModel):
 
 AboutUser = dict[str, list[str]]
 ABOUT_USER_HELP = ("What News brain knows about the user, by kind: summary (learned from all their activity), "
-                   "preference, goal, interest, known, avoid, fact, feedback. Follow their preferences, skip what "
-                   "they already know and what they avoid, connect news to their goals and interests")
+                   "preference, goal, interest, tracked (specific topics they follow, with the date it ends), "
+                   "known, avoid, fact, feedback. Follow their preferences, skip what they already know and what "
+                   "they avoid, connect news to their goals, interests and tracked topics")
 
 
 class MemoryOut(BaseModel):

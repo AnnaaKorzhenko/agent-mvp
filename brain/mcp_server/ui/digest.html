@@ -31,7 +31,7 @@ function itemCard(digest, item) {
              ? el("div", { class: "meta" }, el("span", { class: "claim" }, "заява рос. джерела, не факт")) : null,
            item.text, whyLine(item.why)],
     urls: item.source_urls || [],
-    target: { target_type: "digest_item", digest_id: digest.digest_id, item_n: item.n },
+    target: { target_type: "digest_item", digest_id: digest.digest_id, item_n: item.n }, why: item.why || [],
   });
 }
 

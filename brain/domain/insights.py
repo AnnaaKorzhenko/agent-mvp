@@ -121,7 +121,8 @@ LEARNED_KEYS = {"preferences": "preference", "known": "known", "avoid": "avoid",
 
 async def about_user(repos: Repos, ctx: UserContext) -> dict[str, list[str]]:
     """For the client model to adapt its answers, bounded in size: the learned profile first (users.learned,
-    written by the learning job, if this client may read it), then the newest readable insights per kind."""
+    written by the learning job, if this client may read it), the topics the user follows, then the newest
+    readable insights per kind."""
     out: dict[str, list[str]] = {}
     used = 0
     seen: set[str] = set()
@@ -147,6 +148,10 @@ async def about_user(repos: Repos, ctx: UserContext) -> dict[str, list[str]]:
                 add(kind, text)
         for i in learned.get("interests") or []:
             add("interest", f"{i['topic']} ({i['weight']}/5)")
+
+    from brain.domain import topics                     # (topics imports posts, which imports this module's deps)
+    for t in await topics.followed(repos, ctx):
+        add("tracked", f"{t.name} (до {topics.until_text(t)})" + (f": для цілі «{t.goal}»" if t.goal else ""))
 
     items = await repos.users.get_insights(ctx.user_id)
     items = [i for i in items if sensitivity.is_allowed(i.sensitivity, ctx.max_sensitivity)]

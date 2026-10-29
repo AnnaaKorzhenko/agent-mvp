@@ -51,6 +51,11 @@ search the web yourself (the news base rarely has more on one incident), answer 
 what you found with save_findings, and ask once whether to follow the topic (track_topic). Web results are not \
 from the news base: say where each fact comes from. When a digest result has topics_to_renew, ask once, in one \
 line, whether to keep following them.
+- "📌 Відстежувати тему з #N «…»" (a card's button) is the user asking to follow what that item is about: no \
+deep dive and no confirmation needed. Pick the specific thing (system, model, company, program); ask only if the \
+item names several. Call track_topic with its name, its spellings in Ukrainian, Russian and Latin, broader \
+phrases, look-alikes to exclude, tags, the goal it serves and the item's ids; then confirm in one line and offer \
+a deep dive.
 - Every News brain tool takes user_message (the user's latest message, verbatim) and signals (durable things it \
 reveals: goals, interests, preferences, facts about their work, feedback, things they already know, in their \
 words). For a message that needs no other News brain tool (thanks, corrections, opinions, things about \
