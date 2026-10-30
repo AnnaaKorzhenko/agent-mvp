@@ -201,6 +201,21 @@ async def sync_queries(repos: Repos, now: datetime | None = None) -> bool:
     return True
 
 
+PIPELINE_LABELS = ["public", "internal"]       # profiles whose interests may become pipeline searches
+
+
+async def sync_profile_queries(repos: Repos, now: datetime | None = None) -> bool:
+    """Rewrites the pipeline's «Profile interests» record from every user's lasting interests
+    (brain/domain/interests.profile_queries). True if it changed."""
+    from brain.domain import interests
+    record = repos.sources.PROFILE_KEYWORDS
+    queries = interests.profile_queries(await repos.users.all_learned_interests(PIPELINE_LABELS), now)
+    if await repos.sources.get_keyword_queries(record) == queries:
+        return False
+    await repos.sources.set_keyword_queries(queries, record)
+    return True
+
+
 RENEW_NOTICE_DAYS = 3
 RENEW_GRACE_DAYS = 2
 

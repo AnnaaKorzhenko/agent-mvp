@@ -5,7 +5,7 @@
 
 --show-payload  prints what would be sent, without calling the model (free)
 --dry-run       calls the model and prints the new profile, without saving it
-(neither)       calls the model and saves users.learned
+(neither)       calls the model, saves users.learned and proposes the goals it found
 --since DATE    reprocesses activity from that UTC date (default: since the last run), e.g. after a fix of what
                 the job sees; the previous profile is still merged in
 
@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from brain.audit.log import AuditLog
 from brain.config import get_settings
 from brain.db.client import close_client, get_client
+from brain.db.repositories import Repos
 from brain.integrations.backends import get_backend
 from brain.learning import profile
 
@@ -69,7 +70,8 @@ async def main(db_name: str | None, user: str | None, backend_name: str | None, 
             print("  dry run: not saved")
         else:
             await profile.save(db, act, outcome)
-            print("  saved to users.learned")
+            await profile.after_save(Repos(db), act, outcome, profile_keywords=settings.profile_keywords)
+            print("  saved to users.learned (goal candidates proposed)")
     if total_in or total_out:
         print(f"\ntotal: {total_in} input + {total_out} output tokens")
     await close_client()

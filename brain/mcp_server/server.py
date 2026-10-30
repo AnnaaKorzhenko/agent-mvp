@@ -60,6 +60,9 @@ item names several. Call track_topic with its name, its spellings in Ukrainian, 
 (phrases that find this thing on the web and nothing else, the name in double quotes: never a lone everyday \
 word), broader phrases, look-alikes to exclude, tags, the goal it serves and the item's ids; then confirm in one line and offer \
 a deep dive.
+- A digest result's proposals are the system's own suggestions (a goal it noticed, a topic to follow): nothing \
+changes until the user says yes. In the widget they are cards with buttons; otherwise mention each once, in one \
+line, and on the user's clear yes or no call answer_proposal. Never answer one for the user.
 - Every News brain tool takes user_message (the user's latest message, verbatim) and signals (durable things it \
 reveals: goals, interests, preferences, facts about their work, feedback, things they already know, in their \
 words). For a message that needs no other News brain tool (thanks, corrections, opinions, things about \

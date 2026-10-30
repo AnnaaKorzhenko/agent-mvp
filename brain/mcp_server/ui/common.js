@@ -3,7 +3,8 @@
 // then offers «Чому?». Every rating made in the widget is sent to the model as context. «Глибше» puts «Глибше про
 // #N …» into the chat as the user's message: the model then runs deep_dive and searches the web (only it can).
 // «Відстежувати» puts «Відстежувати тему з #N …»: the model names the topic in three languages and calls
-// track_topic. Labels are plain text, no emoji: some desktops have no emoji font and show empty boxes.
+// track_topic. A proposal card (an agent's suggestion) calls answer_proposal: «Так» does what it says, «Не цікаво»
+// closes it. Labels are plain text, no emoji: some desktops have no emoji font and show empty boxes.
 const { App, applyDocumentTheme, applyHostStyleVariables, applyHostFonts } = globalThis.__mcpExtApps;
 
 const REACTIONS = [["useful", "Корисно"], ["not_useful", "Не корисно"], ["neutral", "50/50"]];
@@ -51,14 +52,19 @@ function errorText(result, fallback) {
 function createWidget({ name, where }) {
   const app = new App({ name, version: "1.0.0" }, {}, { autoResize: true });
   const ratings = new Map();      // card key -> {ref, text, reaction, feedback_id, comment}
+  const answers = new Map();      // proposal_id -> {title, accepted, done}
 
-  // The model sees only the latest context update, so always send every rating made in this widget.
+  // The model sees only the latest context update, so always send every rating and answer made in this widget.
   async function syncModelContext() {
     const lines = [...ratings.values()].map((r) =>
       `- #${r.ref} «${short(r.text)}»: ${LABEL[r.reaction]}` + (r.comment ? `; коментар: «${r.comment}»` : "") +
       ` (feedback_id ${r.feedback_id})`);
+    const answered = [...answers.values()].map((a) =>
+      `- пропозиція «${short(a.title)}»: ${a.accepted ? "так" : "не цікаво"} (${a.done})`);
     const text = `Оцінки, які користувач поставив кнопками ${where} (уже збережено, record_feedback повторно ` +
-                 "не викликати; коментар до оцінки можна додати через її feedback_id):\n" + lines.join("\n");
+                 "не викликати; коментар до оцінки можна додати через її feedback_id):\n" + lines.join("\n") +
+                 (answered.length ? "\nВідповіді на пропозиції (уже збережено, answer_proposal повторно не " +
+                                    "викликати):\n" + answered.join("\n") : "");
     try { await app.updateModelContext({ content: [{ type: "text", text }] }); } catch { /* host may not support it */ }
   }
 
@@ -160,6 +166,35 @@ function createWidget({ name, where }) {
       comment);
   }
 
+  // An agent's suggestion (a digest's proposals): «Так, …» does what it says, «Не цікаво» closes it.
+  function proposal(p) {
+    const status = el("span", { class: "status", role: "status" });
+    const yes = el("button", { type: "button" }, `Так, ${p.yes}`);
+    const no = el("button", { type: "button" }, "Не цікаво");
+    async function send(answer) {
+      yes.disabled = no.disabled = true;
+      status.textContent = "Зберігаю…"; status.className = "status";
+      try {
+        const user_message = `[widget] ${answer === "accept" ? "так" : "не цікаво"}: пропозиція «${short(p.title)}»`;
+        const result = await app.callServerTool({ name: "answer_proposal",
+                                                  arguments: { proposal_id: p.proposal_id, answer, user_message } });
+        const out = payload(result);
+        if (result.isError || !out?.done) throw new Error(errorText(result, "Не вдалося зберегти"));
+        answers.set(p.proposal_id, { title: p.title, accepted: answer === "accept", done: out.done });
+        status.textContent = "✓ " + out.done; status.className = "status ok";
+        await syncModelContext();
+      } catch (e) {
+        status.textContent = "Не вдалося зберегти: " + (e?.message || e); status.className = "status error";
+        yes.disabled = no.disabled = false;
+      }
+    }
+    yes.addEventListener("click", () => send("accept"));
+    no.addEventListener("click", () => send("dismiss"));
+    return el("div", { class: "card proposal" },
+      el("div", { class: "text" }, el("strong", {}, p.title), p.why ? el("div", { class: "why" }, p.why) : null,
+         el("div", { class: "foot" }, el("div", { class: "links" }), el("div", { class: "actions" }, status, yes, no))));
+  }
+
   // Handlers before connect(), so the first notifications are not missed.
   // A result not meant for cards (the user asked for text, or there is nothing to show; Claude writes it
   // instead) leaves the widget empty: zero height, so the host shows nothing.
@@ -175,5 +210,5 @@ function createWidget({ name, where }) {
     applyContext(app.getHostContext());
   }
 
-  return { app, card, link, start };
+  return { app, card, link, proposal, start };
 }

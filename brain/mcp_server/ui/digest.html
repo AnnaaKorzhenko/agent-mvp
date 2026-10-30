@@ -41,6 +41,11 @@ function render(data) {
     root.append(el("div", { class: "empty" }, "Зведення за цю дату немає."));
     return;
   }
+  if (data.proposals?.length) {
+    root.append(el("div", { class: "side proposals" },
+      el("h2", {}, "Пропозиції", el("span", { class: "note" }, "система помітила; нічого не зміниться без вашого «Так»")),
+      data.proposals.map((p) => widget.proposal(p))));
+  }
   for (const digest of data.digests) {
     const heading = el("h2", {}, SIDE[digest.side] || digest.side,
       digest.side === "ru" ? el("span", { class: "claim" }, "заяви рос. каналів, не факти") : null,

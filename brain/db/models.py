@@ -157,6 +157,29 @@ class TopicDoc(_Doc):
     sensitivity: str = "internal"
 
 
+class ProposalActionDoc(_Doc):
+    tool: str                        # what a yes does: set_goal | track_topic (brain/domain/proposals.py)
+    args: dict = {}
+
+
+class ProposalDoc(_Doc):
+    """users.proposals[]: something an agent suggests to the user; nothing changes until they say yes."""
+    id: Id
+    kind: str                        # goal | topic
+    key: str                         # dedupe: the same thing is never proposed twice, whatever the answer was
+    title: str
+    why: str = ""
+    action: ProposalActionDoc | None = None
+    agent: str = ""
+    status: str = "open"             # open | accepted | dismissed | stale
+    created_at: datetime | None = None
+    expires_at: datetime | None = None
+    shown_at: datetime | None = None
+    shown_count: int = 0
+    answered_at: datetime | None = None
+    sensitivity: str = "internal"
+
+
 class UserProfileDoc(_Doc):
     """users read WITHOUT feedback (see UsersRepo.PROFILE_PROJECTION).
 

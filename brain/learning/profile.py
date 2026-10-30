@@ -15,12 +15,13 @@ import re
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from pymongo.asynchronous.database import AsyncDatabase
 
 from brain.db.repositories import user_key
+from brain.domain import interests as interests_domain
 from brain.domain import sensitivity
 from brain.domain.tag_list import TAG_LIST
 from brain.integrations.backends import ModelBackend, ModelResult
@@ -40,6 +41,31 @@ CHAT_LABEL = "internal"         # what the chat, feedback and the learned profil
 class Interest(BaseModel):
     topic: str = Field(max_length=80)
     weight: int = Field(ge=1, le=5)
+    origin: Literal["stated", "inferred"] = "inferred"
+    signals: list[str] = Field(default_factory=list, max_length=8)     # evidence kinds in this run's activity
+    web_queries: list[str] = Field(default_factory=list, max_length=3)
+
+    @field_validator("signals")
+    @classmethod
+    def _known_signals(cls, v: list[str]) -> list[str]:
+        return [s for s in dict.fromkeys(v) if s in interests_domain.SIGNALS]
+
+    @field_validator("web_queries")
+    @classmethod
+    def _queries(cls, v: list[str]) -> list[str]:
+        return [" ".join(q.split())[:120] for q in v if q and q.strip()]
+
+
+class Intent(BaseModel):
+    """What the user is working on now (a report, a choice, a trip): a short, strong boost that expires."""
+    text: str = Field(max_length=200)
+    terms: list[str] = Field(default_factory=list, max_length=8)
+    days: int = Field(7, ge=1, le=30)
+
+    @field_validator("terms")
+    @classmethod
+    def _short(cls, terms: list[str]) -> list[str]:
+        return [" ".join(t.split())[:60] for t in terms if t and t.strip()]
 
 
 class GoalMatch(BaseModel):
@@ -65,6 +91,7 @@ class LearnedProfile(BaseModel):
     summary: str = Field(max_length=700, description="Who the user is and what they need, 2-4 sentences")
     preferences: list[str] = Field(default_factory=list, max_length=12)
     interests: list[Interest] = Field(default_factory=list, max_length=15)
+    intents: list[Intent] = Field(default_factory=list, max_length=5)
     known: list[str] = Field(default_factory=list, max_length=12)
     avoid: list[str] = Field(default_factory=list, max_length=10)
     goal_candidates: list[str] = Field(default_factory=list, max_length=5)
@@ -81,8 +108,21 @@ of news items and answers (with reasons and comments), and things they shared or
 (insights, with a kind). Update the profile:
 - Merge new evidence with the previous profile. When statements conflict, the newer one wins.
 - preferences: how they want answers and news (length, format, language, what to include or skip).
-- interests: topics they care about, weight 1-5 by how strong and repeated the evidence is (ratings and repeated \
-questions count more than one mention). Drop topics with only weak, old evidence.
+- interests: lasting topics they care about, weight 1-5 by how strong and repeated the evidence is (ratings and \
+repeated questions count more than one mention). Drop topics with only weak, old evidence. Also infer interests \
+they never named: what their searches (chat messages with via search_query), questions, deep dives \
+(«Глибше про …») and ratings keep coming back to. For each:
+  - origin: "stated" if they said it in their own words («мене цікавить …», a goal, a followed topic), else \
+"inferred";
+  - signals: the kinds of evidence for it in the NEW activity of this run, from: rating, comment, search, chat, \
+deep_dive, follow, suggestion (a yes or no to a proposal); [] if it comes only from the previous profile;
+  - web_queries: 1-3 web search phrases of 2-6 words that find news on exactly this interest and nothing else, in \
+Ukrainian, Russian or English, the name of the thing in «…» for an exact match (e.g. «НРК» для штурмових груп, \
+морські дрони «Magura» атаки); none for an interest too broad to search.
+- intents: what they are working on right now, with a near end (preparing a report, choosing a supplier, a \
+meeting, a trip), from their messages and searches; not lasting interests. Each: text (one line), terms (2-8 \
+words or phrases as Ukrainian and Russian news would write them), days (1-30: how long it likely stays relevant). \
+Keep previous intents that still apply, drop the finished ones; [] if there are none.
 - known: things they said they already know (don't repeat these to them).
 - avoid: topics or kinds of news they rated as not useful repeatedly or said they don't want.
 - Each rating's "about" is the text of the rated news item; its "comment" refers to that item («this device», \
@@ -110,7 +150,8 @@ city names alone, no broad field names («ППО», «дрони»): put those i
 - Only state what the evidence supports; no guesses. Write the texts in Ukrainian, short.
 Answer with one JSON object only, no other text. Inside strings never use the " character: write quotes as «…». \
 Exactly these keys:
-{"summary": str, "preferences": [str], "interests": [{"topic": str, "weight": 1-5}], "known": [str], \
+{"summary": str, "preferences": [str], "interests": [{"topic": str, "weight": 1-5, "origin": str, \
+"signals": [str], "web_queries": [str]}], "intents": [{"text": str, "terms": [str], "days": int}], "known": [str], \
 "avoid": [str], "goal_candidates": [str], \
 "goal_keywords": [{"goal": str, "specific": [str], "broader": [str], "tags": [str]}]}"""
 
@@ -129,6 +170,7 @@ class Activity:
     goals_without_keywords: list[str] = field(default_factory=list)   # active goals the profile doesn't map yet
     # Topics the user follows now: context for every run, not new activity (following one doesn't start a run).
     followed_topics: list[dict] = field(default_factory=list)
+    previous_written: datetime | None = None   # when the previous profile was saved (for its older interests)
 
     @property
     def label(self) -> str:
@@ -142,7 +184,8 @@ class Activity:
     def payload(self) -> dict:
         # The previous profile without its goal mappings (long; kept and merged by save()), and only the goals
         # that still need one: each run stays small however many goals the user has.
-        previous = {k: v for k, v in (self.previous or {}).items() if k != "goal_keywords"}
+        previous = {k: v for k, v in interests_domain.for_model(self.previous or {}).items()
+                    if k != "goal_keywords"} if self.previous else {}
         return {"previous_profile": previous, "active_goals": self.goals,
                 "goals_to_map": self.goals_without_keywords[:MAP_PER_RUN], "tag_list": list(TAG_LIST),
                 "followed_topics": self.followed_topics, "chat_messages": self.chat, "ratings": self.feedback,
@@ -236,7 +279,7 @@ async def collect(db: AsyncDatabase, user_id, max_label: str, since: datetime | 
     previous = {k: learned[k] for k in LearnedProfile.model_fields if k in learned} or None
     if previous and not sensitivity.is_allowed(learned.get("sensitivity", CHAT_LABEL), max_label):
         previous = None                     # learned from data this backend may not see: start fresh
-    act = Activity(user_id=key, previous=previous,
+    act = Activity(user_id=key, previous=previous, previous_written=learned.get("updated_at"),
                    goals=[g["text"] for g in user.get("goals") or [] if g.get("active")])
     now = datetime.now(timezone.utc)
     for t in user.get("topics") or []:
@@ -365,12 +408,33 @@ def merged_goal_keywords(act: Activity, new: list[GoalMatch]) -> list[dict]:
 
 async def save(db: AsyncDatabase, act: Activity, outcome: Outcome) -> None:
     last = outcome.calls[-1]
+    now = datetime.now(timezone.utc)
     profile = outcome.profile.model_dump()
     profile["goal_keywords"] = merged_goal_keywords(act, outcome.profile.goal_keywords)
-    doc = {**profile, "processed_until": act.until, "updated_at": datetime.now(timezone.utc),
+    profile["interests"] = interests_domain.merge((act.previous or {}).get("interests"), profile["interests"], now,
+                                                  act.previous_written)
+    profile["intents"] = interests_domain.merge_intents(profile["intents"], now)
+    doc = {**profile, "processed_until": act.until, "updated_at": now,
            "backend": last.backend, "model": last.model, "sensitivity": act.label,
            "input": {"chat": len(act.chat), "feedback": len(act.feedback), "insights": len(act.insights)}}
     await db.users.update_one({"_id": act.user_id}, {"$set": {"learned": doc}})
+
+
+async def after_save(repos, act: Activity, outcome: Outcome, *, profile_keywords: bool = False) -> None:
+    """What follows a saved profile: the goals it found become proposals (the user's yes adds them), and with
+    `profile_keywords` the pipeline's profile keyword record is rebuilt. Never raises: the profile is saved."""
+    from brain.domain import proposals, topics           # (domain modules; the learning job is below them)
+    try:
+        active = {_norm(g) for g in act.goals}
+        for text in outcome.profile.goal_candidates:
+            if _norm(text) not in active:
+                await proposals.propose(repos, act.user_id, kind="goal", title=text, agent="learner",
+                                        why="ви про це говорили, а такої цілі ще немає",
+                                        action={"tool": "set_goal", "args": {"text": text}}, label=act.label)
+        if profile_keywords:
+            await topics.sync_profile_queries(repos)
+    except Exception as e:                 # noqa: BLE001
+        logger.error(f"after learning {act.user_id}: {type(e).__name__}: {e}")
 
 
 async def users_with_activity(db: AsyncDatabase) -> list:

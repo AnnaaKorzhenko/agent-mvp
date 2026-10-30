@@ -16,7 +16,7 @@ from pydantic import BaseModel, ValidationError
 from pymongo.errors import DuplicateKeyError
 from pymongo.asynchronous.database import AsyncDatabase
 
-from brain.db.models import DigestDoc, InsightDoc, PostDoc, SourceDoc, TopicDoc, UserProfileDoc
+from brain.db.models import DigestDoc, InsightDoc, PostDoc, ProposalDoc, SourceDoc, TopicDoc, UserProfileDoc
 
 logger = logging.getLogger("brain.db")
 
@@ -122,17 +122,19 @@ class SourcesRepo:
                 out[src.id] = src
         return out
 
-    # The one record the pipeline reads for web searches on users' tracked topics (agreed 2026-10-29).
+    # The records the pipeline reads for web searches: users' followed topics (agreed 2026-10-29), and their
+    # lasting interests (the same shape; written only with PROFILE_KEYWORDS on, docs/AGENT_PLAN.md §4 ①).
     KEYWORDS = {"platform": "search_keywords", "name": "User interests"}
+    PROFILE_KEYWORDS = {"platform": "search_keywords", "name": "Profile interests"}
 
-    async def get_keyword_queries(self) -> list[dict] | None:
-        doc = await self.col.find_one(self.KEYWORDS, {"queries": 1})
+    async def get_keyword_queries(self, record: dict = KEYWORDS) -> list[dict] | None:
+        doc = await self.col.find_one(record, {"queries": 1})
         return None if doc is None else doc.get("queries") or []
 
-    async def set_keyword_queries(self, queries: list[dict]) -> None:
-        """Replaces the queries of the keywords record (created on first use). Exactly the agreed shape:
+    async def set_keyword_queries(self, queries: list[dict], record: dict = KEYWORDS) -> None:
+        """Replaces the queries of a keywords record (created on first use). Exactly the agreed shape:
         {platform, name, queries: [{q, region}]}, nothing else, no user data."""
-        await self.col.update_one(self.KEYWORDS, {"$set": {"queries": queries}}, upsert=True)
+        await self.col.update_one(record, {"$set": {"queries": queries}}, upsert=True)
 
 
 class DigestsRepo:
@@ -363,6 +365,40 @@ class UsersRepo:
                                   "exclude": "$topics.exclude", "queries": "$topics.queries"}}]
         docs = await (await self.col.aggregate(pipeline)).to_list(None)
         return [t for t in (parse(TopicDoc, d, "users") for d in docs) if t]
+
+    async def get_proposals(self, user_id: UserId) -> list[ProposalDoc]:
+        doc = await self.col.find_one({"_id": user_key(user_id)}, {"proposals": 1})
+        return [p for p in (parse(ProposalDoc, x, "users") for x in (doc or {}).get("proposals") or []) if p]
+
+    async def push_proposal(self, user_id: UserId, proposal: dict, keep: int) -> str:
+        """Appends a proposal unless one with the same `key` exists (in any status), keeping the newest `keep`.
+        Returns "ok", "duplicate" or "no_user"."""
+        key = user_key(user_id)
+        result = await self.col.update_one(
+            {"_id": key, "proposals.key": {"$ne": proposal["key"]}},
+            {"$push": {"proposals": {"$each": [proposal], "$slice": -keep}}})
+        if result.matched_count:
+            return "ok"
+        return "duplicate" if await self.col.count_documents({"_id": key}, limit=1) else "no_user"
+
+    async def update_proposal(self, user_id: UserId, proposal_id: ObjectId, fields: dict,
+                              status: str | None = None, inc: dict | None = None) -> bool:
+        """Sets `fields` on proposal `proposal_id`, only while its status is `status` (if given)."""
+        cond: dict = {"p.id": proposal_id, **({"p.status": status} if status else {})}
+        update: dict = {"$set": {f"proposals.$[p].{k}": v for k, v in fields.items()}}
+        if inc:
+            update["$inc"] = {f"proposals.$[p].{k}": v for k, v in inc.items()}
+        result = await self.col.update_one({"_id": user_key(user_id), "proposals.id": proposal_id}, update,
+                                           array_filters=[cond])
+        return result.modified_count == 1
+
+    async def all_learned_interests(self, labels: list[str]) -> list[dict]:
+        """Every user's learned interests (with the profile's write time), of profiles labelled within `labels`:
+        for the pipeline's profile keyword record, which holds no user data."""
+        cursor = self.col.find({"learned.interests.0": {"$exists": True},
+                                "learned.sensitivity": {"$in": labels}},
+                               {"_id": 0, "learned.interests": 1, "learned.updated_at": 1})
+        return [d["learned"] async for d in cursor]
 
     async def get_learned(self, user_id: UserId) -> dict | None:
         """users.learned: the profile the learning job wrote (brain/learning/profile.py), if any."""

@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     learning_cooldown_minutes: int = Field(30, ge=0, alias="LEARNING_COOLDOWN_MINUTES")
     learning_max_runs_per_day: int = Field(20, ge=0, alias="LEARNING_MAX_RUNS_PER_DAY")
     learning_backend: Literal["local", "anthropic"] | None = Field(None, alias="LEARNING_BACKEND")  # default: MODEL_BACKEND
+    # Agents (docs/AGENT_PLAN.md): tokens one user's runs of one agent may use per UTC day.
+    agent_user_tokens_per_day: int = Field(300_000, ge=0, alias="AGENT_USER_TOKENS_PER_DAY")
+    # Write the pipeline's second keyword record («Profile interests») from users' lasting interests. Off until the
+    # pipeline reads it (agreed with the pipeline's owner).
+    profile_keywords: bool = Field(False, alias="PROFILE_KEYWORDS")
 
     # --- Audit and conversation log ---
     audit_ttl_days: int = Field(180, alias="AUDIT_TTL_DAYS")

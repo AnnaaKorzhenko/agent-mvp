@@ -9,29 +9,35 @@ with an OAuth login):
   the strongest signal there is («more on this device»), so it doesn't wait for the threshold;
 - a rating counts toward LEARNING_FEEDBACK_THRESHOLD ratings since the last run; at the threshold, and at least
   LEARNING_COOLDOWN_MINUTES after the last run, it starts a run.
-The job's own writes (learned, learning_lock, last_seen) don't trigger anything. Runs go in the background, so the
+The job's own writes (learned, proposals, last_seen) don't trigger anything. Runs go in the background, so the
 stream keeps reading; after a dropped connection the stream resumes from the last event. One scan at startup
-(catch_up) runs whoever became due while the service was down. A lock on the user record (learning_lock) keeps two
-runs from overlapping; LEARNING_MAX_RUNS_PER_DAY caps all runs (costs). Off unless LEARNING_AUTO is true. Every
-model call is in audit_log (model_call).
+(catch_up) runs whoever became due while the service was down. Every run goes through the agents' runtime
+(brain/agents, agent «learner»): agent_runs keeps two runs of one user from overlapping (across processes too),
+logs each run with its tokens, and holds the budgets: LEARNING_MAX_RUNS_PER_DAY runs that call the model, all
+users, and AGENT_USER_TOKENS_PER_DAY tokens per user. After a run: the goals it found become proposals
+(brain/domain/proposals.py) and, with PROFILE_KEYWORDS on, the pipeline's profile keyword record is rebuilt.
+Off unless LEARNING_AUTO is true. Every model call is in audit_log (model_call).
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from pymongo.asynchronous.database import AsyncDatabase
 
+from brain.agents.runs import AgentRuns
+from brain.agents.runtime import Budget, Report, Runtime
 from brain.audit.log import AuditLog
 from brain.config import Settings
+from brain.db.repositories import Repos
 from brain.integrations.backends import ModelBackend, get_backend
 from brain.learning import profile
 
 logger = logging.getLogger("brain.learning.auto")
 
-LOCK_MINUTES = 15
+AGENT = "learner"
 # Only changes that can make a user due reach the server: updates touching goals or feedback, and new records.
 STREAM = [{"$match": {"$or": [
     {"operationType": {"$in": ["insert", "replace"]}},
@@ -57,15 +63,15 @@ async def due_users(db: AsyncDatabase, settings: Settings, now: datetime | None 
     goals and comments alike)."""
     now = now or datetime.now(timezone.utc)
     out: list[Due] = []
+    running = await AgentRuns(db).running_scopes(AGENT, now)
     query: dict = {"identities.0": {"$exists": True}}
     if user_id is not None:
         query["_id"] = user_id
     cursor = db.users.find(query,
                            {"goals": 1, "feedback.at": 1, "feedback.text": 1, "feedback.text_at": 1, "learned.processed_until": 1, "learned.updated_at": 1,
-                            "learned.goal_keywords.goal": 1, "learning_lock": 1})
+                            "learned.goal_keywords.goal": 1})
     async for u in cursor:
-        lock = _utc(u.get("learning_lock"))
-        if lock and lock > now:
+        if u["_id"] in running:
             continue
         learned = u.get("learned") or {}
         active = [g for g in u.get("goals") or [] if g.get("active")]
@@ -92,55 +98,44 @@ async def due_users(db: AsyncDatabase, settings: Settings, now: datetime | None 
     return out
 
 
-async def _claim(db: AsyncDatabase, user_id, now: datetime) -> bool:
-    r = await db.users.update_one(
-        {"_id": user_id, "$or": [{"learning_lock": {"$exists": False}}, {"learning_lock": {"$lt": now}}]},
-        {"$set": {"learning_lock": now + timedelta(minutes=LOCK_MINUTES)}})
-    return r.modified_count == 1
-
-
 @dataclass
 class Learner:
     db: AsyncDatabase
     settings: Settings
     backend: ModelBackend
-    runs: dict[date, int] = field(default_factory=dict)       # runs per UTC day, all users (the cost cap)
     pending: dict[object, asyncio.Task] = field(default_factory=dict)     # nudged users waiting for the delay
+    runtime: Runtime | None = None
 
-    def capped(self, now: datetime) -> bool:
-        if self.runs.get(now.date(), 0) >= self.settings.learning_max_runs_per_day:
-            logger.warning(f"learning: daily cap of {self.settings.learning_max_runs_per_day} runs reached")
-            return True
-        return False
+    def __post_init__(self):
+        if self.runtime is None:
+            self.runtime = Runtime(self.db)
+        self.runtime.register(AGENT, self._learn, Budget(
+            runs_per_day=self.settings.learning_max_runs_per_day,
+            scope_tokens_per_day=self.settings.agent_user_tokens_per_day))
+
+    async def capped(self, now: datetime) -> bool:
+        return await self.runtime.capped(AGENT, now=now)
+
+    async def _learn(self, user_id, reason: str) -> Report:
+        act = await profile.collect(self.db, user_id, self.backend.max_label)
+        if act.empty:
+            return Report("nothing new")
+        result = await profile.learn(self.backend, act)
+        await profile.save(self.db, act, result)
+        await profile.after_save(Repos(self.db), act, result, profile_keywords=self.settings.profile_keywords)
+        used = sum(c.input_tokens + c.output_tokens for c in result.calls)
+        return Report(f"saved ({used} tokens)", result.calls)
 
     async def run_user(self, user_id, reason: str, now: datetime | None = None) -> str | None:
-        """Runs one user under the lock. None if another run holds the lock or the daily cap is reached."""
-        now = now or datetime.now(timezone.utc)
-        if self.capped(now) or not await _claim(self.db, user_id, now):
-            return None
-        try:
-            act = await profile.collect(self.db, user_id, self.backend.max_label)
-            if act.empty:
-                outcome = "nothing new"
-            else:
-                self.runs[now.date()] = self.runs.get(now.date(), 0) + 1
-                result = await profile.learn(self.backend, act)
-                await profile.save(self.db, act, result)
-                used = sum(c.input_tokens + c.output_tokens for c in result.calls)
-                outcome = f"saved ({used} tokens)"
-        except Exception as e:                 # noqa: BLE001 - one user's failure doesn't stop the others
-            outcome = f"failed: {type(e).__name__}: {e}"
-        finally:
-            await self.db.users.update_one({"_id": user_id}, {"$unset": {"learning_lock": ""}})
-        logger.info(f"learning {user_id} ({reason}): {outcome}")
-        return outcome
+        """Runs one user now. None if a run of this user is going on or a budget is used up."""
+        return await self.runtime.run(AGENT, user_id, reason, now)
 
     async def run_once(self, now: datetime | None = None) -> list[tuple[object, str, str]]:
         """One check: runs every due user (within the daily cap). Returns [(user_id, reason, outcome)]."""
         now = now or datetime.now(timezone.utc)
         done = []
         for due in await due_users(self.db, self.settings, now):
-            if self.capped(now):
+            if await self.capped(now):
                 break
             outcome = await self.run_user(due.user_id, due.reason, now)
             if outcome is not None:

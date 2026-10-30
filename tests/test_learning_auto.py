@@ -1,4 +1,5 @@
-"""Automatic learning: who is due and when, the lock, the daily cap, and the loop's start and stop with the app."""
+"""Automatic learning: who is due and when, one run at a time (agent_runs), the daily cap, and the loop's start
+and stop with the app."""
 import asyncio
 import copy
 import json
@@ -80,15 +81,17 @@ async def test_twenty_ratings_are_due_after_the_cooldown(db):
     assert old not in d                                      # those ratings were already processed
 
 
-async def test_only_users_the_server_serves_and_not_while_locked(db):
+async def test_only_users_the_server_serves_and_not_while_running(db):
+    from brain.agents.runs import AgentRuns
     telegram = 700_123_456
     await db.users.insert_one({**copy.deepcopy(USERS[0]), "_id": telegram, "feedback": ratings(40)})
-    locked = await add_user(db, goals=[goal("ціль", 10)], learning_lock=NOW + timedelta(minutes=5))
+    busy = await add_user(db, goals=[goal("ціль", 10)])
+    await AgentRuns(db).start(auto.AGENT, busy, "test", datetime.now(timezone.utc))
     d = await due(db)
-    assert telegram not in d and locked not in d
+    assert telegram not in d and busy not in d
 
 
-async def test_run_once_saves_unlocks_and_respects_the_cap(db):
+async def test_run_once_saves_logs_the_run_and_respects_the_cap(db):
     a = await add_user(db, goals=[goal("Знайти напрямки для інвестицій у defense tech", 10)])
     b = await add_user(db, goals=[goal("Знайти напрямки для інвестицій у defense tech", 10)])
     answer = json.dumps(ANSWER, ensure_ascii=False)
@@ -98,17 +101,24 @@ async def test_run_once_saves_unlocks_and_respects_the_cap(db):
     ran = [uid for uid, _, outcome in done if outcome.startswith("saved")]
     assert len(ran) == 1                                      # the cap: one run per day here
     saved = await db.users.find_one({"_id": ran[0]})
-    assert saved["learned"]["goal_keywords"] and "learning_lock" not in saved
+    assert saved["learned"]["goal_keywords"]
     other = b if ran[0] == a else a
     assert "learned" not in await db.users.find_one({"_id": other})
+    run = await db.agent_runs.find_one({"agent": "learner", "scope": ran[0]})
+    assert run["status"] == "done" and run["model_calls"] == 1 and run["tokens_in"] == 1000
+    # The cap counts runs in agent_runs: a new process (a restart) still respects it.
+    again = auto.Learner(db, settings(LEARNING_MAX_RUNS_PER_DAY=1), FakeBackend(AuditLog(db), [answer]))
+    assert not [x for x in await again.run_once(NOW) if x[2].startswith("saved")]
 
 
-async def test_a_failure_releases_the_lock(db):
+async def test_a_failure_is_logged_and_frees_the_user(db):
     uid = await add_user(db, goals=[goal("Знайти напрямки для інвестицій у defense tech", 10)])
     learner = auto.Learner(db, settings(), FakeBackend(AuditLog(db), ["не JSON", "теж ні"]))
     [(who, reason, outcome)] = [x for x in await learner.run_once(NOW) if x[0] == uid]
     assert reason == "goal" and outcome.startswith("failed")
-    assert "learning_lock" not in await db.users.find_one({"_id": uid})
+    run = await db.agent_runs.find_one({"agent": "learner", "scope": uid})
+    assert run["status"] == "failed" and "ValueError" in run["error"]
+    assert uid in await due(db)                                   # not stuck as running
 
 
 def test_the_loop_starts_and_stops_with_the_app():

@@ -8,7 +8,9 @@ Signals, strongest first:
 - active goals (users.goals) and detected goals (insights kind goal). A goal matches at three levels, from the
   learned profile's goal_keywords: specific names (full weight), broader concepts (60%), themes from the fixed tag
   list (35%); and by its own words. Only the best match per goal counts, and `why` names the matched word;
-- learned interests with their weights (users.learned, written by the learning job) and detected interests;
+- current intents (users.learned.intents: what the user is working on now), W_INTENT while they last;
+- learned interests with their weights (users.learned, written by the learning job: only confirmed ones, fading
+  without fresh evidence, brain/domain/interests.py) and detected interests;
 - the bot's scores from ratings: category_scores per side, tag_scores;
 - negative: what the user avoids (users.learned.avoid) and, slightly, what they already know.
 Only insights and learned profiles this client may read are used. Topics match on word starts, like search;
@@ -31,6 +33,7 @@ W_TOPIC = 1.5            # × weight / 5, per matched topic
 W_GOAL = 2.0             # an active goal
 W_TRACKED = 3.0          # a followed topic named in the item: above any goal, so it leads «Для вас»
 W_TRACKED_NEAR = 1.5     # … or only its area (a broader phrase): still into «Для вас», below the named ones
+W_INTENT = 1.5           # what the user is working on now: one match per intent
 LEVELS = {"specific": 1.0, "broader": 0.6, "tag": 0.35}        # share of W_GOAL per match level
 TOPIC_CAP = 3.0
 W_AVOID = -1.5
@@ -103,11 +106,12 @@ class Interests:
     known: list[Topic] = field(default_factory=list)
     tracked: list = field(default_factory=list)           # TopicDoc: the user's followed topics
     near: list[list[Topic]] = field(default_factory=list)  # per tracked topic: its broader phrases as Topics
+    intents: list[Topic] = field(default_factory=list)     # per term; group = the intent
 
     @property
     def empty(self) -> bool:
         return not (self.categories or self.tags or self.goals or self.topics or self.avoid or self.known
-                    or self.tracked)
+                    or self.tracked or self.intents)
 
     def score(self, *, side: str | None, category: str | None, text: str, tags: list[str] = (),
               category_label: str | None = None) -> Relevance:
@@ -151,6 +155,13 @@ class Interests:
         for t in best.values():
             topic_score += t.weight
             positive.append((t.weight + 1, t.label))         # goals first among the reasons
+        doing: dict[str, Topic] = {}
+        for t in self.intents:
+            if t.group not in doing and t.matches(haystack, tagset):
+                doing[t.group] = t
+        for t in doing.values():
+            topic_score += t.weight
+            positive.append((t.weight + 0.5, t.label))
         for t in self.topics:
             if t.matches(haystack, tagset):
                 part = W_TOPIC * t.weight / 5
@@ -219,8 +230,14 @@ async def load(repos: Repos, ctx: UserContext, profile: UserProfileDoc | None = 
         _goal_levels(out, learned.get("goal_keywords") or [], {_norm(g): g for g in active})
         for g in learned.get("goal_candidates") or []:
             add(out.topics, "ціль", g, 4)
-        for i in learned.get("interests") or []:
-            add(out.topics, "інтерес", i.get("topic", ""), float(i.get("weight", 3)))
+        from brain.domain import interests
+        for i, w in interests.counted(learned):
+            add(out.topics, "інтерес", i.get("topic", ""), w)
+        for i in interests.active_intents(learned):
+            label = f"ваш поточний запит: {_short(i['text'], 50)}"
+            for term in [i["text"], *(i.get("terms") or [])]:
+                if t := _topic("запит", term, W_INTENT, label=label, group=_norm(i["text"])):
+                    out.intents.append(t)
         for a in learned.get("avoid") or []:
             add(out.avoid, "уникати", a, 5)
         for k in learned.get("known") or []:

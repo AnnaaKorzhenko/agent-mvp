@@ -30,6 +30,7 @@ from brain.domain import goals as goals_domain
 from brain.domain import insights as insights_domain
 from brain.domain import posts as posts_domain
 from brain.domain import profile as profile_domain
+from brain.domain import proposals as proposals_domain
 from brain.domain import sensitivity
 from brain.domain import topics as topics_domain
 from brain.domain.errors import DomainError
@@ -147,6 +148,20 @@ def _period_out(p: analysis_domain.Period) -> out.AnalysisPeriod:
     return out.AnalysisPeriod(start_date=p.start.isoformat(), end_date=p.end.isoformat(), days=p.days, label=label)
 
 
+PROPOSAL_YES = {"set_goal": "додати ціль", "track_topic": "відстежувати тему"}
+
+
+async def _proposals(svc: "Services", ctx: UserContext, result: out.DigestResult) -> None:
+    """Adds the open proposals (at most proposals_domain.SHOW_MAX). Never breaks the digest."""
+    try:
+        result.proposals = [
+            out.ProposalOut(proposal_id=p.id, kind=p.kind, title=p.title, why=p.why,
+                            yes=PROPOSAL_YES.get(p.action.tool if p.action else "", "так"))
+            for p in await proposals_domain.open_for(svc.repos, ctx)]
+    except Exception as e:                 # noqa: BLE001
+        logger.error(f"proposals failed: {type(e).__name__}: {e}")
+
+
 async def _analysis_due(svc: "Services", ctx: UserContext) -> out.AnalysisDue | None:
     """Monday / the 1st: the scheduled analysis, if not written yet. Never breaks the digest."""
     try:
@@ -171,6 +186,11 @@ def _model_text(result: out.DigestResult, prefix: str = "") -> str:
                 "track_topic follow with the name): " + "; ".join(
                     f"«{r.name}» " + ("expired " if r.expired else "until ") + r.expires_at
                     for r in result.topics_to_renew)
+    if result.proposals:
+        text += ("\nThe system's suggestions for the user" + (" (on screen as cards with Так / Не цікаво buttons: "
+                 "mention them in one line at most)" if result.shown_in_widget else
+                 " (mention each in one line; on the user's answer call answer_proposal)") + ": " + "; ".join(
+                     f"{p.proposal_id} {p.kind} «{p.title}» ({p.why})" for p in result.proposals))
     due = getattr(result, "analysis_due", None)
     if due:
         text += (f"\nThe {due.period}ly analysis for {due.label} is due: after this digest, call get_analysis with "
@@ -373,6 +393,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
                 result.note = "No digest found for this date. Say so; do not invent news."
             result.shown_in_widget = widget and bool(result.digests)
             await _renewals(svc, ctx, result)
+            await _proposals(svc, ctx, result)
             await _digest_done(call, res, result)
             return CallToolResult(content=[TextContent(type="text", text=_model_text(result))],
                                   structured_content=result.model_dump(mode="json"))
@@ -409,6 +430,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
             result = _digest_out(m.result, out.MorningDigestResult, status="new")
             result.shown_in_widget = widget and bool(result.digests)
             await _renewals(svc, ctx, result)
+            await _proposals(svc, ctx, result)
             result.analysis_due = await _analysis_due(svc, ctx)
             await _digest_done(call, m.result, result)
             return CallToolResult(content=[TextContent(type="text", text=_model_text(result, "status: new\n"))],
@@ -648,6 +670,30 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
                                    confirmation=r.confirmation,
                                    offer_deep_dive=r.target_type in ("post", "digest_item")
                                    and topics_domain.wants_more(text, reasons))
+        return await call.run(body)
+
+    @mcp.tool(title="Answer a suggestion",
+              annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False,
+                                          openWorldHint=False))
+    async def answer_proposal(
+        mcp_ctx: Context,
+        user_message: UserMessage,
+        proposal_id: Annotated[str, Field(description="The proposal_id from a digest's proposals")],
+        answer: Annotated[Literal["accept", "dismiss"], Field(description=(
+            "accept: the user said yes (adds the goal / follows the topic); dismiss: not interested"))],
+        signals: Signals = None,
+    ) -> out.ProposalAnswer:
+        """Answer one of the system's suggestions (a digest's proposals) when the user says yes or no to it.
+        A yes does what the suggestion says (adds the goal, follows the topic); either answer teaches the system
+        what to suggest. Never answer for the user: only on their clear yes or no. Confirm `done` in one line."""
+        call = _Call(svc, "answer_proposal", {"proposal_id": proposal_id, "answer": answer,
+                                              **_common(user_message, signals)}, mcp_ctx)
+
+        async def body(ctx: UserContext) -> out.ProposalAnswer:
+            r = await proposals_domain.answer(svc.repos, ctx, proposal_id, answer == "accept",
+                                              mcp_channels=svc.mcp_channels)
+            await call.done(items=1)
+            return out.ProposalAnswer(proposal_id=proposal_id, accepted=r.accepted, done=r.done)
         return await call.run(body)
 
     @mcp.tool(title="Add or remove a goal",
