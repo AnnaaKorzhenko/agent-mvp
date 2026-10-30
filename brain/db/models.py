@@ -170,6 +170,7 @@ class ProposalDoc(_Doc):
     title: str
     why: str = ""
     action: ProposalActionDoc | None = None
+    links: Annotated[list[str], BeforeValidator(_as_list)] = []      # sources to look at (web finds)
     agent: str = ""
     status: str = "open"             # open | accepted | dismissed | stale
     created_at: datetime | None = None

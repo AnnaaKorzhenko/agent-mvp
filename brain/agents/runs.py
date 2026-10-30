@@ -1,7 +1,7 @@
 """agent_runs: the agents' task queue and run log (docs/AGENT_PLAN.md §5). One document per run:
 
     {agent, scope, trigger, status, lease_until, not_before, attempts, outcome, error, model, model_calls,
-     tokens_in, tokens_out, created_at, started_at, finished_at, ttl_at}
+     tokens_in, tokens_out, web_searches, output, created_at, started_at, finished_at, ttl_at}
 
 - scope: the user's key (users._id) for a per-user agent, "global" for one that works for everyone.
 - status: queued (waiting for not_before) → running (until lease_until) → done | failed | expired (a worker
@@ -11,6 +11,8 @@
 - Usage per day (runs that called a model, tokens) is summed from here, so budgets hold across restarts and
   workers.
 - Runs expire after KEEP_DAYS (TTL index). Only ids, counts and short outcomes are stored: no user content.
+  `output` holds a global agent's result for later runs (the scout's trend snapshot: built from posts, never
+  from users' data).
 """
 from __future__ import annotations
 
@@ -51,6 +53,7 @@ async def ensure_indexes(db: AsyncDatabase) -> None:
 class Usage:
     runs: int = 0             # runs that called a model
     tokens: int = 0
+    web_searches: int = 0
 
 
 class AgentRuns:
@@ -115,11 +118,26 @@ class AgentRuns:
         return doc["not_before"].replace(tzinfo=timezone.utc) if doc and doc.get("not_before") else None
 
     async def finish(self, run_id: ObjectId, status: str, outcome: str, *, model: str | None = None,
-                     model_calls: int = 0, tokens_in: int = 0, tokens_out: int = 0, error: str | None = None) -> None:
-        await self.col.update_one({"_id": run_id}, {"$set": {
-            "status": status, "outcome": outcome[:MAX_OUTCOME], "error": (error or "")[:MAX_OUTCOME] or None,
-            "model": model, "model_calls": model_calls, "tokens_in": tokens_in, "tokens_out": tokens_out,
-            "finished_at": datetime.now(timezone.utc)}, "$unset": {"lease_until": ""}})
+                     model_calls: int = 0, tokens_in: int = 0, tokens_out: int = 0, error: str | None = None,
+                     output: dict | None = None, web_searches: int = 0) -> None:
+        fields = {"status": status, "outcome": outcome[:MAX_OUTCOME], "error": (error or "")[:MAX_OUTCOME] or None,
+                  "model": model, "model_calls": model_calls, "tokens_in": tokens_in, "tokens_out": tokens_out,
+                  "web_searches": web_searches, "finished_at": datetime.now(timezone.utc)}
+        if output is not None:
+            fields["output"] = output
+        await self.col.update_one({"_id": run_id}, {"$set": fields, "$unset": {"lease_until": ""}})
+
+    async def latest_output(self, agent: str, scope: Any = GLOBAL, newer_than: datetime | None = None) -> dict | None:
+        """The output of the newest finished run of `agent` that has one (finished after `newer_than`)."""
+        query: dict = {"agent": agent, "scope": scope, "status": "done", "output": {"$exists": True}}
+        if newer_than is not None:
+            query["finished_at"] = {"$gte": newer_than}
+        doc = await self.col.find_one(query, {"output": 1}, sort=[("finished_at", -1)])
+        return doc["output"] if doc else None
+
+    async def last_created(self, agent: str, scope: Any = GLOBAL) -> datetime | None:
+        doc = await self.col.find_one({"agent": agent, "scope": scope}, {"created_at": 1}, sort=[("created_at", -1)])
+        return doc["created_at"].replace(tzinfo=timezone.utc) if doc and doc.get("created_at") else None
 
     async def running_scopes(self, agent: str, now: datetime | None = None) -> set:
         now = now or datetime.now(timezone.utc)
@@ -137,5 +155,6 @@ class AgentRuns:
         rows = await (await self.col.aggregate([
             {"$match": match},
             {"$group": {"_id": None, "runs": {"$sum": 1}, "tokens": {"$sum": {"$add": [
-                {"$ifNull": ["$tokens_in", 0]}, {"$ifNull": ["$tokens_out", 0]}]}}}}])).to_list(1)
-        return Usage(rows[0]["runs"], rows[0]["tokens"]) if rows else Usage()
+                {"$ifNull": ["$tokens_in", 0]}, {"$ifNull": ["$tokens_out", 0]}]}},
+                        "web_searches": {"$sum": {"$ifNull": ["$web_searches", 0]}}}}])).to_list(1)
+        return Usage(rows[0]["runs"], rows[0]["tokens"], rows[0]["web_searches"]) if rows else Usage()

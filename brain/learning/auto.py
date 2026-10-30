@@ -215,7 +215,7 @@ class Learner:
                 backoff = min(backoff * 2, 60)
 
 
-def learner(db: AsyncDatabase, settings: Settings) -> Learner:
+def learner(db: AsyncDatabase, settings: Settings, runtime: Runtime | None = None) -> Learner:
     backend_name = settings.learning_backend or settings.model_backend
     backend = get_backend(settings.model_copy(update={"model_backend": backend_name}), AuditLog(db))
-    return Learner(db, settings, backend)
+    return Learner(db, settings, backend, runtime=runtime)

@@ -183,6 +183,12 @@ function createWidget({ name, where }) {
         answers.set(p.proposal_id, { title: p.title, accepted: answer === "accept", done: out.done });
         status.textContent = "✓ " + out.done; status.className = "status ok";
         await syncModelContext();
+        if (out.ask) {                       // advice whose yes is a request for Claude (a deep dive, an analysis)
+          try {
+            await app.sendMessage({ role: "user", content: [{ type: "text", text: out.ask }] });
+            status.textContent = "Запит у полі повідомлення: надішліть його";
+          } catch { status.textContent = `Напишіть у чаті: «${out.ask}»`; }
+        }
       } catch (e) {
         status.textContent = "Не вдалося зберегти: " + (e?.message || e); status.className = "status error";
         yes.disabled = no.disabled = false;
@@ -192,7 +198,8 @@ function createWidget({ name, where }) {
     no.addEventListener("click", () => send("dismiss"));
     return el("div", { class: "card proposal" },
       el("div", { class: "text" }, el("strong", {}, p.title), p.why ? el("div", { class: "why" }, p.why) : null,
-         el("div", { class: "foot" }, el("div", { class: "links" }), el("div", { class: "actions" }, status, yes, no))));
+         el("div", { class: "foot" }, el("div", { class: "links" }, (p.links || []).map((u) => link(u))),
+            el("div", { class: "actions" }, status, yes, no))));
   }
 
   // Handlers before connect(), so the first notifications are not missed.

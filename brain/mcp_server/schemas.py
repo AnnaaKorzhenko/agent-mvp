@@ -95,24 +95,30 @@ class TopicRenewal(BaseModel):
 
 class ProposalOut(BaseModel):
     proposal_id: str
-    kind: Literal["goal", "topic"]
+    kind: Literal["goal", "topic", "advice"]
     title: str = Field(description="What is proposed, e.g. the goal's text or the topic's name")
     why: str = Field("", description="Why the system suggests it")
     yes: str = Field(description="What a yes does, e.g. 'додати ціль', 'відстежувати тему'")
+    links: list[str] = Field(default_factory=list, description=(
+        "Sources to cite when you mention it (web finds: not from the news base, say so)"))
+    ask: str | None = Field(None, description="Advice whose yes is a request to you (a deep dive, an analysis): "
+                                              "its message")
 
 
 class ProposalAnswer(MemoryOut):
     proposal_id: str
     accepted: bool
     done: str = Field(description="What the answer did; confirm it to the user in one line")
+    ask: str | None = Field(None, description="Set when the yes was a request: carry it out now, as if the user had "
+                                              "typed it (e.g. a deep dive or an analysis)")
 
 
 class DigestResult(MemoryOut):
     date: str | None = Field(description="Kyiv date of the digests (YYYY-MM-DD)")
     proposals: list[ProposalOut] = Field(default_factory=list, description=(
-        "The system's suggestions for the user (goals it noticed, topics to follow). In the widget they show as "
-        "cards with Так / Не цікаво buttons; otherwise mention them in one line each and, on the user's answer, "
-        "call answer_proposal"))
+        "The system's suggestions for the user (goals it noticed, topics to follow, advice on what changed). In the "
+        "widget they show as cards with Так / Не цікаво buttons; otherwise mention them in one line each and, on "
+        "the user's answer, call answer_proposal"))
     topics_to_renew: list[TopicRenewal] = Field(default_factory=list, description=(
         "Followed topics expiring within days (or just expired): ask the user once, briefly, whether to keep "
         "following each (on yes: track_topic follow with its name, which renews it for 30 days)"))

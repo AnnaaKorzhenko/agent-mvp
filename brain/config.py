@@ -65,6 +65,24 @@ class Settings(BaseSettings):
     # Write the pipeline's second keyword record («Profile interests») from users' lasting interests. Off until the
     # pipeline reads it (agreed with the pipeline's owner).
     profile_keywords: bool = Field(False, alias="PROFILE_KEYWORDS")
+    # The scout (docs/AGENT_PLAN.md phase 2): rising names in our posts, proposed to users they fit. Its backend
+    # and model default to the learning job's; SCOUT_MODEL can name a smaller one (e.g. claude-haiku-5-5).
+    scout_auto: bool = Field(False, alias="SCOUT_AUTO")
+    scout_every_hours: int = Field(6, ge=1, le=48, alias="SCOUT_EVERY_HOURS")
+    scout_backend: Literal["local", "anthropic"] | None = Field(None, alias="SCOUT_BACKEND")
+    scout_model: str | None = Field(None, alias="SCOUT_MODEL")
+    # The web scout (phase 3): searches the web around users' goals and interests, once a day by default, within
+    # a daily search budget (searches are billed per search). Anthropic backend only.
+    scout_web: bool = Field(False, alias="SCOUT_WEB")
+    scout_web_every_hours: int = Field(24, ge=6, le=168, alias="SCOUT_WEB_EVERY_HOURS")
+    scout_web_model: str | None = Field(None, alias="SCOUT_WEB_MODEL")       # default: SCOUT_MODEL
+    scout_web_searches_per_day: int = Field(40, ge=0, alias="SCOUT_WEB_SEARCHES_PER_DAY")
+    scout_web_areas: int = Field(8, ge=1, le=50, alias="SCOUT_WEB_AREAS")
+    # The advisor (phase 4): once a day, what changed for each user and one next step, as proposals. Backend as the
+    # scout's; ADVISOR_MODEL, else SCOUT_MODEL.
+    advisor_auto: bool = Field(False, alias="ADVISOR_AUTO")
+    advisor_every_hours: int = Field(24, ge=6, le=168, alias="ADVISOR_EVERY_HOURS")
+    advisor_model: str | None = Field(None, alias="ADVISOR_MODEL")
 
     # --- Audit and conversation log ---
     audit_ttl_days: int = Field(180, alias="AUDIT_TTL_DAYS")

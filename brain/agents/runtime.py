@@ -3,7 +3,9 @@
 An agent is a handler `async (scope, trigger) -> Report` with a Budget. Two ways in:
 - run(): now, from the caller's task (the learner's change-stream triggers use this);
 - submit() + work(): queued in agent_runs, picked up by any worker when due. A worker sleeps until the next
-  queued run is due (at most IDLE), or until submit() in this process wakes it.
+  queued run is due (at most IDLE), or until submit() in this process wakes it;
+- schedule(): the worker queues it again whenever its last run is older than its interval (agent_runs is the
+  clock, so restarts and several workers don't run it twice).
 A run over budget doesn't start: it waits for the next day (queued runs are marked skipped). A handler's
 exception marks the run failed; it never stops the worker.
 """
@@ -29,6 +31,7 @@ IDLE = timedelta(seconds=60)
 class Report:
     outcome: str
     calls: list[ModelResult] = field(default_factory=list)
+    output: dict | None = None          # kept on the run for later runs (global agents only: no user data)
 
 
 @dataclass
@@ -36,6 +39,7 @@ class Budget:
     runs_per_day: int | None = None             # runs of this agent that call a model, all scopes
     tokens_per_day: int | None = None           # this agent, all scopes
     scope_tokens_per_day: int | None = None     # this agent, one user
+    web_searches_per_day: int | None = None     # this agent, all scopes (billed per search)
 
 
 Handler = Callable[[Any, str], Awaitable[Report]]
@@ -47,6 +51,13 @@ class _Agent:
     budget: Budget
 
 
+@dataclass
+class _Schedule:
+    agent: str
+    scope: Any
+    every: timedelta
+
+
 class Runtime:
     def __init__(self, db: AsyncDatabase):
         self.db = db
@@ -54,6 +65,21 @@ class Runtime:
         self.agents: dict[str, _Agent] = {}
         self._wake = asyncio.Event()
         self._indexed = False
+        self.schedules: list[_Schedule] = []
+
+    def schedule(self, name: str, scope: Any, every: timedelta) -> None:
+        """Queues `name` for `scope` whenever its last run (in any status) was queued over `every` ago."""
+        self.schedules.append(_Schedule(name, scope, every))
+
+    async def submit_scheduled(self, now: datetime | None = None) -> list[str]:
+        now = now or datetime.now(timezone.utc)
+        due = []
+        for s in self.schedules:
+            last = await self.runs.last_created(s.agent, s.scope)
+            if last is None or now - last >= s.every:
+                await self.runs.submit(s.agent, s.scope, "schedule", now)
+                due.append(s.agent)
+        return due
 
     async def _ready(self) -> None:
         """The indexes that make «one run at a time» hold, once per process (creating them is idempotent)."""
@@ -67,12 +93,14 @@ class Runtime:
     async def over_budget(self, name: str, scope: Any, now: datetime) -> str | None:
         """Why this run may not start today, or None."""
         b = self.agents[name].budget
-        if b.runs_per_day is not None or b.tokens_per_day is not None:
+        if b.runs_per_day is not None or b.tokens_per_day is not None or b.web_searches_per_day is not None:
             used = await self.runs.usage(now, agent=name)
             if b.runs_per_day is not None and used.runs >= b.runs_per_day:
                 return f"daily cap of {b.runs_per_day} runs reached"
             if b.tokens_per_day is not None and used.tokens >= b.tokens_per_day:
                 return f"daily budget of {b.tokens_per_day} tokens reached"
+            if b.web_searches_per_day is not None and used.web_searches >= b.web_searches_per_day:
+                return f"daily budget of {b.web_searches_per_day} web searches reached"
         if b.scope_tokens_per_day is not None:
             used = await self.runs.usage(now, agent=name, scope=scope)
             if used.tokens >= b.scope_tokens_per_day:
@@ -89,7 +117,8 @@ class Runtime:
         calls = report.calls
         await self.runs.finish(run_id, "done", report.outcome, model=calls[-1].model if calls else None,
                                model_calls=len(calls), tokens_in=sum(c.input_tokens for c in calls),
-                               tokens_out=sum(c.output_tokens for c in calls))
+                               tokens_out=sum(c.output_tokens for c in calls), output=report.output,
+                               web_searches=sum(c.web_searches for c in calls))
         return report.outcome
 
     async def capped(self, name: str, scope: Any = None, now: datetime | None = None) -> bool:
@@ -136,6 +165,8 @@ class Runtime:
         """For the service's lifetime: runs queued work as it becomes due."""
         while True:
             try:
+                await self._ready()
+                await self.submit_scheduled()
                 while await self.work_once() is not None:
                     pass
                 due = await self.runs.next_due(list(self.agents))

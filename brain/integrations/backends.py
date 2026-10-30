@@ -25,6 +25,8 @@ class ModelResult:
     model: str
     backend: str
     stop_reason: str | None = None        # e.g. "max_tokens" when the answer was cut off
+    web_searches: int = 0                 # search() only: searches run (billed per search)
+    sources: tuple = ()                   # search() only: every result the searches returned: {url, title, page_age}
 
 
 class ModelBackend(Protocol):
@@ -71,6 +73,34 @@ class _AuditedBackend:
 
     async def _call(self, messages, system, max_tokens, temperature) -> ModelResult:  # pragma: no cover
         raise NotImplementedError
+
+
+    async def search(self, messages: list[dict[str, Any]], system: str | None = None, max_tokens: int = 4096,
+                     max_uses: int = 5, sensitivity: str = "internal",
+                     user_id: int | str | None = None) -> ModelResult:
+        """Like complete(), with the model searching the web (at most max_uses searches). The result's `sources`
+        are the search results themselves, so a caller can check every URL the model names against them."""
+        try:
+            require_allowed(sensitivity, self.max_label, f"payload for backend '{self.name}'")
+        except SensitivityError as e:
+            await self.audit.model_call(backend=self.name, model=await self._model_name(),
+                                        max_sensitivity=sensitivity, outcome="refused", error=str(e),
+                                        user_id=user_id)
+            raise
+        try:
+            result = await self._search(messages, system, max_tokens, max_uses)
+        except Exception as e:
+            await self.audit.model_call(backend=self.name, model=await self._model_name(),
+                                        max_sensitivity=sensitivity, outcome="error",
+                                        error=f"{type(e).__name__}: {e}", user_id=user_id)
+            raise
+        await self.audit.model_call(backend=self.name, model=result.model, max_sensitivity=sensitivity,
+                                    input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+                                    user_id=user_id, web_searches=result.web_searches)
+        return result
+
+    async def _search(self, messages, system, max_tokens, max_uses) -> ModelResult:
+        raise NotImplementedError(f"backend '{self.name}' can't search the web")
 
 
 class LocalPipelineBackend(_AuditedBackend):
@@ -124,6 +154,52 @@ class AnthropicBackend(_AuditedBackend):
         text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
         return ModelResult(text, resp.usage.input_tokens, resp.usage.output_tokens, resp.model, self.name,
                            resp.stop_reason)
+
+    SEARCH_TOOL = "web_search_20260318"       # dynamic filtering: results are filtered before they reach the model
+    MAX_CONTINUATIONS = 4
+
+    async def _search(self, messages, system, max_tokens, max_uses) -> ModelResult:
+        """A paused turn (pause_turn) is resumed by sending it back unchanged, at most MAX_CONTINUATIONS times. A
+        model without programmatic tool calling gets the direct search (allowed_callers ["direct"])."""
+        import anthropic
+        tool: dict[str, Any] = {"type": self.SEARCH_TOOL, "name": "web_search", "max_uses": max_uses}
+        convo = list(messages)
+        tokens_in = tokens_out = searches = 0
+        sources: dict[str, dict] = {}
+        text_parts: list[str] = []
+        resp = None
+        for _ in range(self.MAX_CONTINUATIONS + 1):
+            kwargs: dict[str, Any] = {"model": self.model, "max_tokens": max_tokens, "messages": convo,
+                                      "tools": [tool], "betas": [self.FALLBACK_BETA], "fallbacks": "default"}
+            if system:
+                kwargs["system"] = system
+            try:
+                resp = await self.client.beta.messages.create(**kwargs)
+            except anthropic.BadRequestError as e:
+                if "allowed_callers" not in str(e) or tool.get("allowed_callers"):
+                    raise
+                tool["allowed_callers"] = ["direct"]
+                continue
+            if resp.stop_reason == "refusal":
+                raise RuntimeError(f"Model declined the request (category: "
+                                   f"{getattr(resp.stop_details, 'category', None)})")
+            tokens_in += resp.usage.input_tokens
+            tokens_out += resp.usage.output_tokens
+            searches += getattr(getattr(resp.usage, "server_tool_use", None), "web_search_requests", 0) or 0
+            for b in resp.content:
+                kind = getattr(b, "type", None)
+                if kind == "text":
+                    text_parts.append(b.text)
+                elif kind == "web_search_tool_result" and isinstance(getattr(b, "content", None), list):
+                    for r in b.content:
+                        if getattr(r, "url", None):
+                            sources.setdefault(r.url, {"url": r.url, "title": getattr(r, "title", "") or "",
+                                                       "page_age": getattr(r, "page_age", None)})
+            if resp.stop_reason != "pause_turn":
+                break
+            convo = list(messages) + [{"role": "assistant", "content": resp.content}]
+        return ModelResult("".join(text_parts).strip(), tokens_in, tokens_out, resp.model if resp else self.model,
+                           self.name, resp.stop_reason if resp else None, searches, tuple(sources.values()))
 
 
 def get_backend(settings: Settings, audit: AuditLog) -> ModelBackend:

@@ -21,6 +21,10 @@ from brain.db.client import get_db
 from brain.db.repositories import Repos
 from brain.mcp_server.auth import auth_settings, token_provider, token_verifier
 from brain.mcp_server.widgets import apps_extension
+from brain.agents.advisor import advisor
+from brain.agents.runtime import Runtime
+from brain.agents.scout import scout
+from brain.agents.scout_web import web_scout
 from brain.learning.auto import learner
 from brain.mcp_server.tools import Services, register_tools
 
@@ -60,8 +64,9 @@ item names several. Call track_topic with its name, its spellings in Ukrainian, 
 (phrases that find this thing on the web and nothing else, the name in double quotes: never a lone everyday \
 word), broader phrases, look-alikes to exclude, tags, the goal it serves and the item's ids; then confirm in one line and offer \
 a deep dive.
-- A digest result's proposals are the system's own suggestions (a goal it noticed, a topic to follow): nothing \
-changes until the user says yes. In the widget they are cards with buttons; otherwise mention each once, in one \
+- A digest result's proposals are the system's own suggestions (a goal it noticed, a topic to follow, advice on \
+what changed with a next step): nothing changes until the user says yes. When answer_proposal returns `ask`, \
+carry that request out right away. In the widget they are cards with buttons; otherwise mention each once, in one \
 line, and on the user's clear yes or no call answer_proposal. Never answer one for the user.
 - Every News brain tool takes user_message (the user's latest message, verbatim) and signals (durable things it \
 reveals: goals, interests, preferences, facts about their work, feedback, things they already know, in their \
@@ -102,8 +107,17 @@ def build_services(settings: Settings) -> Services:
         raise SystemExit("Refusing to start: set OAUTH_ISSUER + PUBLIC_BASE_URL (Auth0), "
                          "or DEV_USER_ID for local development on 127.0.0.1.")
     db = get_db(settings)
+    agents_on = settings.scout_auto or settings.scout_web or settings.advisor_auto
+    runtime = Runtime(db) if settings.learning_auto or agents_on else None
+    if settings.scout_auto or settings.scout_web:
+        scout(db, settings, runtime)            # scout_match proposes the web finds too
+    if settings.scout_web:
+        web_scout(db, settings, runtime)
+    if settings.advisor_auto:
+        advisor(db, settings, runtime)
     return Services(settings=settings, repos=Repos(db), audit=AuditLog(db), token=token_provider(settings),
-                    learner=learner(db, settings) if settings.learning_auto else None)
+                    learner=learner(db, settings, runtime) if settings.learning_auto else None,
+                    agents=runtime if agents_on else None)
 
 
 def transport_security(settings: Settings) -> TransportSecuritySettings | None:
@@ -124,6 +138,8 @@ def create_app():
     app = mcp.streamable_http_app(transport_security=transport_security(settings))
     if svc.learner is not None:
         _start_with(app, svc.learner.watch)
+    if svc.agents is not None:                  # the worker for queued and scheduled agents (the scout)
+        _start_with(app, svc.agents.work)
     return app
 
 

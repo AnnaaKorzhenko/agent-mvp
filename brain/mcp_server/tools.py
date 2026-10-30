@@ -50,6 +50,7 @@ class Services:
     token: TokenProvider          # the verified OAuth token (None in dev mode)
     conversations: ConversationLog | None = field(default=None)
     learner: Any = None           # brain.learning.auto.Learner when LEARNING_AUTO is on: set_goal nudges it
+    agents: Any = None            # brain.agents.runtime.Runtime when an agent is on: its worker runs queued work
 
     def __post_init__(self) -> None:
         if self.conversations is None:
@@ -148,15 +149,22 @@ def _period_out(p: analysis_domain.Period) -> out.AnalysisPeriod:
     return out.AnalysisPeriod(start_date=p.start.isoformat(), end_date=p.end.isoformat(), days=p.days, label=label)
 
 
-PROPOSAL_YES = {"set_goal": "додати ціль", "track_topic": "відстежувати тему"}
+PROPOSAL_YES = {"set_goal": "додати ціль", "track_topic": "відстежувати тему", "stop_topic": "припинити"}
+
+
+def _yes(p) -> str:
+    """The yes button's words: the action's own label (advice steps carry one), else by tool."""
+    if p.action is None:
+        return "так"
+    return p.action.args.get("label") or PROPOSAL_YES.get(p.action.tool, "так")
 
 
 async def _proposals(svc: "Services", ctx: UserContext, result: out.DigestResult) -> None:
     """Adds the open proposals (at most proposals_domain.SHOW_MAX). Never breaks the digest."""
     try:
         result.proposals = [
-            out.ProposalOut(proposal_id=p.id, kind=p.kind, title=p.title, why=p.why,
-                            yes=PROPOSAL_YES.get(p.action.tool if p.action else "", "так"))
+            out.ProposalOut(proposal_id=p.id, kind=p.kind, title=p.title, why=p.why, links=p.links, yes=_yes(p),
+                            ask=p.action.args.get("message") if p.action and p.action.tool == "chat" else None)
             for p in await proposals_domain.open_for(svc.repos, ctx)]
     except Exception as e:                 # noqa: BLE001
         logger.error(f"proposals failed: {type(e).__name__}: {e}")
@@ -190,7 +198,9 @@ def _model_text(result: out.DigestResult, prefix: str = "") -> str:
         text += ("\nThe system's suggestions for the user" + (" (on screen as cards with Так / Не цікаво buttons: "
                  "mention them in one line at most)" if result.shown_in_widget else
                  " (mention each in one line; on the user's answer call answer_proposal)") + ": " + "; ".join(
-                     f"{p.proposal_id} {p.kind} «{p.title}» ({p.why})" for p in result.proposals))
+                     f"{p.proposal_id} {p.kind} «{p.title}» ({p.why})" + (f" sources: {' '.join(p.links)}"
+                                                                           if p.links else "")
+                     for p in result.proposals))
     due = getattr(result, "analysis_due", None)
     if due:
         text += (f"\nThe {due.period}ly analysis for {due.label} is due: after this digest, call get_analysis with "
@@ -684,8 +694,9 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
         signals: Signals = None,
     ) -> out.ProposalAnswer:
         """Answer one of the system's suggestions (a digest's proposals) when the user says yes or no to it.
-        A yes does what the suggestion says (adds the goal, follows the topic); either answer teaches the system
-        what to suggest. Never answer for the user: only on their clear yes or no. Confirm `done` in one line."""
+        A yes does what the suggestion says (adds the goal, follows or stops a topic); either answer teaches the
+        system what to suggest. If the result has `ask`, the yes was a request (a deep dive, an analysis): carry it
+        out now, as if the user had typed it. Never answer for the user: only on their clear yes or no. Confirm `done` in one line."""
         call = _Call(svc, "answer_proposal", {"proposal_id": proposal_id, "answer": answer,
                                               **_common(user_message, signals)}, mcp_ctx)
 
@@ -693,7 +704,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
             r = await proposals_domain.answer(svc.repos, ctx, proposal_id, answer == "accept",
                                               mcp_channels=svc.mcp_channels)
             await call.done(items=1)
-            return out.ProposalAnswer(proposal_id=proposal_id, accepted=r.accepted, done=r.done)
+            return out.ProposalAnswer(proposal_id=proposal_id, accepted=r.accepted, done=r.done, ask=r.ask)
         return await call.run(body)
 
     @mcp.tool(title="Add or remove a goal",
