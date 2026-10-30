@@ -147,6 +147,7 @@ class TopicDoc(_Doc):
     specific: Annotated[list[str], BeforeValidator(_as_list)] = []
     broader: Annotated[list[str], BeforeValidator(_as_list)] = []
     exclude: Annotated[list[str], BeforeValidator(_as_list)] = []
+    queries: Annotated[list[str], BeforeValidator(_as_list)] = []    # web searches for the pipeline
     tags: Annotated[list[str], BeforeValidator(_as_list)] = []
     findings: Annotated[list[FindingDoc], BeforeValidator(_as_list)] = []
     findings_count: int | None = None   # set by light reads, which leave the findings out

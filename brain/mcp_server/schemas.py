@@ -236,6 +236,7 @@ class TopicOut(BaseModel):
     specific: list[str] = Field(default_factory=list, description="Names and aliases matched first")
     broader: list[str] = Field(default_factory=list)
     exclude: list[str] = Field(default_factory=list)
+    web_queries: list[str] = Field(default_factory=list, description="What the news pipeline searches the web for")
     tags: list[str] = Field(default_factory=list)
     findings_count: int = 0
     findings: list[FindingOut] = Field(default_factory=list, description="Saved earlier: build on them, don't "
@@ -268,8 +269,11 @@ class TopicSaved(MemoryOut):
     duplicate_findings: int = Field(0, description="Findings skipped: their URL was already saved")
     unknown_tags: list[str] = Field(default_factory=list, description="Dropped: not in the fixed tag list")
     missing_regions: list[str] = Field(default_factory=list, description=(
-        "Regions (ua / ru / world) no name of the topic reaches, so the web search there finds nothing: call "
-        "track_topic again adding those spellings (world: Latin; ua: Ukrainian; ru: Russian)"))
+        "Regions (ua / ru / world) no web query of the topic reaches, so the web search there finds nothing: call "
+        "track_topic again adding web_queries in those languages (world: English; ua: Ukrainian; ru: Russian)"))
+    not_searched: list[str] = Field(default_factory=list, description=(
+        "Names left out of the web search because alone they are an everyday word or another thing (e.g. "
+        "«Рассвет»): call track_topic again with web_queries that say what it is"))
     confirmation: str = Field(description="Short Ukrainian confirmation to tell the user")
 
 

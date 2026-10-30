@@ -81,7 +81,7 @@ def utc(dt: datetime | None) -> datetime | None:
 
 _LATIN = re.compile(r"[a-z]", re.I)
 _CYRILLIC = re.compile(r"[а-яіїєґёыэъ]", re.I)
-_ONLY_UA = re.compile(r"[іїєґ]", re.I)
+_ONLY_UA = re.compile(r"[іїєґ]|[а-яіїєґ]['’ʼ][а-яіїєґ]", re.I)     # the apostrophe inside a word: «зв'язок»
 _ONLY_RU = re.compile(r"[ёыэъ]", re.I)
 REGIONS = ("ua", "ru", "world")
 
@@ -101,15 +101,45 @@ def missing_regions(terms: list[str]) -> list[str]:
     return [r for r in REGIONS if r not in covered]
 
 
+MAX_QUERIES = 12
+_WORDS = re.compile(r"[\w'’ʼ]+", re.U)
+
+
+def distinctive(term: str) -> bool:
+    """Whether a term can be searched on the web by itself: two words or more, or a name with a digit or a
+    hyphenated part («Рассвет-3», «Спектр-К», «Magura V5»). A single plain word («Рассвет», «Rassvet», «Apex.AI»)
+    is usually also an everyday word or another company: alone it brings noise."""
+    several = len(_WORDS.findall(term)) >= 2 and not re.fullmatch(r"\w+[.]\w+", term.strip())   # not «Apex.AI»
+    return several or any(ch.isdigit() for ch in term) or bool(re.search(r"\w-\w", term))
+
+
+def web_queries(topic: TopicDoc) -> list[str]:
+    """What the pipeline searches the web for, for this topic: its own web queries (phrases written to find this
+    thing and nothing else); for a topic without them, those of its names that are distinctive by themselves."""
+    return topic.queries or [t for t in topic.specific if distinctive(t)]
+
+
+def not_searched(topic: TopicDoc) -> list[str]:
+    """Names left out of the web search as too generic (only when the topic has no web queries of its own)."""
+    return [] if topic.queries else [t for t in topic.specific if not distinctive(t)]
+
+
+def query_key(q: str) -> str:
+    """Two queries are the same search when they have the same words, in any order, case and punctuation:
+    «Apex AI НРК» = «НРК Apex.AI»."""
+    return " ".join(sorted(w.lower() for w in _WORDS.findall(_flat(q))))
+
+
 def keyword_queries(active: list[TopicDoc]) -> list[dict]:
-    """The pipeline's queries for these topics: {q, region} for each name once per region, sorted (stable for
-    comparing). Only names: broader phrases and look-alike words stay in the brain, which uses them for matching."""
+    """The pipeline's queries for these topics: {q, region} for each distinct web query once per region (the first
+    spelling met wins), sorted (stable for comparing). Names, broader phrases and look-alike words stay in the
+    brain, which uses them for matching."""
     out: dict[tuple[str, str], dict] = {}
     for t in active:
-        for term in t.specific:
-            for region in regions(term):
-                out.setdefault((term.lower(), region), {"q": term, "region": region})
-    return [out[k] for k in sorted(out)]
+        for q in web_queries(t):
+            for region in regions(q):
+                out.setdefault((query_key(q), region), {"q": q, "region": region})
+    return sorted(out.values(), key=lambda x: (x["q"].lower(), x["region"]))
 
 
 async def sync_queries(repos: Repos, now: datetime | None = None) -> bool:
@@ -371,9 +401,11 @@ async def track_topic(repos: Repos, ctx: UserContext, name: str, *, specific: li
                       broader: list[str] | None = None, exclude: list[str] | None = None,
                       tags: list[str] | None = None, goal: str | None = None, days: int = TTL_DAYS,
                       digest_id: str | None = None, item_n: int | None = None,
-                      post_id: str | None = None) -> TopicResult:
+                      post_id: str | None = None, queries: list[str] | None = None) -> TopicResult:
     """Starts (or renews) following a topic: status active for `days`. Lists given replace the stored ones; the
-    name is always among the specific terms. Tags outside the fixed list are dropped and reported."""
+    name is always among the specific terms. Tags outside the fixed list are dropped and reported. `queries`: the
+    web searches for the pipeline, each a phrase that finds this thing and nothing else (a lone generic word is
+    refused)."""
     days = max(1, min(int(days), MAX_DAYS))
     topic, created = await _ensure(repos, ctx, name, await _origin_for(repos, ctx, digest_id, item_n, post_id))
     now = datetime.now(timezone.utc)
@@ -391,6 +423,15 @@ async def track_topic(repos: Repos, ctx: UserContext, name: str, *, specific: li
         unknown = [t for t in tags if t.lower().strip() not in allowed]
     if goal is not None:
         fields["goal"] = _clean(goal, 300) or None
+    if queries is not None:
+        cleaned = list({query_key(c): c for c in reversed([_clean(q, 120) for q in queries]) if c}.values())[::-1]
+        vague = [q for q in cleaned if not distinctive(q)]
+        if vague:
+            raise InvalidInput(f"Web queries need context, not a lone word (it would bring noise): {vague}. Write "
+                               "the name with what it is, e.g. «Рассвет Бюро 1440 спутники»")
+        if len(cleaned) > MAX_QUERIES:
+            raise InvalidInput(f"At most {MAX_QUERIES} web queries")
+        fields["queries"] = cleaned
     await repos.users.update_topic(ctx.user_id, topic.norm, fields)
     await sync_queries(repos, now)
     return TopicResult(await _get(repos, ctx, topic.norm), created, unknown_tags=unknown)

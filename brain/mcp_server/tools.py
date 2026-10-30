@@ -198,7 +198,8 @@ def _topic_out(t, findings: bool = False) -> out.TopicOut:
     return out.TopicOut(
         name=t.name, status=topics_domain.status_of(t),
         expires_at=topics_domain.utc(t.expires_at).isoformat() if t.expires_at else None,
-        goal=t.goal, specific=t.specific, broader=t.broader, exclude=t.exclude, tags=t.tags,
+        goal=t.goal, specific=t.specific, broader=t.broader, exclude=t.exclude,
+        web_queries=topics_domain.web_queries(t), tags=t.tags,
         findings_count=t.findings_count if t.findings_count is not None else len(t.findings),
         findings=[out.FindingOut(title=f.title, url=f.url, source=f.source, date=f.date, summary=f.summary,
                                  status=f.status) for f in t.findings] if findings else [])
@@ -764,12 +765,15 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
         action: Annotated[Literal["follow", "stop"], Field(description=(
             "follow: start or renew following it; stop: stop following it"))] = "follow",
         specific: Annotated[list[str] | None, Field(max_length=20, description=(
-            "follow: names and aliases as Ukrainian, Russian and English news write them (e.g. «Спектр-К», "
-            "«Spektr-K», «Spectr-K»); each must point at this thing by itself. The news pipeline searches the "
-            "web for exactly these: Cyrillic ones in Ukrainian and Russian sources, Latin ones worldwide, so "
-            "give at least one Latin spelling and the Ukrainian and Russian forms where they differ. If the topic "
-            "is an area rather than a named thing (e.g. «оптоволоконні FPV»), its key phrases are its names: "
-            "put them here, in all three languages"))] = None,
+            "follow: names and aliases as Ukrainian, Russian and English news write them (e.g. «Рассвет», "
+            "«Rassvet», «Бюро 1440»), for recognising news on it; short is fine here. If the topic is an area "
+            "rather than a named thing (e.g. «оптоволоконні FPV»), its key phrases are its names"))] = None,
+        web_queries: Annotated[list[str] | None, Field(max_length=12, description=(
+            "follow: what the news pipeline searches the web for daily: 3-8 phrases of 2-6 words, each finding "
+            "THIS thing and nothing else, so a name that is also an everyday word or another company gets what "
+            "it is (e.g. «Рассвет Бюро 1440 спутники», «спутниковая связь Рассвет Геран», «Rassvet satellite "
+            "constellation Bureau 1440», «супутники Рассвет Бюро 1440»). In Russian (searched in Russian sources), "
+            "Ukrainian (Ukrainian sources) and English (worldwide). Always pass them when following"))] = None,
         broader: Annotated[list[str] | None, Field(max_length=20, description=(
             "follow: short phrases for the thing's area, Ukrainian and Russian forms (e.g. «захист відеоканалу "
             "від РЕБ», «видеоприемник FPV»): they lift news on it that doesn't name it; never searched on the web"))]
@@ -789,10 +793,11 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
     ) -> out.TopicSaved:
         """Follow a specific thing in the user's future digests and searches (or stop following it). Call it only
         when the user agrees or asks ("так, відстежуй", "стеж за цим"), never on your own judgement. After a deep
-        dive you know the aliases: pass them in specific, the area in broader, look-alikes in exclude."""
-        args = {"name": name, "action": action, "specific": specific, "broader": broader, "exclude": exclude,
-                "tags": tags, "goal": goal, "days": days, "digest_id": digest_id, "item_n": item_n,
-                "post_id": post_id}
+        dive you know the aliases: pass them in specific, the web searches in web_queries, the area in broader,
+        look-alikes in exclude."""
+        args = {"name": name, "action": action, "specific": specific, "web_queries": web_queries,
+                "broader": broader, "exclude": exclude, "tags": tags, "goal": goal, "days": days,
+                "digest_id": digest_id, "item_n": item_n, "post_id": post_id}
         call = _Call(svc, "track_topic", {**args, **_common(user_message, signals)}, mcp_ctx)
 
         async def body(ctx: UserContext) -> out.TopicSaved:
@@ -802,12 +807,16 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
             else:
                 r = await topics_domain.track_topic(svc.repos, ctx, name, specific=specific, broader=broader,
                                                     exclude=exclude, tags=tags, goal=goal, days=days,
-                                                    digest_id=digest_id, item_n=item_n, post_id=post_id)
+                                                    digest_id=digest_id, item_n=item_n, post_id=post_id,
+                                                    queries=web_queries)
                 confirmation = f"Відстежую «{r.topic.name}» до {topics_domain.until_text(r.topic)}"
             await call.done(items=1)
-            missing = topics_domain.missing_regions(r.topic.specific) if action == "follow" else []
+            follow = action == "follow"
+            missing = topics_domain.missing_regions(topics_domain.web_queries(r.topic)) if follow else []
             return out.TopicSaved(topic=_topic_out(r.topic), created=r.created, unknown_tags=r.unknown_tags,
-                                  missing_regions=missing, confirmation=confirmation)
+                                  missing_regions=missing,
+                                  not_searched=topics_domain.not_searched(r.topic) if follow else [],
+                                  confirmation=confirmation)
         return await call.run(body)
 
     @mcp.tool(title="Analysis of a week or a month", annotations=READ_ONLY)

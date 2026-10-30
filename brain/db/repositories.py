@@ -360,7 +360,7 @@ class UsersRepo:
                     {"$match": {"topics.status": "active", "topics.expires_at": {"$gt": now}}},
                     {"$project": {"_id": 0, "id": "$topics.id", "name": "$topics.name", "norm": "$topics.norm",
                                   "status": "$topics.status", "specific": "$topics.specific",
-                                  "exclude": "$topics.exclude"}}]
+                                  "exclude": "$topics.exclude", "queries": "$topics.queries"}}]
         docs = await (await self.col.aggregate(pipeline)).to_list(None)
         return [t for t in (parse(TopicDoc, d, "users") for d in docs) if t]
 

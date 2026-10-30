@@ -170,6 +170,7 @@ def test_regions_by_spelling():
     assert topics.regions("Спектр-К") == ["ua", "ru"]
     assert topics.regions("відеоприймач Спектр") == ["ua"] and topics.regions("видеоприёмник") == ["ru"]
     assert topics.regions("Spektr-K") == ["world"] and topics.regions("12") == []
+    assert topics.regions("супутниковий зв'язок") == ["ua"]
     assert topics.missing_regions(["Спектр-К"]) == ["world"]
     assert topics.missing_regions(["Спектр-К", "Spektr-K"]) == []
 
@@ -194,10 +195,9 @@ async def test_the_keyword_record_follows_every_users_active_topics(own):
     await topics.save_findings(repos, cloud(c), "Герань-5", FOUND[:1])              # explored only: out
     doc = await own.sources.find_one({"platform": "search_keywords", "name": "User interests"})
     assert sorted(doc) == ["_id", "name", "platform", "queries"]                    # exactly the agreed shape
-    assert doc["queries"] == [
+    assert doc["queries"] == [                       # «Магура» alone is an everyday word: not searched
         {"q": "Magura V5", "region": "world"}, {"q": "Spectr-K", "region": "world"},
-        {"q": "Spektr-K", "region": "world"}, {"q": "Магура", "region": "ru"}, {"q": "Магура", "region": "ua"},
-        {"q": "Спектр-К", "region": "ru"}, {"q": "Спектр-К", "region": "ua"}]
+        {"q": "Spektr-K", "region": "world"}, {"q": "Спектр-К", "region": "ru"}, {"q": "Спектр-К", "region": "ua"}]
     assert await topics.sync_queries(repos) is False                                # unchanged: no write
     # An expired topic drops out at the next sync.
     await own.users.update_one({"_id": b, "topics.norm": "магура"},
@@ -205,6 +205,33 @@ async def test_the_keyword_record_follows_every_users_active_topics(own):
     assert await topics.sync_queries(repos) is True
     queries = (await own.sources.find_one({"platform": "search_keywords"}))["queries"]
     assert not any(q["q"].startswith(("Магура", "Magura")) for q in queries)
+
+
+def test_a_lone_everyday_word_is_not_searched():
+    for term in ("Рассвет", "Rassvet", "Apex.AI", "Рассвєт", "Магура"):
+        assert not topics.distinctive(term), term
+    for term in ("Рассвет-3", "Бюро 1440", "Спектр-К", "Apex.AI UGV", "российский аналог Starlink", "1440.УЛЬТРА"):
+        assert topics.distinctive(term), term
+
+
+async def test_web_queries_replace_the_names_in_the_record(own):
+    repos = Repos(own)
+    me = await add_user(own)
+    r = await topics.track_topic(repos, cloud(me), "Рассвет", specific=["Rassvet", "Бюро 1440"])
+    assert topics.not_searched(r.topic) == ["Рассвет", "Rassvet"]               # the record keeps «Бюро 1440»
+    queries = (await own.sources.find_one({"platform": "search_keywords"}))["queries"]
+    assert [q["q"] for q in queries] == ["Бюро 1440", "Бюро 1440"]
+    with pytest.raises(InvalidInput):
+        await topics.track_topic(repos, cloud(me), "Рассвет", queries=["Рассвет"])
+    wanted = ["Rassvet satellite constellation Bureau 1440", "Рассвет Бюро 1440 спутники",
+              "супутниковий зв'язок Рассвет Шахед"]
+    r = await topics.track_topic(repos, cloud(me), "Рассвет", queries=wanted)
+    assert topics.not_searched(r.topic) == [] and r.topic.specific == ["Рассвет", "Rassvet", "Бюро 1440"]
+    queries = (await own.sources.find_one({"platform": "search_keywords"}))["queries"]
+    assert queries == [{"q": wanted[0], "region": "world"}, {"q": wanted[1], "region": "ru"},
+                       {"q": wanted[1], "region": "ua"}, {"q": wanted[2], "region": "ua"}]
+    # Matching news still uses the short names: «Рассвет» in an item is recognised.
+    assert topics.matched_term(r.topic, "Росія запускає супутники «Рассвет»") == "Рассвет"
 
 
 async def test_each_user_sees_their_own_topics_first(own):
@@ -332,3 +359,19 @@ async def test_followed_topics_reach_about_user_and_the_learning_job(own):
     assert act.payload()["followed_topics"] == act.followed_topics
     await own.users.update_one({"_id": me}, {"$set": {"feedback": [], "goals": []}})
     assert (await profile.collect(own, me, "internal")).empty   # context only: following doesn't start a run
+
+
+def test_the_same_search_is_written_once():
+    t1 = topics.TopicDoc(id="1", name="НРК Apex.AI", norm="нрк apex.ai", specific=["НРК Apex.AI", "Apex AI НРК"])
+    t2 = topics.TopicDoc(id="2", name="X", norm="x", queries=["apex ai нрк", "Бюро 1440"])
+    q = topics.keyword_queries([t1, t2])
+    assert q == [{"q": "Бюро 1440", "region": "ru"}, {"q": "Бюро 1440", "region": "ua"},
+                 {"q": "НРК Apex.AI", "region": "ru"}, {"q": "НРК Apex.AI", "region": "ua"}]
+    assert len({(x["q"].lower(), x["region"]) for x in q}) == len(q)
+
+
+async def test_web_queries_are_deduplicated_on_write(own):
+    me = await add_user(own)
+    r = await topics.track_topic(Repos(own), cloud(me), "Рассвет",
+                                 queries=["Рассвет Бюро 1440", "бюро 1440 рассвет", "Rassvet Bureau 1440"])
+    assert r.topic.queries == ["Рассвет Бюро 1440", "Rassvet Bureau 1440"]
