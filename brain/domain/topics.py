@@ -124,10 +124,25 @@ def not_searched(topic: TopicDoc) -> list[str]:
     return [] if topic.queries else [t for t in topic.specific if not distinctive(t)]
 
 
+# Spelling variants of one name are one search: Latin transliterations (Spektr / Spectr, Kh / H) and Cyrillic
+# letters that differ between Ukrainian and Russian or get mistyped (Рассвет / Рассвєт).
+_LATIN_VARIANTS = (("ph", "f"), ("kh", "h"), ("ck", "k"), ("c", "k"), ("q", "k"), ("w", "v"), ("y", "i"),
+                   ("ii", "i"), ("ee", "i"))
+_CYRILLIC_VARIANTS = str.maketrans({"є": "е", "э": "е", "ё": "е", "і": "и", "ї": "и", "ы": "и", "ґ": "г",
+                                    "ь": None, "ъ": None, "'": None})
+
+
+def _variant_key(word: str) -> str:
+    word = word.lower().translate(_CYRILLIC_VARIANTS)
+    for a, b in _LATIN_VARIANTS:
+        word = word.replace(a, b)
+    return re.sub(r"(.)\1+", r"\1", word)          # doubled letters: «Рассвет» ~ «Расвет»
+
+
 def query_key(q: str) -> str:
-    """Two queries are the same search when they have the same words, in any order, case and punctuation:
-    «Apex AI НРК» = «НРК Apex.AI»."""
-    return " ".join(sorted(w.lower() for w in _WORDS.findall(_flat(q))))
+    """Two queries are the same search when they have the same words, in any order, case, punctuation and
+    spelling variant: «Apex AI НРК» = «НРК Apex.AI», «Spektr-K» = «Spectr-K», «Рассвет» = «Рассвєт»."""
+    return " ".join(sorted(_variant_key(w) for w in _WORDS.findall(_flat(q))))
 
 
 def keyword_queries(active: list[TopicDoc]) -> list[dict]:
