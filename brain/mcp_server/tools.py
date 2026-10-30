@@ -771,9 +771,11 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
         web_queries: Annotated[list[str] | None, Field(max_length=12, description=(
             "follow: what the news pipeline searches the web for daily: 3-8 phrases of 2-6 words, each finding "
             "THIS thing and nothing else, so a name that is also an everyday word or another company gets what "
-            "it is (e.g. «Рассвет Бюро 1440 спутники», «спутниковая связь Рассвет Геран», «Rassvet satellite "
-            "constellation Bureau 1440», «супутники Рассвет Бюро 1440»). In Russian (searched in Russian sources), "
-            "Ukrainian (Ukrainian sources) and English (worldwide). Always pass them when following"))] = None,
+            "it is, and the name itself in double quotes for an exact match (e.g. '\"Рассвет\" Бюро 1440 "
+            "спутники', 'спутниковая связь \"Рассвет\" Геран', '\"Рассвет-3\"', '\"Rassvet\" satellite "
+            "constellation Bureau 1440', 'супутники \"Рассвет\" Бюро 1440'). The server quotes the name if you "
+            "don't. In Russian (searched in Russian sources), Ukrainian (Ukrainian sources) and English "
+            "(worldwide). Always pass them when following"))] = None,
         broader: Annotated[list[str] | None, Field(max_length=20, description=(
             "follow: short phrases for the thing's area, Ukrainian and Russian forms (e.g. «захист відеоканалу "
             "від РЕБ», «видеоприемник FPV»): they lift news on it that doesn't name it; never searched on the web"))]

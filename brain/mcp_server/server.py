@@ -57,7 +57,8 @@ news; the counts are exact) and save it with save_report. The user may rate it l
 - "📌 Відстежувати тему з #N «…»" (a card's button) is the user asking to follow what that item is about: no \
 deep dive and no confirmation needed. Pick the specific thing (system, model, company, program); ask only if the \
 item names several. Call track_topic with its name, its spellings in Ukrainian, Russian and Latin, web_queries \
-(phrases that find this thing on the web and nothing else: never a lone everyday word), broader phrases, look-alikes to exclude, tags, the goal it serves and the item's ids; then confirm in one line and offer \
+(phrases that find this thing on the web and nothing else, the name in double quotes: never a lone everyday \
+word), broader phrases, look-alikes to exclude, tags, the goal it serves and the item's ids; then confirm in one line and offer \
 a deep dive.
 - Every News brain tool takes user_message (the user's latest message, verbatim) and signals (durable things it \
 reveals: goals, interests, preferences, facts about their work, feedback, things they already know, in their \

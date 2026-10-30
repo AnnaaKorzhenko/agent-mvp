@@ -196,8 +196,8 @@ async def test_the_keyword_record_follows_every_users_active_topics(own):
     doc = await own.sources.find_one({"platform": "search_keywords", "name": "User interests"})
     assert sorted(doc) == ["_id", "name", "platform", "queries"]                    # exactly the agreed shape
     assert doc["queries"] == [                       # «Магура» alone is an everyday word: not searched
-        {"q": "Magura V5", "region": "world"}, {"q": "Spectr-K", "region": "world"},
-        {"q": "Spektr-K", "region": "world"}, {"q": "Спектр-К", "region": "ru"}, {"q": "Спектр-К", "region": "ua"}]
+        {"q": '"Magura V5"', "region": "world"}, {"q": '"Spektr-K"', "region": "world"},   # Spectr-K: the same
+        {"q": '"Спектр-К"', "region": "ru"}, {"q": '"Спектр-К"', "region": "ua"}]          # search; names quoted
     assert await topics.sync_queries(repos) is False                                # unchanged: no write
     # An expired topic drops out at the next sync.
     await own.users.update_one({"_id": b, "topics.norm": "магура"},
@@ -220,7 +220,7 @@ async def test_web_queries_replace_the_names_in_the_record(own):
     r = await topics.track_topic(repos, cloud(me), "Рассвет", specific=["Rassvet", "Бюро 1440"])
     assert topics.not_searched(r.topic) == ["Рассвет", "Rassvet"]               # the record keeps «Бюро 1440»
     queries = (await own.sources.find_one({"platform": "search_keywords"}))["queries"]
-    assert [q["q"] for q in queries] == ["Бюро 1440", "Бюро 1440"]
+    assert [q["q"] for q in queries] == ['"Бюро 1440"', '"Бюро 1440"']
     with pytest.raises(InvalidInput):
         await topics.track_topic(repos, cloud(me), "Рассвет", queries=["Рассвет"])
     wanted = ["Rassvet satellite constellation Bureau 1440", "Рассвет Бюро 1440 спутники",
@@ -228,8 +228,10 @@ async def test_web_queries_replace_the_names_in_the_record(own):
     r = await topics.track_topic(repos, cloud(me), "Рассвет", queries=wanted)
     assert topics.not_searched(r.topic) == [] and r.topic.specific == ["Рассвет", "Rassvet", "Бюро 1440"]
     queries = (await own.sources.find_one({"platform": "search_keywords"}))["queries"]
-    assert queries == [{"q": wanted[0], "region": "world"}, {"q": wanted[1], "region": "ru"},
-                       {"q": wanted[1], "region": "ua"}, {"q": wanted[2], "region": "ua"}]
+    quoted = ['"Rassvet" satellite constellation Bureau 1440', '"Рассвет" Бюро 1440 спутники',   # the everyday-word
+              'супутниковий зв\'язок "Рассвет" Шахед']                                       # name: exact
+    assert queries == [{"q": quoted[0], "region": "world"}, {"q": quoted[1], "region": "ru"},
+                       {"q": quoted[1], "region": "ua"}, {"q": quoted[2], "region": "ua"}]
     # Matching news still uses the short names: «Рассвет» in an item is recognised.
     assert topics.matched_term(r.topic, "Росія запускає супутники «Рассвет»") == "Рассвет"
 
@@ -306,7 +308,7 @@ async def test_broader_phrases_lift_news_that_doesnt_name_the_topic(own):
     assert why("Відеоприймач FPV від Спектр-ТВ").why == [] and why("Новини про погоду").why == []
     # Broader phrases never go to the pipeline's keyword record.
     queries = (await own.sources.find_one({"platform": "search_keywords"}))["queries"]
-    assert [q["q"] for q in queries] == ["Spektr-K", "Спектр-К", "Спектр-К"]
+    assert [q["q"] for q in queries] == ['"Spektr-K"', '"Спектр-К"', '"Спектр-К"']
 
 
 async def test_renewal_is_offered_before_expiry_once_a_day(own):
@@ -375,3 +377,30 @@ async def test_web_queries_are_deduplicated_on_write(own):
     r = await topics.track_topic(Repos(own), cloud(me), "Рассвет",
                                  queries=["Рассвет Бюро 1440", "бюро 1440 рассвет", "Rassvet Bureau 1440"])
     assert r.topic.queries == ["Рассвет Бюро 1440", "Rassvet Bureau 1440"]
+
+
+def test_spelling_variants_are_one_search():
+    same = [("Spektr-K", "Spectr-K"), ("Рассвет-3", "Рассвєт-3"), ("Apex AI НРК", "НРК Apex.AI"),
+            ("Rassvet Bureau 1440", "Rasvet bureau 1440")]
+    for a, b in same:
+        assert topics.query_key(a) == topics.query_key(b), (a, b)
+    assert topics.query_key("Спектр-К") != topics.query_key("Спектр-М")
+    assert topics.query_key("Бюро 1440") != topics.query_key("Бюро 1441")
+    t = topics.TopicDoc(id="1", name="Спектр-К", norm="спектр-к", specific=["Спектр-К", "Spektr-K", "Spectr-K"])
+    assert [(q["q"], q["region"]) for q in topics.keyword_queries([t])] == [
+        ('"Spektr-K"', "world"), ('"Спектр-К"', "ru"), ('"Спектр-К"', "ua")]
+
+
+def test_the_name_is_quoted_for_the_web_search():
+    names = ["Рассвет", "Рассвет-3", "Бюро 1440", "российский аналог Starlink"]
+    cases = {"Рассвет-3": '"Рассвет-3"', "Рассвет спутниковая связь": '"Рассвет" спутниковая связь',
+             "Рассвет-3 спутники": '"Рассвет-3" спутники', "российский аналог Starlink": "российский аналог Starlink",
+             '"Рассвет" Бюро 1440': '"Рассвет" Бюро 1440',                                  # written quotes kept
+             '"\\"Рассвет-3\\""': '"Рассвет-3"', "АО «Сектор» видеоприемник": 'АО "Сектор" видеоприемник',
+             'Рассвет" спутники': '"Рассвет" спутники'}                                     # unpaired quote dropped
+    for q, want in cases.items():
+        assert topics.quote_names(q, names) == want, q
+    # A quoted spelling wins over the same search unquoted.
+    t = topics.TopicDoc(id="1", name="Рассвет", norm="рассвет", specific=["Рассвет"],
+                        queries=["Рассвет спутниковая связь", '"Рассвет" спутниковая связь'])
+    assert {q["q"] for q in topics.keyword_queries([t])} == {'"Рассвет" спутниковая связь'}

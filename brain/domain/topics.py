@@ -113,10 +113,42 @@ def distinctive(term: str) -> bool:
     return several or any(ch.isdigit() for ch in term) or bool(re.search(r"\w-\w", term))
 
 
+_ANY_QUOTE = str.maketrans({"«": '"', "»": '"', "“": '"', "”": '"', "„": '"', "\\": None})
+NAME_WORDS = 2          # a name this short is searched as an exact phrase: "Рассвет-3", "Бюро 1440"
+
+
+def exact(q: str) -> str:
+    """One quoting style for the web search: «Сектор», “Сектор” and \\"Сектор\\" (escaped by hand in a DB editor)
+    become "Сектор"; an unpaired or empty quote is dropped."""
+    q = " ".join(q.translate(_ANY_QUOTE).split())
+    if q.count('"') % 2:
+        q = q.replace('"', "")
+    return " ".join(re.sub(r'"\s*"', " ", q).split())
+
+
+def quote_names(q: str, names: list[str]) -> str:
+    """Puts the thing's name in quotes so the search finds that name and not the everyday word: «Рассвет
+    спутниковая связь» → "Рассвет" спутниковая связь. A query that already has quotes is left as written; a
+    query that is itself a short name is quoted whole ("Рассвет-3")."""
+    q = exact(q)
+    if '"' in q:
+        return q
+    if len(_WORDS.findall(q)) <= NAME_WORDS and q in names:
+        return f'"{q}"'
+    # the everyday-word name first (it is the one that brings noise), then the longest
+    for name in sorted({exact(n).replace('"', "") for n in names}, key=lambda n: (distinctive(n), -len(n))):
+        m = name and re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", q, re.I)
+        if m and len(_WORDS.findall(name)) <= NAME_WORDS and m.group(0) != q:
+            return f'{q[:m.start()]}"{m.group(0)}"{q[m.end():]}'
+    return q
+
+
 def web_queries(topic: TopicDoc) -> list[str]:
     """What the pipeline searches the web for, for this topic: its own web queries (phrases written to find this
-    thing and nothing else); for a topic without them, those of its names that are distinctive by themselves."""
-    return topic.queries or [t for t in topic.specific if distinctive(t)]
+    thing and nothing else); for a topic without them, those of its names that are distinctive by themselves.
+    The name in each is quoted (quote_names)."""
+    names = [topic.name, *topic.specific]
+    return [quote_names(q, names) for q in topic.queries or [t for t in topic.specific if distinctive(t)]]
 
 
 def not_searched(topic: TopicDoc) -> list[str]:
@@ -147,13 +179,15 @@ def query_key(q: str) -> str:
 
 def keyword_queries(active: list[TopicDoc]) -> list[dict]:
     """The pipeline's queries for these topics: {q, region} for each distinct web query once per region (the first
-    spelling met wins), sorted (stable for comparing). Names, broader phrases and look-alike words stay in the
-    brain, which uses them for matching."""
+    spelling met wins, a quoted one over an unquoted one), sorted (stable for comparing). Names, broader phrases
+    and look-alike words stay in the brain, which uses them for matching."""
     out: dict[tuple[str, str], dict] = {}
     for t in active:
         for q in web_queries(t):
             for region in regions(q):
-                out.setdefault((query_key(q), region), {"q": q, "region": region})
+                key = (query_key(q), region)
+                if key not in out or ('"' in q and '"' not in out[key]["q"]):
+                    out[key] = {"q": q, "region": region}
     return sorted(out.values(), key=lambda x: (x["q"].lower(), x["region"]))
 
 
@@ -439,7 +473,8 @@ async def track_topic(repos: Repos, ctx: UserContext, name: str, *, specific: li
     if goal is not None:
         fields["goal"] = _clean(goal, 300) or None
     if queries is not None:
-        cleaned = list({query_key(c): c for c in reversed([_clean(q, 120) for q in queries]) if c}.values())[::-1]
+        cleaned = list({query_key(c): c for c in reversed([exact(_clean(q, 120)) for q in queries])
+                        if c}.values())[::-1]
         vague = [q for q in cleaned if not distinctive(q)]
         if vague:
             raise InvalidInput(f"Web queries need context, not a lone word (it would bring noise): {vague}. Write "
