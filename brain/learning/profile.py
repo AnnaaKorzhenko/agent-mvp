@@ -124,7 +124,9 @@ meeting, a trip), from their messages and searches; not lasting interests. Each:
 words or phrases as Ukrainian and Russian news would write them), days (1-30: how long it likely stays relevant). \
 Keep previous intents that still apply, drop the finished ones; [] if there are none.
 - known: things they said they already know (don't repeat these to them).
-- avoid: topics or kinds of news they rated as not useful repeatedly or said they don't want.
+- avoid: topics or kinds of news they rated as not useful repeatedly or said they don't want. A rating of a suggestion \
+(target suggestion, «пропозиція (…): …») is their answer to something the service proposed: a no with a comment \
+that rejects the kind of thing («не пропонуй мені про кораблі») goes to avoid, worded as the comment says.
 - Each rating's "about" is the text of the rated news item; its "comment" refers to that item («this device», \
 «this topic» mean what "about" names). A comment asking for more on something specific is strong evidence: add \
 an interest named by that specific thing itself (the system, model, company or event from "about", written as \

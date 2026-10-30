@@ -18,6 +18,18 @@ ABOUT_USER_HELP = ("What News brain knows about the user, by kind: summary (lear
                    "they avoid, connect news to their goals, interests and tracked topics")
 
 
+class ProposalOut(BaseModel):
+    proposal_id: str
+    kind: Literal["goal", "topic", "advice"]
+    title: str = Field(description="What is proposed, e.g. the goal's text or the topic's name")
+    why: str = Field("", description="Why the system suggests it")
+    yes: str = Field(description="What a yes does, e.g. 'додати ціль', 'відстежувати тему'")
+    links: list[str] = Field(default_factory=list, description=(
+        "Sources to cite when you mention it (web finds: not from the news base, say so)"))
+    ask: str | None = Field(None, description="Advice whose yes is a request to you (a deep dive, an analysis): "
+                                              "its message")
+
+
 class MemoryOut(BaseModel):
     """On every tool result: what the server learned from this call's user_message / signals."""
     goals_to_offer: list[str] = Field(default_factory=list, description=(
@@ -25,6 +37,9 @@ class MemoryOut(BaseModel):
         "(set_goal)"))
     about_user: AboutUser | None = Field(None, description=(
         "Only on the first call of a conversation: " + ABOUT_USER_HELP))
+    proposal_to_mention: ProposalOut | None = Field(None, description=(
+        "At most once a day, outside the digest: one of the system's open suggestions. Mention it in one line at the "
+        "end of your answer (what and why) and ask; on the user's yes or no call answer_proposal"))
 
 
 WHY_HELP = ("Why this matters to this user (their goals, interests, rated topics), strongest first; empty if "
@@ -93,16 +108,17 @@ class TopicRenewal(BaseModel):
     days_left: int
 
 
-class ProposalOut(BaseModel):
-    proposal_id: str
-    kind: Literal["goal", "topic", "advice"]
-    title: str = Field(description="What is proposed, e.g. the goal's text or the topic's name")
-    why: str = Field("", description="Why the system suggests it")
-    yes: str = Field(description="What a yes does, e.g. 'додати ціль', 'відстежувати тему'")
-    links: list[str] = Field(default_factory=list, description=(
-        "Sources to cite when you mention it (web finds: not from the news base, say so)"))
-    ask: str | None = Field(None, description="Advice whose yes is a request to you (a deep dive, an analysis): "
-                                              "its message")
+class ProposalsResult(MemoryOut):
+    proposals: list[ProposalOut] = Field(description="Open suggestions, newest first; empty: there are none")
+
+
+class CorrectionResult(MemoryOut):
+    not_interested: str
+    dropped_interests: list[str] = Field(description="Inferred interests removed")
+    dropped_intents: list[str] = Field(description="Current intents removed")
+    closed_proposals: list[str] = Field(description="Open suggestions about it, closed")
+    followed_matching: list[str] = Field(description=(
+        "Topics the user follows that match: their own choice, so not stopped. Ask whether to stop them"))
 
 
 class ProposalAnswer(MemoryOut):

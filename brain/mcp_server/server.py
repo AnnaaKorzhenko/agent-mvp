@@ -66,7 +66,11 @@ word), broader phrases, look-alikes to exclude, tags, the goal it serves and the
 a deep dive.
 - A digest result's proposals are the system's own suggestions (a goal it noticed, a topic to follow, advice on \
 what changed with a next step): nothing changes until the user says yes. When answer_proposal returns `ask`, \
-carry that request out right away. In the widget they are cards with buttons; otherwise mention each once, in one \
+carry that request out right away. A result's proposal_to_mention: one line at the end of your answer, then \
+ask. When the user asks about suggestions or answers one from another conversation, get_proposals first. A no \
+with a reason: pass the reason.
+- When the user says something the system assumed about them is wrong («мене це не цікавить», «я вже цим не \
+займаюсь», «чому ти вирішив, що…»), call correct_profile. In the widget they are cards with buttons; otherwise mention each once, in one \
 line, and on the user's clear yes or no call answer_proposal. Never answer one for the user.
 - Every News brain tool takes user_message (the user's latest message, verbatim) and signals (durable things it \
 reveals: goals, interests, preferences, facts about their work, feedback, things they already know, in their \

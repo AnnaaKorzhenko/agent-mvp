@@ -400,6 +400,12 @@ class UsersRepo:
                                {"_id": 0, "learned.interests": 1, "learned.updated_at": 1})
         return [d["learned"] async for d in cursor]
 
+    async def update_learned(self, user_id: UserId, fields: dict) -> bool:
+        """Sets fields of users.learned (a correction by the user; the learning job writes the whole profile)."""
+        result = await self.col.update_one({"_id": user_key(user_id)},
+                                           {"$set": {f"learned.{k}": v for k, v in fields.items()}})
+        return result.matched_count == 1
+
     async def get_learned(self, user_id: UserId) -> dict | None:
         """users.learned: the profile the learning job wrote (brain/learning/profile.py), if any."""
         doc = await self.col.find_one({"_id": user_key(user_id)}, {"learned": 1})

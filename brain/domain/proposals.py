@@ -4,9 +4,13 @@ topics) never changes by itself: an agent proposes, the user's yes does it.
 users.proposals[] (capped, newest kept): {id, kind, key, title, why, action {tool, args}, links, agent, status,
 created_at, expires_at, shown_at, shown_count, answered_at, sensitivity}.
 - The same thing (`key`) is proposed once, whatever the answer was: a dismissed goal never comes back.
-- At most SHOW_MAX open proposals go out with a digest; an open one goes stale after its days.
+- At most SHOW_MAX open proposals go out with a digest; an open one goes stale after its days, or once it was
+  shown MAX_SHOWN times without an answer (no nagging). Listing them on request (list_open) isn't showing.
+- Outside a digest, one open proposal not shown today may be mentioned in a chat result (open_for with
+  not_shown_since): the user sees the agents' work even if he never opens the digest.
 - A yes runs the action (only the tools in ACTIONS), a no just closes it. Either answer is saved as feedback on a
-  suggestion, so the learning job learns from it like from any rating.
+  suggestion, with the user's reason as its comment, so the learning job learns from it like from any rating (a
+  «no, I don't want things like this» becomes something to avoid).
 """
 from __future__ import annotations
 
@@ -27,6 +31,8 @@ KINDS = ("goal", "topic", "advice")
 ACTIONS = ("set_goal", "track_topic", "stop_topic", "chat")
 OPEN_DAYS = 7
 SHOW_MAX = 3
+MAX_SHOWN = 3
+LIST_MAX = 10
 KEEP = 200
 MAX_TITLE = 120
 MAX_WHY = 500
@@ -59,9 +65,10 @@ def _expired(p: ProposalDoc, now: datetime) -> bool:
 
 
 async def open_for(repos: Repos, ctx: UserContext, limit: int = SHOW_MAX, mark_shown: bool = True,
-                   now: datetime | None = None) -> list[ProposalDoc]:
-    """The open proposals this client may show, oldest first; expired ones become stale, and goal proposals the
-    user already has as a goal close by themselves."""
+                   now: datetime | None = None, not_shown_since: datetime | None = None) -> list[ProposalDoc]:
+    """The open proposals this client may show, oldest first; expired ones and ones shown MAX_SHOWN times become
+    stale, and goal proposals the user already has as a goal close by themselves. not_shown_since: only ones not
+    shown since then."""
     now = now or datetime.now(timezone.utc)
     profile = await repos.users.get_profile(ctx.user_id)
     active = {g.text.lower() for g in (profile.goals if profile else []) if g.active}
@@ -70,8 +77,10 @@ async def open_for(repos: Repos, ctx: UserContext, limit: int = SHOW_MAX, mark_s
         if p.status != "open":
             continue
         oid = to_object_id(p.id)
-        if _expired(p, now):
+        if _expired(p, now) or (mark_shown and p.shown_count >= MAX_SHOWN):
             await repos.users.update_proposal(ctx.user_id, oid, {"status": "stale"}, status="open")
+            continue
+        if not_shown_since and p.shown_at and topics.utc(p.shown_at) >= not_shown_since:
             continue
         if p.kind == "goal" and p.title.lower() in active:
             await repos.users.update_proposal(ctx.user_id, oid, {"status": "accepted", "answered_at": now},
@@ -86,6 +95,12 @@ async def open_for(repos: Repos, ctx: UserContext, limit: int = SHOW_MAX, mark_s
     return out
 
 
+async def list_open(repos: Repos, ctx: UserContext) -> list[ProposalDoc]:
+    """The open proposals, when the user asks about them («що ти там пропонував?»): newest first, not counted as
+    shown."""
+    return list(reversed(await open_for(repos, ctx, limit=LIST_MAX, mark_shown=False)))[:LIST_MAX]
+
+
 @dataclass
 class Answered:
     proposal: ProposalDoc
@@ -95,7 +110,7 @@ class Answered:
 
 
 async def answer(repos: Repos, ctx: UserContext, proposal_id: str, accept: bool, *,
-                 mcp_channels: list[str]) -> Answered:
+                 mcp_channels: list[str], reason: str | None = None) -> Answered:
     oid = to_object_id(proposal_id)
     found = next((p for p in await repos.users.get_proposals(ctx.user_id) if oid and to_object_id(p.id) == oid), None)
     if found is None or not sensitivity.is_allowed(found.sensitivity, ctx.max_sensitivity):
@@ -131,5 +146,5 @@ async def answer(repos: Repos, ctx: UserContext, proposal_id: str, accept: bool,
         raise InvalidInput("This proposal was answered meanwhile")
     await feedback.record_feedback(repos, ctx, mcp_channels=mcp_channels, target_type="suggestion",
                                    reaction="useful" if accept else "not_useful",
-                                   about=f"пропозиція ({found.kind}): {found.title}")
+                                   about=f"пропозиція ({found.kind}): {found.title}", text=reason)
     return Answered(found, accept, done, ask)

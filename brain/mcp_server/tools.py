@@ -10,6 +10,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Annotated, Any, Awaitable, Callable, Literal
 
 from bson import ObjectId
@@ -24,6 +25,7 @@ from brain.audit.log import AuditLog
 from brain.config import Settings
 from brain.db.repositories import Repos, user_key
 from brain.domain import analysis as analysis_domain
+from brain.domain import corrections as corrections_domain
 from brain.domain import digests as digests_domain
 from brain.domain import feedback as feedback_domain
 from brain.domain import goals as goals_domain
@@ -106,6 +108,8 @@ def _common(user_message: str | None, signals: list[out.Signal] | None) -> dict:
 
 
 ALWAYS_ABOUT = {"get_digest", "get_profile"}
+# Tools whose results carry the suggestions themselves, or answer one: no extra one to mention.
+NO_MENTION = {"get_digest", "get_morning_digest", "get_proposals", "answer_proposal"}
 
 
 @dataclass
@@ -115,6 +119,7 @@ class Memory:
     duplicates: int = 0
     goals_to_offer: list[str] = field(default_factory=list)
     about_user: dict | None = None
+    proposal: Any = None              # one open suggestion to mention (ProposalDoc), at most once a day
 
 
 def _digest_out(res: digests_domain.DigestResultView, cls: type[out.DigestResult] = out.DigestResult,
@@ -159,13 +164,15 @@ def _yes(p) -> str:
     return p.action.args.get("label") or PROPOSAL_YES.get(p.action.tool, "так")
 
 
+def _proposal_out(p) -> out.ProposalOut:
+    return out.ProposalOut(proposal_id=p.id, kind=p.kind, title=p.title, why=p.why, links=p.links, yes=_yes(p),
+                           ask=p.action.args.get("message") if p.action and p.action.tool == "chat" else None)
+
+
 async def _proposals(svc: "Services", ctx: UserContext, result: out.DigestResult) -> None:
     """Adds the open proposals (at most proposals_domain.SHOW_MAX). Never breaks the digest."""
     try:
-        result.proposals = [
-            out.ProposalOut(proposal_id=p.id, kind=p.kind, title=p.title, why=p.why, links=p.links, yes=_yes(p),
-                            ask=p.action.args.get("message") if p.action and p.action.tool == "chat" else None)
-            for p in await proposals_domain.open_for(svc.repos, ctx)]
+        result.proposals = [_proposal_out(p) for p in await proposals_domain.open_for(svc.repos, ctx)]
     except Exception as e:                 # noqa: BLE001
         logger.error(f"proposals failed: {type(e).__name__}: {e}")
 
@@ -318,6 +325,11 @@ class _Call:
             # without a session id: they always bring the profile; other tools only after a quiet spell.
             if first or self.name in ALWAYS_ABOUT:
                 self.memory.about_user = await insights_domain.about_user(self.svc.repos, ctx) or None
+            if self.name not in NO_MENTION:
+                today = digests_domain.kyiv_day_bounds(datetime.now(timezone.utc).astimezone(digests_domain.KYIV)
+                                                       .date())[0]
+                found = await proposals_domain.open_for(self.svc.repos, ctx, limit=1, not_shown_since=today)
+                self.memory.proposal = found[0] if found else None
         except Exception as e:             # noqa: BLE001 - memory must never break a tool
             logger.error(f"remember() failed in {self.name}: {type(e).__name__}: {e}")
 
@@ -330,10 +342,12 @@ class _Call:
 
     def _attach(self, result):
         m = self.memory
-        if not (m.goals_to_offer or m.about_user):
+        if not (m.goals_to_offer or m.about_user or m.proposal):
             return result
+        mention = _proposal_out(m.proposal) if m.proposal else None
         if isinstance(result, CallToolResult):
-            extra = {"goals_to_offer": m.goals_to_offer, "about_user": m.about_user}
+            extra = {"goals_to_offer": m.goals_to_offer, "about_user": m.about_user,
+                     **({"proposal_to_mention": mention.model_dump()} if mention else {})}
             if isinstance(result.structured_content, dict):
                 result.structured_content.update(extra)
             for block in result.content:
@@ -343,6 +357,7 @@ class _Call:
             return result
         if isinstance(result, out.MemoryOut):
             result.goals_to_offer = m.goals_to_offer
+            result.proposal_to_mention = mention
             if not result.about_user:
                 result.about_user = m.about_user
         return result
@@ -688,23 +703,73 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
     async def answer_proposal(
         mcp_ctx: Context,
         user_message: UserMessage,
-        proposal_id: Annotated[str, Field(description="The proposal_id from a digest's proposals")],
+        proposal_id: Annotated[str, Field(description=(
+            "The proposal_id from a digest's proposals, a proposal_to_mention, or get_proposals"))],
         answer: Annotated[Literal["accept", "dismiss"], Field(description=(
             "accept: the user said yes (adds the goal / follows the topic); dismiss: not interested"))],
+        reason: Annotated[str | None, Field(max_length=500, description=(
+            "The user's own words about why, verbatim, if they gave any («не пропонуй мені про кораблі»): the "
+            "system learns what not to suggest from them"))] = None,
         signals: Signals = None,
     ) -> out.ProposalAnswer:
-        """Answer one of the system's suggestions (a digest's proposals) when the user says yes or no to it.
-        A yes does what the suggestion says (adds the goal, follows or stops a topic); either answer teaches the
-        system what to suggest. If the result has `ask`, the yes was a request (a deep dive, an analysis): carry it
-        out now, as if the user had typed it. Never answer for the user: only on their clear yes or no. Confirm `done` in one line."""
-        call = _Call(svc, "answer_proposal", {"proposal_id": proposal_id, "answer": answer,
+        """Answer one of the system's suggestions when the user says yes or no to it, in any words («так, додай»,
+        «давай ту пораду про Рассвет», «ні, це не моє»). A yes does what the suggestion says (adds the goal,
+        follows or stops a topic); either answer teaches the system what to suggest. If the result has `ask`, the
+        yes was a request (a deep dive, an analysis): carry it out now, as if the user had typed it. Never answer
+        for the user: only on their clear yes or no. Confirm `done` in one line."""
+        call = _Call(svc, "answer_proposal", {"proposal_id": proposal_id, "answer": answer, "reason": reason,
                                               **_common(user_message, signals)}, mcp_ctx)
 
         async def body(ctx: UserContext) -> out.ProposalAnswer:
             r = await proposals_domain.answer(svc.repos, ctx, proposal_id, answer == "accept",
-                                              mcp_channels=svc.mcp_channels)
+                                              mcp_channels=svc.mcp_channels, reason=reason)
             await call.done(items=1)
             return out.ProposalAnswer(proposal_id=proposal_id, accepted=r.accepted, done=r.done, ask=r.ask)
+        return await call.run(body)
+
+    @mcp.tool(title="The system's open suggestions", annotations=READ_ONLY)
+    async def get_proposals(
+        mcp_ctx: Context,
+        user_message: UserMessage,
+        signals: Signals = None,
+    ) -> out.ProposalsResult:
+        """The system's open suggestions (goals it noticed, topics to follow, advice on what changed), newest
+        first: when the user asks about them in any words («що ти там пропонував?», «які в тебе поради?», «а що
+        з тією темою, яку ти радив?») or answers one you can't find in this conversation. Then answer_proposal."""
+        call = _Call(svc, "get_proposals", _common(user_message, signals), mcp_ctx)
+
+        async def body(ctx: UserContext) -> out.ProposalsResult:
+            found = await proposals_domain.list_open(svc.repos, ctx)
+            await call.done(items=len(found))
+            return out.ProposalsResult(proposals=[_proposal_out(p) for p in found])
+        return await call.run(body)
+
+    @mcp.tool(title="Correct what the system inferred",
+              annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True,
+                                          openWorldHint=False))
+    async def correct_profile(
+        mcp_ctx: Context,
+        user_message: UserMessage,
+        not_interested: Annotated[str, Field(max_length=120, description=(
+            "What the user says doesn't interest them (any more), in their words, short: «космос», «кораблі», "
+            "«новини про Рассвет»"))],
+        signals: Signals = None,
+    ) -> out.CorrectionResult:
+        """When the user says something the system thinks about them is wrong, in any words: «мене це не
+        цікавить», «я вже цим не займаюсь», «чому ти вирішив, що мені цікаві кораблі?», «не підсовуй мені це».
+        Removes the matching inferred interests and current intents at once, pushes such news down, closes open
+        suggestions about it and remembers it. Topics the user follows are their own choice: if
+        followed_matching is not empty, ask whether to stop following them too (track_topic stop)."""
+        call = _Call(svc, "correct_profile", {"not_interested": not_interested, **_common(user_message, signals)},
+                     mcp_ctx)
+
+        async def body(ctx: UserContext) -> out.CorrectionResult:
+            r = await corrections_domain.not_interested(svc.repos, ctx, not_interested,
+                                                         profile_keywords=svc.settings.profile_keywords)
+            await call.done(items=len(r.dropped_interests) + len(r.dropped_intents))
+            return out.CorrectionResult(not_interested=r.text, dropped_interests=r.dropped_interests,
+                                        dropped_intents=r.dropped_intents, closed_proposals=r.closed_proposals,
+                                        followed_matching=r.followed_matching)
         return await call.run(body)
 
     @mcp.tool(title="Add or remove a goal",
