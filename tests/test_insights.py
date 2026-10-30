@@ -147,7 +147,8 @@ async def test_log_turn_records_the_message_and_saves_signals(test_db, user):
         again = (await c.call_tool("log_turn", {
             "user_message": "пиши коротше", "previous_reply": "Показав 3 новини про НРК інвестиції",
             "signals": [{"kind": "preference", "text": "Пиши   коротше"}]})).structured_content
-        assert again == {"saved": 0, "duplicates": 1, "goals_to_offer": [], "about_user": None}
+        assert again == {"saved": 0, "duplicates": 1, "goals_to_offer": [], "about_user": None,
+                     "proposal_to_mention": None}
 
     doc = await test_db.users.find_one({"_id": user})
     by_kind = {i["kind"]: i for i in doc["insights"]}

@@ -13,8 +13,21 @@ class Channel(BaseModel):
 
 AboutUser = dict[str, list[str]]
 ABOUT_USER_HELP = ("What News brain knows about the user, by kind: summary (learned from all their activity), "
-                   "preference, goal, interest, known, avoid, fact, feedback. Follow their preferences, skip what "
-                   "they already know and what they avoid, connect news to their goals and interests")
+                   "preference, goal, interest, tracked (specific topics they follow, with the date it ends), "
+                   "known, avoid, fact, feedback. Follow their preferences, skip what they already know and what "
+                   "they avoid, connect news to their goals, interests and tracked topics")
+
+
+class ProposalOut(BaseModel):
+    proposal_id: str
+    kind: Literal["goal", "topic", "advice"]
+    title: str = Field(description="What is proposed, e.g. the goal's text or the topic's name")
+    why: str = Field("", description="Why the system suggests it")
+    yes: str = Field(description="What a yes does, e.g. 'додати ціль', 'відстежувати тему'")
+    links: list[str] = Field(default_factory=list, description=(
+        "Sources to cite when you mention it (web finds: not from the news base, say so)"))
+    ask: str | None = Field(None, description="Advice whose yes is a request to you (a deep dive, an analysis): "
+                                              "its message")
 
 
 class MemoryOut(BaseModel):
@@ -24,6 +37,9 @@ class MemoryOut(BaseModel):
         "(set_goal)"))
     about_user: AboutUser | None = Field(None, description=(
         "Only on the first call of a conversation: " + ABOUT_USER_HELP))
+    proposal_to_mention: ProposalOut | None = Field(None, description=(
+        "At most once a day, outside the digest: one of the system's open suggestions. Mention it in one line at the "
+        "end of your answer (what and why) and ask; on the user's yes or no call answer_proposal"))
 
 
 WHY_HELP = ("Why this matters to this user (their goals, interests, rated topics), strongest first; empty if "
@@ -74,7 +90,8 @@ class DigestSectionOut(BaseModel):
 
 
 class DigestOut(BaseModel):
-    side: Literal["ua", "ru"] | str
+    side: Literal["ua", "ru", "topics"] | str = Field(description=(
+        "topics: today's news on the topics the user follows (sections per topic), shown first"))
     side_note: str | None = None
     digest_id: str
     created_at: str
@@ -84,8 +101,43 @@ class DigestOut(BaseModel):
     hidden_items: int = Field(0, description="Items withheld because this connection may not receive them")
 
 
+class TopicRenewal(BaseModel):
+    name: str
+    expires_at: str
+    expired: bool = Field(description="True: it already stopped being searched")
+    days_left: int
+
+
+class ProposalsResult(MemoryOut):
+    proposals: list[ProposalOut] = Field(description="Open suggestions, newest first; empty: there are none")
+
+
+class CorrectionResult(MemoryOut):
+    not_interested: str
+    dropped_interests: list[str] = Field(description="Inferred interests removed")
+    dropped_intents: list[str] = Field(description="Current intents removed")
+    closed_proposals: list[str] = Field(description="Open suggestions about it, closed")
+    followed_matching: list[str] = Field(description=(
+        "Topics the user follows that match: their own choice, so not stopped. Ask whether to stop them"))
+
+
+class ProposalAnswer(MemoryOut):
+    proposal_id: str
+    accepted: bool
+    done: str = Field(description="What the answer did; confirm it to the user in one line")
+    ask: str | None = Field(None, description="Set when the yes was a request: carry it out now, as if the user had "
+                                              "typed it (e.g. a deep dive or an analysis)")
+
+
 class DigestResult(MemoryOut):
     date: str | None = Field(description="Kyiv date of the digests (YYYY-MM-DD)")
+    proposals: list[ProposalOut] = Field(default_factory=list, description=(
+        "The system's suggestions for the user (goals it noticed, topics to follow, advice on what changed). In the "
+        "widget they show as cards with Так / Не цікаво buttons; otherwise mention them in one line each and, on "
+        "the user's answer, call answer_proposal"))
+    topics_to_renew: list[TopicRenewal] = Field(default_factory=list, description=(
+        "Followed topics expiring within days (or just expired): ask the user once, briefly, whether to keep "
+        "following each (on yes: track_topic follow with its name, which renews it for 30 days)"))
     digests: list[DigestOut]
     missing_sides: list[str] = Field(description="Sides with no digest for that date")
     note: str | None = None
@@ -97,6 +149,9 @@ class MorningDigestResult(DigestResult):
     status: Literal["new", "not_ready", "already_sent"] = Field(description=(
         "new: today's digest, delivered now (present it); not_ready: no complete digest for today yet; "
         "already_sent: today's digest was delivered before (don't present it again)"))
+    analysis_due: "AnalysisDue | None" = Field(None, description=(
+        "Monday / the 1st: the weekly or monthly analysis is due and not written yet. After presenting the digest, "
+        "call get_analysis with these dates, write it and save it with save_report"))
 
 
 class PostDetail(PostOut, MemoryOut):
@@ -125,6 +180,8 @@ class ProfileOut(MemoryOut):
     top_categories: list[CategoryScore]
     top_tags: list[TagScore]
     insights: InsightCount = InsightCount(saved=0, visible_here=0)
+    topics: list["TopicOut"] = Field(default_factory=list, description="Specific things the user follows or dug "
+                                                                      "into (track_topic / save_findings)")
     about_user: AboutUser = Field(default_factory=dict, description=ABOUT_USER_HELP)
 
 
@@ -183,3 +240,140 @@ class FeedbackOut(MemoryOut):
     replaced_previous: str | None = Field(None, description="The earlier reaction from an AI client, if replaced")
     score_changes: dict[str, float]
     confirmation: str = Field(description="Short Ukrainian confirmation to tell the user")
+    offer_deep_dive: bool = Field(False, description=(
+        "True: the user asked for more on the rated item. Offer (or, if they plainly asked, start) a deep dive: "
+        "deep_dive, then a web search"))
+
+
+class FindingIn(BaseModel):
+    """One thing found on the web (input to save_findings)."""
+    title: str = Field(min_length=2, max_length=200, description="The page's or article's title")
+    url: str = Field(min_length=8, max_length=500, description="The exact URL it came from; never invent one")
+    source: str | None = Field(None, max_length=80, description="Who published it, e.g. 'Defense Express', "
+                                                                 "'ISW', a Telegram channel")
+    date: str | None = Field(None, max_length=20, description="Publication date YYYY-MM-DD, if known")
+    summary: str = Field(min_length=2, max_length=400, description="One or two sentences: what it adds")
+    status: Literal["confirmed", "claim", "unclear"] = Field("unclear", description=(
+        "confirmed: independent / official confirmation; claim: one side's claim (Russian sources are claims); "
+        "unclear: can't tell"))
+
+
+class FindingOut(BaseModel):
+    title: str
+    url: str
+    source: str | None
+    date: str | None
+    summary: str
+    status: str
+
+
+class TopicOut(BaseModel):
+    name: str
+    status: Literal["explored", "active", "expired", "stopped"] | str = Field(description=(
+        "explored: dug into, not followed; active: followed in digests and search; expired / stopped: no longer"))
+    expires_at: str | None = None
+    goal: str | None = None
+    specific: list[str] = Field(default_factory=list, description="Names and aliases matched first")
+    broader: list[str] = Field(default_factory=list)
+    exclude: list[str] = Field(default_factory=list)
+    web_queries: list[str] = Field(default_factory=list, description="What the news pipeline searches the web for")
+    tags: list[str] = Field(default_factory=list)
+    findings_count: int = 0
+    findings: list[FindingOut] = Field(default_factory=list, description="Saved earlier: build on them, don't "
+                                                                         "search for them again")
+
+
+class DeepDiveSubject(BaseModel):
+    text: str
+    source_urls: list[str]
+    is_russian_source_claim: bool
+    digest_id: str | None = None
+    item_n: int | None = None
+    post_id: str | None = None
+
+
+class DeepDiveResult(MemoryOut):
+    subject: DeepDiveSubject
+    source_posts: list[PostOut] = Field(description="The subject's own source posts still in the news base")
+    related_posts: list[PostOut] = Field(description="Other posts in the news base on the same thing (30 days)")
+    searched_for: list[str] = Field(description="Names the news base was searched for")
+    topic: TopicOut | None = Field(None, description="The user's existing topic on this, with earlier findings")
+    goals: list[str] = Field(description="The user's active goals: say which ones this serves")
+    next_steps: str
+
+
+class TopicSaved(MemoryOut):
+    topic: TopicOut
+    created: bool
+    added_findings: int = 0
+    duplicate_findings: int = Field(0, description="Findings skipped: their URL was already saved")
+    unknown_tags: list[str] = Field(default_factory=list, description="Dropped: not in the fixed tag list")
+    missing_regions: list[str] = Field(default_factory=list, description=(
+        "Regions (ua / ru / world) no web query of the topic reaches, so the web search there finds nothing: call "
+        "track_topic again adding web_queries in those languages (world: English; ua: Ukrainian; ru: Russian)"))
+    not_searched: list[str] = Field(default_factory=list, description=(
+        "Names left out of the web search because alone they are an everyday word or another thing (e.g. "
+        "«Рассвет»): call track_topic again with web_queries that say what it is"))
+    confirmation: str = Field(description="Short Ukrainian confirmation to tell the user")
+
+
+class AnalysisItem(BaseModel):
+    id: str = Field(description="digest_id/n of the item")
+    date: str
+    side: Literal["ua", "ru", "topics"] | str
+    is_russian_source_claim: bool
+    category: str
+    text: str
+    source_urls: list[str]
+    why: list[str] = Field(default_factory=list, description=WHY_HELP)
+    goals: list[str] = Field(default_factory=list, description="The user's goals this item is about")
+    topics: list[str] = Field(default_factory=list, description="The user's tracked topics it names")
+
+
+class AnalysisPeriod(BaseModel):
+    start_date: str
+    end_date: str
+    days: int
+    label: str = Field(description="How to name the period to the user, e.g. «23.10–29.10» or «жовтень 2026»")
+
+
+class AnalysisResult(MemoryOut):
+    status: Literal["stored", "to_write", "empty"] = Field(description=(
+        "stored: the report was written before (report, highlights): present it; to_write: write it now from the "
+        "pack (next_steps), then save_report; empty: no digests in the period, say so"))
+    period: AnalysisPeriod
+    previous_period: AnalysisPeriod | None = None
+    focus: str | None = None
+    title: str | None = None
+    highlights: list[str] = Field(default_factory=list)
+    report: str | None = Field(None, description="stored: the full report (markdown)")
+    written_at: str | None = None
+    goals: list[str] = Field(default_factory=list)
+    tracked_topics: list[str] = Field(default_factory=list)
+    user_summary: str | None = None
+    counts: dict = Field(default_factory=dict, description=(
+        "Exact counts over all the period's digest items (not only the selection): items and previous_items, "
+        "per_day, by_side, by_category, goals, topics (each against the previous period), top_tags"))
+    items: list[AnalysisItem] = Field(default_factory=list, description=(
+        "The items that matter to this user, oldest first (a selection; counts cover all)"))
+    selected_from: int = Field(0, description="Distinct items the selection was made from")
+    findings: list[dict] = Field(default_factory=list, description="Web findings saved on the user's topics "
+                                                                   "during the period")
+    next_steps: str | None = None
+
+
+class ReportSaved(MemoryOut):
+    period: AnalysisPeriod
+    focus: str | None
+    title: str
+    confirmation: str = Field(description="Short Ukrainian confirmation to tell the user")
+
+
+class AnalysisDue(BaseModel):
+    period: Literal["week", "month"]
+    start_date: str
+    end_date: str
+    label: str
+
+
+MorningDigestResult.model_rebuild()          # analysis_due refers to AnalysisDue, defined after it

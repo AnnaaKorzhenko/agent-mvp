@@ -82,17 +82,18 @@ def digest_index(result: out.DigestResult) -> str:
     items = [(d, s, i) for d in result.digests for s in d.sections for i in s.items]
     lines = [
         f"The user already sees this digest ({result.date}) as interactive cards #1–#{len(items)} with source "
-        "links and 👍 / 👎 / 50/50 buttons. Do NOT repeat, list or summarize the digest in your reply. Reply "
+        "links and Корисно / Не корисно / 50/50 buttons. Do NOT repeat, list or summarize the digest in your reply. Reply "
         "with one short sentence at most (e.g. offer more detail on an item by its number), unless the user "
         "asked something specific. If the user asks for the digest as text, call get_digest with as_text=true.",
         "Ratings made with the buttons are already saved; they reach you as context, not as messages.",
         "Index (ref · side · category · digest_id/n · source post ids · opening words · why it matters to the "
         "user). Items are ordered by the user's goals and interests; items marked RU are claims of Russian "
-        "channels, not facts:",
+        "channels, not facts; items marked TOPIC are news on topics the user follows (category = the topic):",
     ]
     for d, s, i in items:
         why = f" · для користувача: {'; '.join(i.why)}" if i.why else ""
-        lines.append(f"#{i.ref} {'RU' if d.side == 'ru' else 'UA'} · {s.category} · {d.digest_id}/{i.n} · "
+        origin = ("TOPIC " if d.side == "topics" else "") + ("RU" if i.is_russian_source_claim else "UA")
+        lines.append(f"#{i.ref} {origin} · {s.title if d.side == 'topics' else s.category} · {d.digest_id}/{i.n} · "
                      f"{','.join(i.source_post_ids[:3])} · «{_short(i.text)}»{why}")
     for d in result.digests:
         if d.hidden_items:
@@ -104,7 +105,7 @@ def digest_index(result: out.DigestResult) -> str:
 
 SEARCH_NOTE = (
     "The user already sees these results as interactive cards #1–#{n} (channel, date, summary, link, and "
-    "👍 / 👎 / 50/50 buttons). Answer the user's question from them in your own words, citing items as #N; do "
+    "Корисно / Не корисно / 50/50 buttons). Answer the user's question from them in your own words, citing items as #N; do "
     "NOT list the posts one by one or repeat their links. Ratings made with the buttons are already saved; they "
     "reach you as context, not as messages.\n")
 
@@ -125,7 +126,7 @@ def apps_extension() -> Apps:
     """The MCP Apps extension with every widget resource; pass it to MCPServer(extensions=[...])."""
     apps = Apps()
     apps.add_html_resource(DIGEST_UI, widget_html("digest.html"), name="digest", title="Зведення",
-                           description="Today's digest with 👍 / 👎 / 50/50 buttons", prefers_border=False)
+                           description="Today's digest with Корисно / Не корисно / 50/50 buttons", prefers_border=False)
     apps.add_html_resource(SEARCH_UI, widget_html("search.html"), name="search", title="Пошук",
-                           description="Search results with 👍 / 👎 / 50/50 buttons", prefers_border=False)
+                           description="Search results with Корисно / Не корисно / 50/50 buttons", prefers_border=False)
     return apps

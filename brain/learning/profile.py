@@ -15,12 +15,13 @@ import re
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from pymongo.asynchronous.database import AsyncDatabase
 
 from brain.db.repositories import user_key
+from brain.domain import interests as interests_domain
 from brain.domain import sensitivity
 from brain.domain.tag_list import TAG_LIST
 from brain.integrations.backends import ModelBackend, ModelResult
@@ -40,6 +41,31 @@ CHAT_LABEL = "internal"         # what the chat, feedback and the learned profil
 class Interest(BaseModel):
     topic: str = Field(max_length=80)
     weight: int = Field(ge=1, le=5)
+    origin: Literal["stated", "inferred"] = "inferred"
+    signals: list[str] = Field(default_factory=list, max_length=8)     # evidence kinds in this run's activity
+    web_queries: list[str] = Field(default_factory=list, max_length=3)
+
+    @field_validator("signals")
+    @classmethod
+    def _known_signals(cls, v: list[str]) -> list[str]:
+        return [s for s in dict.fromkeys(v) if s in interests_domain.SIGNALS]
+
+    @field_validator("web_queries")
+    @classmethod
+    def _queries(cls, v: list[str]) -> list[str]:
+        return [" ".join(q.split())[:120] for q in v if q and q.strip()]
+
+
+class Intent(BaseModel):
+    """What the user is working on now (a report, a choice, a trip): a short, strong boost that expires."""
+    text: str = Field(max_length=200)
+    terms: list[str] = Field(default_factory=list, max_length=8)
+    days: int = Field(7, ge=1, le=30)
+
+    @field_validator("terms")
+    @classmethod
+    def _short(cls, terms: list[str]) -> list[str]:
+        return [" ".join(t.split())[:60] for t in terms if t and t.strip()]
 
 
 class GoalMatch(BaseModel):
@@ -65,6 +91,7 @@ class LearnedProfile(BaseModel):
     summary: str = Field(max_length=700, description="Who the user is and what they need, 2-4 sentences")
     preferences: list[str] = Field(default_factory=list, max_length=12)
     interests: list[Interest] = Field(default_factory=list, max_length=15)
+    intents: list[Intent] = Field(default_factory=list, max_length=5)
     known: list[str] = Field(default_factory=list, max_length=12)
     avoid: list[str] = Field(default_factory=list, max_length=10)
     goal_candidates: list[str] = Field(default_factory=list, max_length=5)
@@ -81,10 +108,32 @@ of news items and answers (with reasons and comments), and things they shared or
 (insights, with a kind). Update the profile:
 - Merge new evidence with the previous profile. When statements conflict, the newer one wins.
 - preferences: how they want answers and news (length, format, language, what to include or skip).
-- interests: topics they care about, weight 1-5 by how strong and repeated the evidence is (ratings and repeated \
-questions count more than one mention). Drop topics with only weak, old evidence.
+- interests: lasting topics they care about, weight 1-5 by how strong and repeated the evidence is (ratings and \
+repeated questions count more than one mention). Drop topics with only weak, old evidence. Also infer interests \
+they never named: what their searches (chat messages with via search_query), questions, deep dives \
+(«Глибше про …») and ratings keep coming back to. For each:
+  - origin: "stated" if they said it in their own words («мене цікавить …», a goal, a followed topic), else \
+"inferred";
+  - signals: the kinds of evidence for it in the NEW activity of this run, from: rating, comment, search, chat, \
+deep_dive, follow, suggestion (a yes or no to a proposal); [] if it comes only from the previous profile;
+  - web_queries: 1-3 web search phrases of 2-6 words that find news on exactly this interest and nothing else, in \
+Ukrainian, Russian or English, the name of the thing in «…» for an exact match (e.g. «НРК» для штурмових груп, \
+морські дрони «Magura» атаки); none for an interest too broad to search.
+- intents: what they are working on right now, with a near end (preparing a report, choosing a supplier, a \
+meeting, a trip), from their messages and searches; not lasting interests. Each: text (one line), terms (2-8 \
+words or phrases as Ukrainian and Russian news would write them), days (1-30: how long it likely stays relevant). \
+Keep previous intents that still apply, drop the finished ones; [] if there are none.
 - known: things they said they already know (don't repeat these to them).
-- avoid: topics or kinds of news they rated as not useful repeatedly or said they don't want.
+- avoid: topics or kinds of news they rated as not useful repeatedly or said they don't want. A rating of a suggestion \
+(target suggestion, «пропозиція (…): …») is their answer to something the service proposed: a no with a comment \
+that rejects the kind of thing («не пропонуй мені про кораблі») goes to avoid, worded as the comment says.
+- Each rating's "about" is the text of the rated news item; its "comment" refers to that item («this device», \
+«this topic» mean what "about" names). A comment asking for more on something specific is strong evidence: add \
+an interest named by that specific thing itself (the system, model, company or event from "about", written as \
+«назва: що саме цікавить»), weight 4-5, not a general «wants details».
+- followed_topics: specific things the user chose to follow in their news (strong, explicit evidence): each \
+should be among the interests, named by the topic itself, weight 4-5, while it is followed; drop such an \
+interest once the topic is no longer followed unless other evidence keeps it.
 - goal_candidates: goals they expressed that are not in their active goals.
 - summary: 2-4 sentences: who they are (work, role, organization if stated) and what they need from the service.
 - goal_keywords: ONLY for each goal in goals_to_map (copy its text exactly into "goal"); the other active goals \
@@ -103,7 +152,8 @@ city names alone, no broad field names («ППО», «дрони»): put those i
 - Only state what the evidence supports; no guesses. Write the texts in Ukrainian, short.
 Answer with one JSON object only, no other text. Inside strings never use the " character: write quotes as «…». \
 Exactly these keys:
-{"summary": str, "preferences": [str], "interests": [{"topic": str, "weight": 1-5}], "known": [str], \
+{"summary": str, "preferences": [str], "interests": [{"topic": str, "weight": 1-5, "origin": str, \
+"signals": [str], "web_queries": [str]}], "intents": [{"text": str, "terms": [str], "days": int}], "known": [str], \
 "avoid": [str], "goal_candidates": [str], \
 "goal_keywords": [{"goal": str, "specific": [str], "broader": [str], "tags": [str]}]}"""
 
@@ -120,6 +170,9 @@ class Activity:
     withheld: int = 0                      # items above the backend's label, not sent
     labels: list[str] = field(default_factory=list)    # labels of everything sent
     goals_without_keywords: list[str] = field(default_factory=list)   # active goals the profile doesn't map yet
+    # Topics the user follows now: context for every run, not new activity (following one doesn't start a run).
+    followed_topics: list[dict] = field(default_factory=list)
+    previous_written: datetime | None = None   # when the previous profile was saved (for its older interests)
 
     @property
     def label(self) -> str:
@@ -133,10 +186,12 @@ class Activity:
     def payload(self) -> dict:
         # The previous profile without its goal mappings (long; kept and merged by save()), and only the goals
         # that still need one: each run stays small however many goals the user has.
-        previous = {k: v for k, v in (self.previous or {}).items() if k != "goal_keywords"}
+        previous = {k: v for k, v in interests_domain.for_model(self.previous or {}).items()
+                    if k != "goal_keywords"} if self.previous else {}
         return {"previous_profile": previous, "active_goals": self.goals,
                 "goals_to_map": self.goals_without_keywords[:MAP_PER_RUN], "tag_list": list(TAG_LIST),
-                "chat_messages": self.chat, "ratings": self.feedback, "insights": self.insights}
+                "followed_topics": self.followed_topics, "chat_messages": self.chat, "ratings": self.feedback,
+                "insights": self.insights}
 
     def size(self) -> int:
         return len(json.dumps(self.payload(), ensure_ascii=False))
@@ -151,6 +206,23 @@ def _cut(text: Any) -> str:
     return text if len(text) <= MAX_TEXT else text[:MAX_TEXT - 1] + "…"
 
 
+ABOUT_SHORT = 200       # what a rating without a comment was about: enough to name the topic
+NEUTRAL = ("neutral", "skip")
+
+
+def _about(f: dict, text: str | None) -> str | None:
+    """The rated item's text: in full when the user commented or gave reasons (the comment refers to it), shorter
+    for a plain 👍 / 👎, left out for 50/50 (says little, costs tokens)."""
+    if not text:
+        return None
+    if f.get("text") or f.get("reasons") or f.get("target_type") in ("answer", "suggestion"):
+        return _cut(text)
+    if f.get("reaction") in NEUTRAL:
+        return None
+    text = " ".join(str(text).split())
+    return text if len(text) <= ABOUT_SHORT else text[:ABOUT_SHORT - 1] + "…"
+
+
 def _day(dt: datetime | None) -> str | None:
     return dt.date().isoformat() if dt else None
 
@@ -163,26 +235,69 @@ def _newer(dt: datetime | None, since: datetime | None) -> bool:
     return since is None or dt > since
 
 
-async def collect(db: AsyncDatabase, user_id, max_label: str) -> Activity:
-    """Everything new for this user since users.learned.processed_until, at or below `max_label`."""
+def feedback_stamp(f: dict) -> datetime | None:
+    """When a rating last carried news: a comment added later (text_at) makes an old rating new again."""
+    stamps = [s if s.tzinfo else s.replace(tzinfo=timezone.utc)
+              for s in (f.get("at"), f.get("text_at") if f.get("text") else None) if isinstance(s, datetime)]
+    return max(stamps, default=None)
+
+
+async def _rated_texts(db: AsyncDatabase, fb: list[dict]) -> dict[int, str]:
+    """What each rating was about, for ratings that didn't keep a copy (the bot's, and MCP ratings before
+    2026-10-29): the post summary if the post still exists, else the digest item's text (digests stay a year)."""
+    out: dict[int, str] = {}
+    need = [(i, f) for i, f in enumerate(fb) if not f.get("about")]
+    ids = list({f["post_id"] for _, f in need if f.get("post_id")})
+    summaries = {p["_id"]: p.get("summary") async for p in db.posts.find({"_id": {"$in": ids}}, {"summary": 1})}
+    by_item: dict = {}
+    for i, f in need:
+        if summaries.get(f.get("post_id")):
+            out[i] = summaries[f["post_id"]]
+        elif f.get("digest_id") is not None and f.get("item_n") is not None:
+            by_item[(f["digest_id"], f["item_n"])] = i
+    digest_ids = list({d for d, _ in by_item})
+    async for d in db.digests.find({"_id": {"$in": digest_ids}}, {"sections.items": 1}):
+        c = 0
+        for s in d.get("sections") or []:
+            for it in s.get("items") or []:
+                c += 1
+                if (i := by_item.get((d["_id"], it.get("n", c)))) is not None:
+                    out[i] = it.get("text") or ""
+    return out
+
+
+async def collect(db: AsyncDatabase, user_id, max_label: str, since: datetime | None = None) -> Activity:
+    """Everything new for this user since users.learned.processed_until (or `since`, to reprocess from a date),
+    at or below `max_label`."""
     key = user_key(user_id) if not isinstance(user_id, int) else user_id
     user = await db.users.find_one({"_id": key}, {"learned": 1, "goals": 1, "insights": 1,
-                                                 "feedback": {"$slice": -1000}}) or {}
+                                                 "feedback": {"$slice": -1000}, "topics.name": 1,
+                                                 "topics.status": 1, "topics.expires_at": 1, "topics.goal": 1,
+                                                 "topics.created_at": 1, "topics.origin.text": 1}) or {}
     learned = user.get("learned") or {}
-    since = learned.get("processed_until")
+    since = since or learned.get("processed_until")
     if since is not None and since.tzinfo is None:
         since = since.replace(tzinfo=timezone.utc)
     previous = {k: learned[k] for k in LearnedProfile.model_fields if k in learned} or None
     if previous and not sensitivity.is_allowed(learned.get("sensitivity", CHAT_LABEL), max_label):
         previous = None                     # learned from data this backend may not see: start fresh
-    act = Activity(user_id=key, previous=previous,
+    act = Activity(user_id=key, previous=previous, previous_written=learned.get("updated_at"),
                    goals=[g["text"] for g in user.get("goals") or [] if g.get("active")])
+    now = datetime.now(timezone.utc)
+    for t in user.get("topics") or []:
+        ends = t.get("expires_at")
+        if t.get("status") == "active" and ends and (ends if ends.tzinfo else ends.replace(tzinfo=timezone.utc)) > now:
+            act.followed_topics.append({k: v for k, v in {
+                "name": t.get("name"), "since": _day(t.get("created_at")), "goal": t.get("goal"),
+                "started_from": _cut((t.get("origin") or {}).get("text")) or None}.items() if v})
     if previous:
         act.labels.append(learned.get("sensitivity", CHAT_LABEL))
     mapped = {_norm(g.get("goal", "")) for g in (previous or {}).get("goal_keywords") or []}
     act.goals_without_keywords = [g for g in act.goals if _norm(g) not in mapped]
     if act.goals_without_keywords and not act.labels:
         act.labels.append(CHAT_LABEL)
+    if act.followed_topics:
+        act.labels.append("internal")                  # topics are internal (brain/domain/topics.py)
     stamps: list[datetime] = []
 
     chat_allowed = sensitivity.is_allowed(CHAT_LABEL, max_label)
@@ -200,8 +315,9 @@ async def collect(db: AsyncDatabase, user_id, max_label: str) -> Activity:
         for m in act.chat:
             m["at"] = _day(m["at"])
 
-        fb = [f for f in user.get("feedback") or [] if _newer(f.get("at"), since)][-MAX_FEEDBACK:]
-        stamps += [f["at"] for f in fb]
+        fb = [f for f in user.get("feedback") or [] if _newer(feedback_stamp(f), since)][-MAX_FEEDBACK:]
+        stamps += [feedback_stamp(f) for f in fb]
+        looked_up = await _rated_texts(db, fb)
         # The rated posts' current tags (from the fixed list), like brain.scripts.rebuild_tag_scores.
         ids = list({f["post_id"] for f in fb if f.get("post_id")})
         current = {p["_id"]: p.get("tags") or [] async for p in db.posts.find({"_id": {"$in": ids}}, {"tags": 1})}
@@ -211,8 +327,8 @@ async def collect(db: AsyncDatabase, user_id, max_label: str) -> Activity:
             "at": _day(f.get("at")), "target": f.get("target_type") or ("digest_item" if f.get("digest_id") else "post"),
             "reaction": f.get("reaction"), "category": f.get("category"),
             "tags": current.get(f.get("post_id"), f.get("tags") or [])[:6],
-            "about": _cut(f.get("about")) if f.get("about") else None, "reasons": f.get("reasons") or None,
-            "comment": _cut(f.get("text")) if f.get("text") else None}.items() if v} for f in fb]
+            "about": _about(f, f.get("about") or looked_up.get(i)), "reasons": f.get("reasons") or None,
+            "comment": _cut(f.get("text")) if f.get("text") else None}.items() if v} for i, f in enumerate(fb)]
     else:
         act.withheld += 1
 
@@ -227,6 +343,9 @@ async def collect(db: AsyncDatabase, user_id, max_label: str) -> Activity:
         act.labels.append(i.get("sensitivity", "internal"))
         stamps.append(i["created_at"])
     act.insights = act.insights[-MAX_INSIGHTS:]
+    done = learned.get("processed_until")          # a reprocess from an earlier date never moves this back
+    if done is not None:
+        stamps.append(done)
     act.until = max((s if s.tzinfo else s.replace(tzinfo=timezone.utc) for s in stamps), default=since)
     return act
 
@@ -291,12 +410,33 @@ def merged_goal_keywords(act: Activity, new: list[GoalMatch]) -> list[dict]:
 
 async def save(db: AsyncDatabase, act: Activity, outcome: Outcome) -> None:
     last = outcome.calls[-1]
+    now = datetime.now(timezone.utc)
     profile = outcome.profile.model_dump()
     profile["goal_keywords"] = merged_goal_keywords(act, outcome.profile.goal_keywords)
-    doc = {**profile, "processed_until": act.until, "updated_at": datetime.now(timezone.utc),
+    profile["interests"] = interests_domain.merge((act.previous or {}).get("interests"), profile["interests"], now,
+                                                  act.previous_written)
+    profile["intents"] = interests_domain.merge_intents(profile["intents"], now)
+    doc = {**profile, "processed_until": act.until, "updated_at": now,
            "backend": last.backend, "model": last.model, "sensitivity": act.label,
            "input": {"chat": len(act.chat), "feedback": len(act.feedback), "insights": len(act.insights)}}
     await db.users.update_one({"_id": act.user_id}, {"$set": {"learned": doc}})
+
+
+async def after_save(repos, act: Activity, outcome: Outcome, *, profile_keywords: bool = False) -> None:
+    """What follows a saved profile: the goals it found become proposals (the user's yes adds them), and with
+    `profile_keywords` the pipeline's profile keyword record is rebuilt. Never raises: the profile is saved."""
+    from brain.domain import proposals, topics           # (domain modules; the learning job is below them)
+    try:
+        active = {_norm(g) for g in act.goals}
+        for text in outcome.profile.goal_candidates:
+            if _norm(text) not in active:
+                await proposals.propose(repos, act.user_id, kind="goal", title=text, agent="learner",
+                                        why="ви про це говорили, а такої цілі ще немає",
+                                        action={"tool": "set_goal", "args": {"text": text}}, label=act.label)
+        if profile_keywords:
+            await topics.sync_profile_queries(repos)
+    except Exception as e:                 # noqa: BLE001
+        logger.error(f"after learning {act.user_id}: {type(e).__name__}: {e}")
 
 
 async def users_with_activity(db: AsyncDatabase) -> list:

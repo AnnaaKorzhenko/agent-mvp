@@ -10,7 +10,8 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Annotated, Awaitable, Callable, Literal
+from datetime import datetime, timezone
+from typing import Annotated, Any, Awaitable, Callable, Literal
 
 from bson import ObjectId
 from mcp.server import MCPServer
@@ -23,13 +24,17 @@ from brain.audit.conversations import WIDGET_PREFIX, CallRecord, ConversationLog
 from brain.audit.log import AuditLog
 from brain.config import Settings
 from brain.db.repositories import Repos, user_key
+from brain.domain import analysis as analysis_domain
+from brain.domain import corrections as corrections_domain
 from brain.domain import digests as digests_domain
 from brain.domain import feedback as feedback_domain
 from brain.domain import goals as goals_domain
 from brain.domain import insights as insights_domain
 from brain.domain import posts as posts_domain
 from brain.domain import profile as profile_domain
+from brain.domain import proposals as proposals_domain
 from brain.domain import sensitivity
+from brain.domain import topics as topics_domain
 from brain.domain.errors import DomainError
 from brain.domain.identity import IdentityError, UserContext, VerifiedToken, resolve_user
 from brain.mcp_server import schemas as out
@@ -46,6 +51,8 @@ class Services:
     audit: AuditLog               # security events only
     token: TokenProvider          # the verified OAuth token (None in dev mode)
     conversations: ConversationLog | None = field(default=None)
+    learner: Any = None           # brain.learning.auto.Learner when LEARNING_AUTO is on: set_goal nudges it
+    agents: Any = None            # brain.agents.runtime.Runtime when an agent is on: its worker runs queued work
 
     def __post_init__(self) -> None:
         if self.conversations is None:
@@ -101,6 +108,8 @@ def _common(user_message: str | None, signals: list[out.Signal] | None) -> dict:
 
 
 ALWAYS_ABOUT = {"get_digest", "get_profile"}
+# Tools whose results carry the suggestions themselves, or answer one: no extra one to mention.
+NO_MENTION = {"get_digest", "get_morning_digest", "get_proposals", "answer_proposal"}
 
 
 @dataclass
@@ -110,6 +119,7 @@ class Memory:
     duplicates: int = 0
     goals_to_offer: list[str] = field(default_factory=list)
     about_user: dict | None = None
+    proposal: Any = None              # one open suggestion to mention (ProposalDoc), at most once a day
 
 
 def _digest_out(res: digests_domain.DigestResultView, cls: type[out.DigestResult] = out.DigestResult,
@@ -117,15 +127,92 @@ def _digest_out(res: digests_domain.DigestResultView, cls: type[out.DigestResult
     refs = itertools.count(1)       # one numbering across both sides: «третя» is unambiguous
     return cls(date=res.date, missing_sides=res.missing_sides, **extra, digests=[
         out.DigestOut(
-            side=v.digest.side, side_note=v.side_note, digest_id=v.digest.id,
+            side=v.side, side_note=v.side_note, digest_id=v.digest.id,
             created_at=v.digest.created_at.isoformat(), period_start=v.digest.period_start,
             period_end=v.digest.period_end, hidden_items=v.hidden_items,
             sections=[out.DigestSectionOut(category=s.category, title=s.title, items=[
                 out.DigestItemOut(ref=next(refs), n=v.number(i), text=i.text, source_urls=i.source_urls,
-                                  source_post_ids=i.source_post_ids, is_russian_source_claim=v.digest.side == "ru",
+                                  source_post_ids=i.source_post_ids, is_russian_source_claim=v.claim(i),
                                   why=v.why(i).why, relevance=v.why(i).score) for i in items])
                 for s, items in v.sections])
         for v in res.digests])
+
+
+async def _renewals(svc: "Services", ctx: UserContext, result: out.DigestResult) -> None:
+    """Adds the followed topics to offer for renewal. Never breaks the digest."""
+    try:
+        result.topics_to_renew = [
+            out.TopicRenewal(name=r.topic.name, expires_at=topics_domain.until_text(r.topic),
+                             expired=r.days_left < 0, days_left=r.days_left)
+            for r in await topics_domain.to_renew(svc.repos, ctx)]
+    except Exception as e:                 # noqa: BLE001
+        logger.error(f"renewal check failed: {type(e).__name__}: {e}")
+
+
+def _period_out(p: analysis_domain.Period) -> out.AnalysisPeriod:
+    label = analysis_domain.month_name(p) or f"{p.start:%d.%m}–{p.end:%d.%m.%Y}"
+    return out.AnalysisPeriod(start_date=p.start.isoformat(), end_date=p.end.isoformat(), days=p.days, label=label)
+
+
+PROPOSAL_YES = {"set_goal": "додати ціль", "track_topic": "відстежувати тему", "stop_topic": "припинити"}
+
+
+def _yes(p) -> str:
+    """The yes button's words: the action's own label (advice steps carry one), else by tool."""
+    if p.action is None:
+        return "так"
+    return p.action.args.get("label") or PROPOSAL_YES.get(p.action.tool, "так")
+
+
+def _proposal_out(p) -> out.ProposalOut:
+    return out.ProposalOut(proposal_id=p.id, kind=p.kind, title=p.title, why=p.why, links=p.links, yes=_yes(p),
+                           ask=p.action.args.get("message") if p.action and p.action.tool == "chat" else None)
+
+
+async def _proposals(svc: "Services", ctx: UserContext, result: out.DigestResult) -> None:
+    """Adds the open proposals (at most proposals_domain.SHOW_MAX). Never breaks the digest."""
+    try:
+        result.proposals = [_proposal_out(p) for p in await proposals_domain.open_for(svc.repos, ctx)]
+    except Exception as e:                 # noqa: BLE001
+        logger.error(f"proposals failed: {type(e).__name__}: {e}")
+
+
+async def _analysis_due(svc: "Services", ctx: UserContext) -> out.AnalysisDue | None:
+    """Monday / the 1st: the scheduled analysis, if not written yet. Never breaks the digest."""
+    try:
+        if not (d := analysis_domain.due()):
+            return None
+        kind, period = d
+        if await analysis_domain.stored(svc.repos, ctx, period, None):
+            return None
+        p = _period_out(period)
+        return out.AnalysisDue(period=kind, start_date=p.start_date, end_date=p.end_date, label=p.label)
+    except Exception as e:                 # noqa: BLE001
+        logger.error(f"analysis_due failed: {type(e).__name__}: {e}")
+        return None
+
+
+def _model_text(result: out.DigestResult, prefix: str = "") -> str:
+    """What the model reads: a short index when the cards are on screen, else the full digest; then what to do
+    after it (renewals, a due analysis), spelled out either way."""
+    text = prefix + (widgets.digest_index(result) if result.shown_in_widget else result.model_dump_json())
+    if result.topics_to_renew:
+        text += "\nFollowed topics about to expire (ask once, briefly, whether to keep following; on yes call " \
+                "track_topic follow with the name): " + "; ".join(
+                    f"«{r.name}» " + ("expired " if r.expired else "until ") + r.expires_at
+                    for r in result.topics_to_renew)
+    if result.proposals:
+        text += ("\nThe system's suggestions for the user" + (" (on screen as cards with Так / Не цікаво buttons: "
+                 "mention them in one line at most)" if result.shown_in_widget else
+                 " (mention each in one line; on the user's answer call answer_proposal)") + ": " + "; ".join(
+                     f"{p.proposal_id} {p.kind} «{p.title}» ({p.why})" + (f" sources: {' '.join(p.links)}"
+                                                                           if p.links else "")
+                     for p in result.proposals))
+    due = getattr(result, "analysis_due", None)
+    if due:
+        text += (f"\nThe {due.period}ly analysis for {due.label} is due: after this digest, call get_analysis with "
+                 f"start_date {due.start_date} and end_date {due.end_date}, write it and save it with save_report.")
+    return text
 
 
 async def _digest_done(call: "_Call", res: digests_domain.DigestResultView, result: out.DigestResult) -> None:
@@ -142,6 +229,28 @@ def _post_out(v: posts_domain.PostView) -> out.PostOut:
                        channel=out.Channel(username=v.channel.username, country=v.channel.source_country)
                        if v.channel else None,
                        post_url=p.post_url, published_at=p.published_at, importance=p.importance, why=v.why)
+
+
+def _topic_out(t, findings: bool = False) -> out.TopicOut:
+    return out.TopicOut(
+        name=t.name, status=topics_domain.status_of(t),
+        expires_at=topics_domain.utc(t.expires_at).isoformat() if t.expires_at else None,
+        goal=t.goal, specific=t.specific, broader=t.broader, exclude=t.exclude,
+        web_queries=topics_domain.web_queries(t), tags=t.tags,
+        findings_count=t.findings_count if t.findings_count is not None else len(t.findings),
+        findings=[out.FindingOut(title=f.title, url=f.url, source=f.source, date=f.date, summary=f.summary,
+                                 status=f.status) for f in t.findings] if findings else [])
+
+
+DEEP_DIVE_STEPS = (
+    "1) Tell the user what the news base has (subject, source posts, related posts, earlier findings), briefly. "
+    "2) Search the web now: several searches, in Ukrainian, Russian and English, by the names, aliases and "
+    "technical terms; prefer primary sources (developers, officials, OSINT analysts, defense media); skip what "
+    "earlier findings already cover. 3) Answer with a dossier: what it is, specifications, who makes or uses it, "
+    "timeline, how it matters for the user's goals, confirmed versus claimed (Russian sources are claims), what "
+    "is still unknown; cite a link for every fact. 4) Call save_findings with what you found (one entry per "
+    "source, exact URLs). 5) If the topic isn't active yet, ask once whether to follow it in future digests, and "
+    "on yes call track_topic.")
 
 
 class _Call:
@@ -216,6 +325,11 @@ class _Call:
             # without a session id: they always bring the profile; other tools only after a quiet spell.
             if first or self.name in ALWAYS_ABOUT:
                 self.memory.about_user = await insights_domain.about_user(self.svc.repos, ctx) or None
+            if self.name not in NO_MENTION:
+                today = digests_domain.kyiv_day_bounds(datetime.now(timezone.utc).astimezone(digests_domain.KYIV)
+                                                       .date())[0]
+                found = await proposals_domain.open_for(self.svc.repos, ctx, limit=1, not_shown_since=today)
+                self.memory.proposal = found[0] if found else None
         except Exception as e:             # noqa: BLE001 - memory must never break a tool
             logger.error(f"remember() failed in {self.name}: {type(e).__name__}: {e}")
 
@@ -228,10 +342,12 @@ class _Call:
 
     def _attach(self, result):
         m = self.memory
-        if not (m.goals_to_offer or m.about_user):
+        if not (m.goals_to_offer or m.about_user or m.proposal):
             return result
+        mention = _proposal_out(m.proposal) if m.proposal else None
         if isinstance(result, CallToolResult):
-            extra = {"goals_to_offer": m.goals_to_offer, "about_user": m.about_user}
+            extra = {"goals_to_offer": m.goals_to_offer, "about_user": m.about_user,
+                     **({"proposal_to_mention": mention.model_dump()} if mention else {})}
             if isinstance(result.structured_content, dict):
                 result.structured_content.update(extra)
             for block in result.content:
@@ -241,6 +357,7 @@ class _Call:
             return result
         if isinstance(result, out.MemoryOut):
             result.goals_to_offer = m.goals_to_offer
+            result.proposal_to_mention = mention
             if not result.about_user:
                 result.about_user = m.about_user
         return result
@@ -269,8 +386,9 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
     async def get_digest(
         mcp_ctx: Context,
         user_message: UserMessage,
-        side: Annotated[Literal["ua", "ru", "both"], Field(
-            description="ua: Ukrainian sources; ru: Russian sources (claims, not facts); both: both")] = "both",
+        side: Annotated[Literal["ua", "ru", "topics", "both"], Field(
+            description="ua: Ukrainian sources; ru: Russian sources (claims, not facts); topics: only news on the "
+                        "topics the user follows; both: all of it (the default)")] = "both",
         date: Annotated[str | None, Field(
             description="Kyiv date YYYY-MM-DD; omit for the latest digest")] = None,
         as_text: Annotated[bool, Field(description=(
@@ -278,7 +396,8 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
         signals: Signals = None,
     ) -> Annotated[CallToolResult, out.DigestResult]:
         """Get the user's daily news digest: sections ordered by the user's interests, every item with its
-        source links (source_urls) and post ids (source_post_ids).
+        source links (source_urls) and post ids (source_post_ids). If the user follows topics (track_topic), the
+        first digest (side "topics") holds today's news on them, one section per topic: lead with it.
 
         If the result says shown_in_widget, the user already sees the digest as interactive cards with rating
         buttons: do not repeat, list or summarize it; reply with one short sentence at most, unless the user
@@ -292,15 +411,16 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
         widget = not as_text and widgets.client_shows_widgets(mcp_ctx)
 
         async def body(ctx: UserContext) -> CallToolResult:
+            await topics_domain.sync_if_due(svc.repos)
             res = await digests_domain.get_digests(svc.repos, ctx, side, date)
             result = _digest_out(res)
             if not result.digests:
                 result.note = "No digest found for this date. Say so; do not invent news."
             result.shown_in_widget = widget and bool(result.digests)
+            await _renewals(svc, ctx, result)
+            await _proposals(svc, ctx, result)
             await _digest_done(call, res, result)
-            # What the model reads: a short index when the cards are on screen, else the full digest.
-            text = widgets.digest_index(result) if result.shown_in_widget else result.model_dump_json()
-            return CallToolResult(content=[TextContent(type="text", text=text)],
+            return CallToolResult(content=[TextContent(type="text", text=_model_text(result))],
                                   structured_content=result.model_dump(mode="json"))
         return await call.run(body)
 
@@ -321,6 +441,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
         widget = widgets.client_shows_widgets(mcp_ctx)
 
         async def body(ctx: UserContext) -> CallToolResult:
+            await topics_domain.sync_if_due(svc.repos)
             m = await digests_domain.morning_digest(svc.repos, ctx)
             if m.status != "new":
                 result = out.MorningDigestResult(
@@ -333,9 +454,11 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
                                       structured_content=result.model_dump(mode="json"))
             result = _digest_out(m.result, out.MorningDigestResult, status="new")
             result.shown_in_widget = widget and bool(result.digests)
+            await _renewals(svc, ctx, result)
+            await _proposals(svc, ctx, result)
+            result.analysis_due = await _analysis_due(svc, ctx)
             await _digest_done(call, m.result, result)
-            text = widgets.digest_index(result) if result.shown_in_widget else result.model_dump_json()
-            return CallToolResult(content=[TextContent(type="text", text="status: new\n" + text)],
+            return CallToolResult(content=[TextContent(type="text", text=_model_text(result, "status: new\n"))],
                                   structured_content=result.model_dump(mode="json"))
         return await call.run(body)
 
@@ -420,6 +543,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
                 top_categories=[out.CategoryScore(side=s, category=c, score=v) for s, c, v in p.top_categories],
                 top_tags=[out.TagScore(tag=t, score=v) for t, v in p.top_tags],
                 insights=out.InsightCount(saved=p.insights_saved, visible_here=p.insights_visible),
+                topics=[_topic_out(t) for t in await topics_domain.list_topics(svc.repos, ctx)],
                 about_user=await insights_domain.about_user(svc.repos, ctx))
         return await call.run(body)
 
@@ -568,7 +692,84 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
             await call.done(items=1)
             return out.FeedbackOut(feedback_id=r.feedback_id, target_type=r.target_type, reaction=r.reaction,
                                    replaced_previous=r.replaced_previous, score_changes=r.score_changes,
-                                   confirmation=r.confirmation)
+                                   confirmation=r.confirmation,
+                                   offer_deep_dive=r.target_type in ("post", "digest_item")
+                                   and topics_domain.wants_more(text, reasons))
+        return await call.run(body)
+
+    @mcp.tool(title="Answer a suggestion",
+              annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False,
+                                          openWorldHint=False))
+    async def answer_proposal(
+        mcp_ctx: Context,
+        user_message: UserMessage,
+        proposal_id: Annotated[str, Field(description=(
+            "The proposal_id from a digest's proposals, a proposal_to_mention, or get_proposals"))],
+        answer: Annotated[Literal["accept", "dismiss"], Field(description=(
+            "accept: the user said yes (adds the goal / follows the topic); dismiss: not interested"))],
+        reason: Annotated[str | None, Field(max_length=500, description=(
+            "The user's own words about why, verbatim, if they gave any («не пропонуй мені про кораблі»): the "
+            "system learns what not to suggest from them"))] = None,
+        signals: Signals = None,
+    ) -> out.ProposalAnswer:
+        """Answer one of the system's suggestions when the user says yes or no to it, in any words («так, додай»,
+        «давай ту пораду про Рассвет», «ні, це не моє»). A yes does what the suggestion says (adds the goal,
+        follows or stops a topic); either answer teaches the system what to suggest. If the result has `ask`, the
+        yes was a request (a deep dive, an analysis): carry it out now, as if the user had typed it. Never answer
+        for the user: only on their clear yes or no. Confirm `done` in one line."""
+        call = _Call(svc, "answer_proposal", {"proposal_id": proposal_id, "answer": answer, "reason": reason,
+                                              **_common(user_message, signals)}, mcp_ctx)
+
+        async def body(ctx: UserContext) -> out.ProposalAnswer:
+            r = await proposals_domain.answer(svc.repos, ctx, proposal_id, answer == "accept",
+                                              mcp_channels=svc.mcp_channels, reason=reason)
+            await call.done(items=1)
+            return out.ProposalAnswer(proposal_id=proposal_id, accepted=r.accepted, done=r.done, ask=r.ask)
+        return await call.run(body)
+
+    @mcp.tool(title="The system's open suggestions", annotations=READ_ONLY)
+    async def get_proposals(
+        mcp_ctx: Context,
+        user_message: UserMessage,
+        signals: Signals = None,
+    ) -> out.ProposalsResult:
+        """The system's open suggestions (goals it noticed, topics to follow, advice on what changed), newest
+        first: when the user asks about them in any words («що ти там пропонував?», «які в тебе поради?», «а що
+        з тією темою, яку ти радив?») or answers one you can't find in this conversation. Then answer_proposal."""
+        call = _Call(svc, "get_proposals", _common(user_message, signals), mcp_ctx)
+
+        async def body(ctx: UserContext) -> out.ProposalsResult:
+            found = await proposals_domain.list_open(svc.repos, ctx)
+            await call.done(items=len(found))
+            return out.ProposalsResult(proposals=[_proposal_out(p) for p in found])
+        return await call.run(body)
+
+    @mcp.tool(title="Correct what the system inferred",
+              annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True,
+                                          openWorldHint=False))
+    async def correct_profile(
+        mcp_ctx: Context,
+        user_message: UserMessage,
+        not_interested: Annotated[str, Field(max_length=120, description=(
+            "What the user says doesn't interest them (any more), in their words, short: «космос», «кораблі», "
+            "«новини про Рассвет»"))],
+        signals: Signals = None,
+    ) -> out.CorrectionResult:
+        """When the user says something the system thinks about them is wrong, in any words: «мене це не
+        цікавить», «я вже цим не займаюсь», «чому ти вирішив, що мені цікаві кораблі?», «не підсовуй мені це».
+        Removes the matching inferred interests and current intents at once, pushes such news down, closes open
+        suggestions about it and remembers it. Topics the user follows are their own choice: if
+        followed_matching is not empty, ask whether to stop following them too (track_topic stop)."""
+        call = _Call(svc, "correct_profile", {"not_interested": not_interested, **_common(user_message, signals)},
+                     mcp_ctx)
+
+        async def body(ctx: UserContext) -> out.CorrectionResult:
+            r = await corrections_domain.not_interested(svc.repos, ctx, not_interested,
+                                                         profile_keywords=svc.settings.profile_keywords)
+            await call.done(items=len(r.dropped_interests) + len(r.dropped_intents))
+            return out.CorrectionResult(not_interested=r.text, dropped_interests=r.dropped_interests,
+                                        dropped_intents=r.dropped_intents, closed_proposals=r.closed_proposals,
+                                        followed_matching=r.followed_matching)
         return await call.run(body)
 
     @mcp.tool(title="Add or remove a goal",
@@ -593,9 +794,229 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
             if action == "add":
                 r = await goals_domain.add_goal(svc.repos, ctx, text)
                 result = out.GoalsOut(goals=r.goals, added=r.changed)
+                if svc.learner is not None:                # map the new goal to keywords soon (auto.py)
+                    svc.learner.nudge(user_key(ctx.user_id))
             else:
                 r = await goals_domain.remove_goal(svc.repos, ctx, text)
                 result = out.GoalsOut(goals=r.goals, removed=r.changed)
             await call.done(items=1)
             return result
+        return await call.run(body)
+
+    @mcp.tool(title="Dig deeper into a news item", annotations=READ_ONLY)
+    async def deep_dive(
+        mcp_ctx: Context,
+        user_message: UserMessage,
+        digest_id: Annotated[str | None, Field(description="A digest item: its digest_id")] = None,
+        item_n: Annotated[int | None, Field(description="A digest item: its n (not ref)")] = None,
+        post_id: Annotated[str | None, Field(description="Or a post: its post_id")] = None,
+        subject: Annotated[str | None, Field(max_length=600, description=(
+            "Or, with no item, what to dig into in words, e.g. «Спектр-К»"))] = None,
+        query: Annotated[str | None, Field(max_length=120, description=(
+            "The thing's name to search the news base for (e.g. «Спектр-К»); default: names quoted in the item"))]
+        = None,
+        name: Annotated[str | None, Field(max_length=80, description=(
+            "The topic's short name if the user already follows it"))] = None,
+        signals: Signals = None,
+    ) -> out.DeepDiveResult:
+        """Start a deep dive when the user wants more on a news item or thing ("більше про це", "надо больше
+        информации", "Глибше про #N", a comment asking for details): returns what the news base already has
+        (the item, its source posts, related posts, the user's earlier findings on it) and the next steps. The
+        news base rarely has much more on one incident: after this call, search the web yourself, then save what
+        you found with save_findings. Map "#N" to the latest digest or search result's ref and pass its ids."""
+        args = {"digest_id": digest_id, "item_n": item_n, "post_id": post_id, "subject": subject, "query": query,
+                "name": name}
+        call = _Call(svc, "deep_dive", {**args, **_common(user_message, signals)}, mcp_ctx)
+
+        async def body(ctx: UserContext) -> out.DeepDiveResult:
+            seed = await topics_domain.deep_dive(svc.repos, ctx, digest_id=digest_id, item_n=item_n,
+                                                 post_id=post_id, text=subject, query=query, name=name)
+            views = seed.source_posts + seed.related_posts
+            await call.done(items=len(views), labels=[v.post.sensitivity for v in views],
+                            post_ids=[v.post.id for v in views])
+            sub = seed.subject
+            return out.DeepDiveResult(
+                subject=out.DeepDiveSubject(text=sub.text, source_urls=sub.source_urls,
+                                            is_russian_source_claim=sub.is_russian_source_claim,
+                                            digest_id=sub.digest_id, item_n=sub.item_n, post_id=sub.post_id),
+                source_posts=[_post_out(v) for v in seed.source_posts],
+                related_posts=[_post_out(v).model_copy(update={"ref": i}) for i, v in enumerate(seed.related_posts, 1)],
+                searched_for=seed.searched_for, goals=seed.goals,
+                topic=_topic_out(seed.topic, findings=True) if seed.topic else None, next_steps=DEEP_DIVE_STEPS)
+        return await call.run(body)
+
+    @mcp.tool(title="Save what a deep dive found",
+              annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True,
+                                          openWorldHint=False))
+    async def save_findings(
+        mcp_ctx: Context,
+        user_message: UserMessage,
+        topic: Annotated[str, Field(min_length=2, max_length=80, description=(
+            "The topic's short name, the thing itself, e.g. «Спектр-К»; the same name as before for the same thing"))],
+        findings: Annotated[list[out.FindingIn], Field(min_length=1, max_length=15, description=(
+            "What you found on the web: one entry per source, with its exact URL"))],
+        digest_id: Annotated[str | None, Field(description="The item the dive started from: digest_id")] = None,
+        item_n: Annotated[int | None, Field(description="… and its n")] = None,
+        post_id: Annotated[str | None, Field(description="Or the post it started from")] = None,
+        signals: Signals = None,
+    ) -> out.TopicSaved:
+        """Save what you found on the web during a deep dive, on the user's topic (created if new; not followed
+        until the user agrees, see track_topic). Saved findings come back in the next deep_dive and feed the
+        weekly and monthly analysis. Only real search results with their exact URLs; never invent sources."""
+        call = _Call(svc, "save_findings", {"topic": topic, "findings": [f.model_dump() for f in findings],
+                                            "digest_id": digest_id, "item_n": item_n, "post_id": post_id,
+                                            **_common(user_message, signals)}, mcp_ctx)
+
+        async def body(ctx: UserContext) -> out.TopicSaved:
+            r = await topics_domain.save_findings(svc.repos, ctx, topic, [f.model_dump() for f in findings],
+                                                  digest_id=digest_id, item_n=item_n, post_id=post_id)
+            await call.done(items=r.added_findings)
+            note = f" (вже були: {r.duplicate_findings})" if r.duplicate_findings else ""
+            return out.TopicSaved(topic=_topic_out(r.topic), created=r.created, added_findings=r.added_findings,
+                                  duplicate_findings=r.duplicate_findings,
+                                  confirmation=f"Зберіг знахідки по «{r.topic.name}»: {r.added_findings}{note}")
+        return await call.run(body)
+
+    @mcp.tool(title="Follow a topic in future news",
+              annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True,
+                                          openWorldHint=False))
+    async def track_topic(
+        mcp_ctx: Context,
+        user_message: UserMessage,
+        name: Annotated[str, Field(min_length=2, max_length=80, description="The topic's short name, e.g. «Спектр-К»")],
+        action: Annotated[Literal["follow", "stop"], Field(description=(
+            "follow: start or renew following it; stop: stop following it"))] = "follow",
+        specific: Annotated[list[str] | None, Field(max_length=20, description=(
+            "follow: names and aliases as Ukrainian, Russian and English news write them (e.g. «Рассвет», "
+            "«Rassvet», «Бюро 1440»), for recognising news on it; short is fine here. If the topic is an area "
+            "rather than a named thing (e.g. «оптоволоконні FPV»), its key phrases are its names"))] = None,
+        web_queries: Annotated[list[str] | None, Field(max_length=12, description=(
+            "follow: what the news pipeline searches the web for daily: 3-8 phrases of 2-6 words, each finding "
+            "THIS thing and nothing else, so a name that is also an everyday word or another company gets what "
+            "it is, and the name itself in double quotes for an exact match (e.g. '\"Рассвет\" Бюро 1440 "
+            "спутники', 'спутниковая связь \"Рассвет\" Геран', '\"Рассвет-3\"', '\"Rassvet\" satellite "
+            "constellation Bureau 1440', 'супутники \"Рассвет\" Бюро 1440'). The server quotes the name if you "
+            "don't. In Russian (searched in Russian sources), Ukrainian (Ukrainian sources) and English "
+            "(worldwide). Always pass them when following"))] = None,
+        broader: Annotated[list[str] | None, Field(max_length=20, description=(
+            "follow: short phrases for the thing's area, Ukrainian and Russian forms (e.g. «захист відеоканалу "
+            "від РЕБ», «видеоприемник FPV»): they lift news on it that doesn't name it; never searched on the web"))]
+        = None,
+        exclude: Annotated[list[str] | None, Field(max_length=20, description=(
+            "follow: words that mark a look-alike that is NOT this topic (other products with a similar name)"))]
+        = None,
+        tags: Annotated[list[str] | None, Field(max_length=4, description=(
+            "follow: 1-4 tags from the fixed tag list that its news would carry"))] = None,
+        goal: Annotated[str | None, Field(max_length=300, description="follow: the user's goal it serves, as "
+                                                                       "get_profile returns it")] = None,
+        days: Annotated[int, Field(ge=1, le=180, description="follow: for how many days (default 30)")] = 30,
+        digest_id: Annotated[str | None, Field(description="The item it started from: digest_id")] = None,
+        item_n: Annotated[int | None, Field(description="… and its n")] = None,
+        post_id: Annotated[str | None, Field(description="Or the post it started from")] = None,
+        signals: Signals = None,
+    ) -> out.TopicSaved:
+        """Follow a specific thing in the user's future digests and searches (or stop following it). Call it only
+        when the user agrees or asks ("так, відстежуй", "стеж за цим"), never on your own judgement. After a deep
+        dive you know the aliases: pass them in specific, the web searches in web_queries, the area in broader,
+        look-alikes in exclude."""
+        args = {"name": name, "action": action, "specific": specific, "web_queries": web_queries,
+                "broader": broader, "exclude": exclude, "tags": tags, "goal": goal, "days": days,
+                "digest_id": digest_id, "item_n": item_n, "post_id": post_id}
+        call = _Call(svc, "track_topic", {**args, **_common(user_message, signals)}, mcp_ctx)
+
+        async def body(ctx: UserContext) -> out.TopicSaved:
+            if action == "stop":
+                r = await topics_domain.stop_topic(svc.repos, ctx, name)
+                confirmation = f"Більше не відстежую «{r.topic.name}» (знахідки збережено)"
+            else:
+                r = await topics_domain.track_topic(svc.repos, ctx, name, specific=specific, broader=broader,
+                                                    exclude=exclude, tags=tags, goal=goal, days=days,
+                                                    digest_id=digest_id, item_n=item_n, post_id=post_id,
+                                                    queries=web_queries)
+                confirmation = f"Відстежую «{r.topic.name}» до {topics_domain.until_text(r.topic)}"
+            await call.done(items=1)
+            follow = action == "follow"
+            missing = topics_domain.missing_regions(topics_domain.web_queries(r.topic)) if follow else []
+            return out.TopicSaved(topic=_topic_out(r.topic), created=r.created, unknown_tags=r.unknown_tags,
+                                  missing_regions=missing,
+                                  not_searched=topics_domain.not_searched(r.topic) if follow else [],
+                                  confirmation=confirmation)
+        return await call.run(body)
+
+    @mcp.tool(title="Analysis of a week or a month", annotations=READ_ONLY)
+    async def get_analysis(
+        mcp_ctx: Context,
+        user_message: UserMessage,
+        period: Annotated[Literal["week", "month"], Field(description=(
+            "week: the last 7 days, month: the last 30 days (ending end_date, default today)"))] = "week",
+        start_date: Annotated[str | None, Field(description="Exact first day YYYY-MM-DD (with end_date)")] = None,
+        end_date: Annotated[str | None, Field(description="Last day YYYY-MM-DD (Kyiv); default today")] = None,
+        focus: Annotated[str | None, Field(max_length=120, description=(
+            "Optional: only one goal, tracked topic or thing, e.g. «Спектр-К», «НРК»"))] = None,
+        refresh: Annotated[bool, Field(description=(
+            "true only if the user asks for a fresh analysis of a period already analysed"))] = False,
+        signals: Signals = None,
+    ) -> out.AnalysisResult:
+        """Analysis of everything found in a week or a month, for this user: not a list of news but what changed,
+        trends with numbers, claims versus confirmations, why it matters for their goals and topics, what to watch.
+        Use it when the user asks for a weekly / monthly analysis, review, trends or "що змінилося за тиждень",
+        and when a morning digest says analysis_due. If the report exists, present it (status stored). Otherwise
+        (status to_write) the result is a pack of the period's data: write the analysis from it as next_steps
+        says, then save it with save_report."""
+        args = {"period": period, "start_date": start_date, "end_date": end_date, "focus": focus,
+                "refresh": refresh}
+        call = _Call(svc, "get_analysis", {**args, **_common(user_message, signals)}, mcp_ctx)
+
+        async def body(ctx: UserContext) -> out.AnalysisResult:
+            p = analysis_domain.period_for(period, start_date, end_date)
+            report = None if refresh else await analysis_domain.stored(svc.repos, ctx, p, focus)
+            if report is not None:
+                await call.done(items=1)
+                return out.AnalysisResult(status="stored", period=_period_out(p), focus=focus, title=report.title,
+                                          highlights=report.highlights, report=report.text,
+                                          written_at=report.created_at.isoformat() if report.created_at else None)
+            pack = await analysis_domain.build(svc.repos, ctx, p, focus)
+            await call.done(items=len(pack.items))
+            status = "to_write" if pack.digests_used else "empty"
+            return out.AnalysisResult(
+                status=status, period=_period_out(p), previous_period=_period_out(pack.previous), focus=focus,
+                goals=pack.goals, tracked_topics=pack.tracked, user_summary=pack.summary, counts=pack.counts,
+                selected_from=pack.selected_from, findings=pack.findings,
+                items=[out.AnalysisItem(id=i.id, date=i.date, side=i.side, is_russian_source_claim=i.claim,
+                                        category=i.category, text=i.text, source_urls=i.source_urls, why=i.why,
+                                        goals=i.goals, topics=i.topics) for i in pack.items],
+                next_steps=analysis_domain.WRITE_STEPS if status == "to_write"
+                else "There are no digests in this period: say so; don't write an analysis.")
+        return await call.run(body)
+
+    @mcp.tool(title="Save a written analysis",
+              annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False,
+                                          openWorldHint=False))
+    async def save_report(
+        mcp_ctx: Context,
+        user_message: UserMessage,
+        start_date: Annotated[str, Field(description="The analysed period's first day, as get_analysis returned")],
+        end_date: Annotated[str, Field(description="… and its last day")],
+        title: Annotated[str, Field(min_length=3, max_length=200, description="Short title, e.g. «Тиждень "
+                                                                               "23.10–29.10: РЕБ і НРК»")],
+        highlights: Annotated[list[str], Field(min_length=1, max_length=7, description=(
+            "3-7 one-line key points, most important first"))],
+        report: Annotated[str, Field(min_length=200, max_length=20000, description=(
+            "The full analysis as you presented it (markdown), with its source links"))],
+        focus: Annotated[str | None, Field(max_length=120, description="The focus passed to get_analysis, if any")]
+        = None,
+        signals: Signals = None,
+    ) -> out.ReportSaved:
+        """Save the analysis you wrote from get_analysis, so it is kept, comes back next time without rewriting, and
+        feeds later analyses. Call it once per analysis, right after presenting it."""
+        call = _Call(svc, "save_report", {"start_date": start_date, "end_date": end_date, "focus": focus,
+                                          "title": title, "highlights": highlights, "report_chars": len(report),
+                                          **_common(user_message, signals)}, mcp_ctx)
+
+        async def body(ctx: UserContext) -> out.ReportSaved:
+            p = analysis_domain.period_for("week", start_date, end_date)
+            r = await analysis_domain.save_report(svc.repos, ctx, p, focus, title, highlights, report)
+            await call.done(items=1)
+            return out.ReportSaved(period=_period_out(p), focus=focus, title=r.title,
+                                   confirmation=f"Аналіз за {_period_out(p).label} збережено")
         return await call.run(body)

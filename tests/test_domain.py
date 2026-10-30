@@ -220,6 +220,8 @@ async def test_digest_item_in_the_bot_shape(repos, test_db, user):
     assert {k: entry[k] for k in ("target_type", "post_id", "digest_id", "item_n", "side", "category", "tags")} == {
         "target_type": "digest_item", "post_id": P_DRONES, "digest_id": DIGEST_UA, "item_n": 1, "side": "ua",
         "category": "defense_tech", "tags": ["морські дрони", "Чорне море"]}
+    # A copy of what was rated: posts are deleted within days, and the learning job reads comments against it.
+    assert entry["about"] == "Морські дрони уразили катер." and entry["source_urls"]
     assert r.score_changes["interests.category_scores.ua.defense_tech"] == 1
 
     r = await rate(repos, cloud(user), target_type="digest_item", digest_id=str(DIGEST_UA), item_n=1,

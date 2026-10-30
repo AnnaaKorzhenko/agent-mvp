@@ -14,8 +14,12 @@ from tests.fixtures.sample_data import DIGEST_UA, P_DRONES, P_SECRET, P_TOP, USE
 
 UID = 800_000_001
 TOOLS = {"get_digest", "search_posts", "get_post", "get_profile", "record_feedback", "set_goal", "save_insight",
-         "get_insights", "log_turn", "get_morning_digest"}
-WRITE_TOOLS = {"record_feedback", "set_goal", "save_insight", "log_turn", "get_morning_digest"}
+         "get_insights", "log_turn", "get_morning_digest", "deep_dive", "save_findings", "track_topic",
+         "get_analysis", "save_report", "answer_proposal",
+         "get_proposals", "correct_profile"}
+WRITE_TOOLS = {"record_feedback", "set_goal", "save_insight", "log_turn", "get_morning_digest", "save_findings",
+               "track_topic", "save_report", "answer_proposal",
+               "correct_profile"}
 SECRET_TEXTS = ("Оцінка постачання дронів", "Внутрішня оцінка", "Закритий звіт")
 
 

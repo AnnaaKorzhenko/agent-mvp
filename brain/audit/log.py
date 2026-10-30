@@ -60,10 +60,10 @@ class AuditLog:
 
     async def model_call(self, *, backend: str, model: str, max_sensitivity: str, input_tokens: int = 0,
                          output_tokens: int = 0, outcome: str = "ok", error: str | None = None,
-                         user_id: int | str | None = None) -> None:
+                         user_id: int | str | None = None, web_searches: int = 0) -> None:
         await self.event("model_call", user_id=user_id, backend=backend, model=model,
                          max_sensitivity=max_sensitivity, input_tokens=input_tokens, output_tokens=output_tokens,
-                         outcome=outcome, error=error)
+                         outcome=outcome, error=error, **({"web_searches": web_searches} if web_searches else {}))
 
 
 async def ensure_audit_indexes(db: AsyncDatabase, ttl_days: int) -> None:

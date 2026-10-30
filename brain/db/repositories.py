@@ -16,7 +16,7 @@ from pydantic import BaseModel, ValidationError
 from pymongo.errors import DuplicateKeyError
 from pymongo.asynchronous.database import AsyncDatabase
 
-from brain.db.models import DigestDoc, InsightDoc, PostDoc, SourceDoc, UserProfileDoc
+from brain.db.models import DigestDoc, InsightDoc, PostDoc, ProposalDoc, SourceDoc, TopicDoc, UserProfileDoc
 
 logger = logging.getLogger("brain.db")
 
@@ -122,6 +122,20 @@ class SourcesRepo:
                 out[src.id] = src
         return out
 
+    # The records the pipeline reads for web searches: users' followed topics (agreed 2026-10-29), and their
+    # lasting interests (the same shape; written only with PROFILE_KEYWORDS on, docs/AGENT_PLAN.md §4 ①).
+    KEYWORDS = {"platform": "search_keywords", "name": "User interests"}
+    PROFILE_KEYWORDS = {"platform": "search_keywords", "name": "Profile interests"}
+
+    async def get_keyword_queries(self, record: dict = KEYWORDS) -> list[dict] | None:
+        doc = await self.col.find_one(record, {"queries": 1})
+        return None if doc is None else doc.get("queries") or []
+
+    async def set_keyword_queries(self, queries: list[dict], record: dict = KEYWORDS) -> None:
+        """Replaces the queries of a keywords record (created on first use). Exactly the agreed shape:
+        {platform, name, queries: [{q, region}]}, nothing else, no user data."""
+        await self.col.update_one(record, {"$set": {"queries": queries}}, upsert=True)
+
 
 class DigestsRepo:
     def __init__(self, db: AsyncDatabase):
@@ -133,12 +147,33 @@ class DigestsRepo:
         base: dict = {"period": period, "side": side}
         if start or end:
             base["created_at"] = {**({"$gte": start} if start else {}), **({"$lt": end} if end else {})}
-        for query in ({**base, "trigger": "scheduled"}, base):
+        # trigger "topics" is the pipeline's digest of users' tracked topics: never a side's digest.
+        for query in ({**base, "trigger": "scheduled"}, {**base, "trigger": {"$ne": "topics"}}):
             async for doc in self.col.find(query).sort("created_at", -1).limit(5):
                 digest = parse(DigestDoc, doc, "digests")
                 if digest and digest.sections:
                     return digest
         return None
+
+    async def latest_topics(self, start: datetime | None = None, end: datetime | None = None) -> DigestDoc | None:
+        """The latest digest of tracked topics (trigger "topics"), any side and period."""
+        query: dict = {"trigger": "topics"}
+        if start or end:
+            query["created_at"] = {**({"$gte": start} if start else {}), **({"$lt": end} if end else {})}
+        async for doc in self.col.find(query).sort("created_at", -1).limit(5):
+            digest = parse(DigestDoc, doc, "digests")
+            if digest and digest.sections:
+                return digest
+        return None
+
+    async def in_range(self, start: datetime, end: datetime, limit: int = 500) -> list[DigestDoc]:
+        """Every daily digest created in [start, end), oldest first (all sides and triggers)."""
+        out = []
+        async for doc in self.col.find({"period": "day", "created_at": {"$gte": start, "$lt": end}}
+                                       ).sort("created_at", 1).limit(limit):
+            if (digest := parse(DigestDoc, doc, "digests")) and digest.sections:
+                out.append(digest)
+        return out
 
     async def get(self, digest_id: str | ObjectId) -> DigestDoc | None:
         oid = to_object_id(digest_id)
@@ -284,6 +319,93 @@ class UsersRepo:
                                          "at": datetime.now(timezone.utc)}}})
         return result.modified_count == 1
 
+    async def get_topics(self, user_id: UserId, findings: bool = False) -> list[TopicDoc]:
+        """users.topics; without their findings and hits unless asked (those are the bulky part)."""
+        pipeline: list[dict] = [{"$match": {"_id": user_key(user_id)}}, {"$project": {"topics": 1}}]
+        if not findings:                    # the counts stay, the lists go
+            pipeline += [{"$set": {"topics": {"$map": {"input": {"$ifNull": ["$topics", []]}, "in": {"$mergeObjects": [
+                "$$this", {"findings_count": {"$size": {"$ifNull": ["$$this.findings", []]}}}]}}}}},
+                {"$project": {"topics.findings": 0, "topics.hits": 0}}]
+        docs = await (await self.col.aggregate(pipeline)).to_list(1)
+        return [t for t in (parse(TopicDoc, x, "users") for x in (docs[0] if docs else {}).get("topics") or []) if t]
+
+    async def push_topic(self, user_id: UserId, topic: dict, cap: int) -> str:
+        """Appends a topic unless one with the same `norm` exists or the user has `cap`.
+        Returns "ok", "duplicate", "full" or "no_user"."""
+        key = user_key(user_id)
+        result = await self.col.update_one(
+            {"_id": key, f"topics.{cap - 1}": {"$exists": False}, "topics.norm": {"$ne": topic["norm"]}},
+            {"$push": {"topics": topic}})
+        if result.matched_count:
+            return "ok"
+        if await self.col.count_documents({"_id": key, "topics.norm": topic["norm"]}, limit=1):
+            return "duplicate"
+        return "full" if await self.col.count_documents({"_id": key}, limit=1) else "no_user"
+
+    async def update_topic(self, user_id: UserId, norm: str, fields: dict,
+                           findings: list[dict] | None = None, keep: int = 30) -> bool:
+        """Sets `fields` on the topic `norm` and appends `findings` (keeping the newest `keep`)."""
+        update: dict = {}
+        if fields:
+            update["$set"] = {f"topics.$[t].{k}": v for k, v in fields.items()}
+        if findings:
+            update["$push"] = {"topics.$[t].findings": {"$each": findings, "$slice": -keep}}
+        if not update:
+            return True
+        result = await self.col.update_one({"_id": user_key(user_id), "topics.norm": norm}, update,
+                                           array_filters=[{"t.norm": norm}])
+        return result.matched_count == 1
+
+    async def all_active_topics(self, now: datetime) -> list[TopicDoc]:
+        """Every user's followed, unexpired topics: names and terms only (for the pipeline's keyword record)."""
+        pipeline = [{"$match": {"topics.status": "active"}}, {"$unwind": "$topics"},
+                    {"$match": {"topics.status": "active", "topics.expires_at": {"$gt": now}}},
+                    {"$project": {"_id": 0, "id": "$topics.id", "name": "$topics.name", "norm": "$topics.norm",
+                                  "status": "$topics.status", "specific": "$topics.specific",
+                                  "exclude": "$topics.exclude", "queries": "$topics.queries"}}]
+        docs = await (await self.col.aggregate(pipeline)).to_list(None)
+        return [t for t in (parse(TopicDoc, d, "users") for d in docs) if t]
+
+    async def get_proposals(self, user_id: UserId) -> list[ProposalDoc]:
+        doc = await self.col.find_one({"_id": user_key(user_id)}, {"proposals": 1})
+        return [p for p in (parse(ProposalDoc, x, "users") for x in (doc or {}).get("proposals") or []) if p]
+
+    async def push_proposal(self, user_id: UserId, proposal: dict, keep: int) -> str:
+        """Appends a proposal unless one with the same `key` exists (in any status), keeping the newest `keep`.
+        Returns "ok", "duplicate" or "no_user"."""
+        key = user_key(user_id)
+        result = await self.col.update_one(
+            {"_id": key, "proposals.key": {"$ne": proposal["key"]}},
+            {"$push": {"proposals": {"$each": [proposal], "$slice": -keep}}})
+        if result.matched_count:
+            return "ok"
+        return "duplicate" if await self.col.count_documents({"_id": key}, limit=1) else "no_user"
+
+    async def update_proposal(self, user_id: UserId, proposal_id: ObjectId, fields: dict,
+                              status: str | None = None, inc: dict | None = None) -> bool:
+        """Sets `fields` on proposal `proposal_id`, only while its status is `status` (if given)."""
+        cond: dict = {"p.id": proposal_id, **({"p.status": status} if status else {})}
+        update: dict = {"$set": {f"proposals.$[p].{k}": v for k, v in fields.items()}}
+        if inc:
+            update["$inc"] = {f"proposals.$[p].{k}": v for k, v in inc.items()}
+        result = await self.col.update_one({"_id": user_key(user_id), "proposals.id": proposal_id}, update,
+                                           array_filters=[cond])
+        return result.modified_count == 1
+
+    async def all_learned_interests(self, labels: list[str]) -> list[dict]:
+        """Every user's learned interests (with the profile's write time), of profiles labelled within `labels`:
+        for the pipeline's profile keyword record, which holds no user data."""
+        cursor = self.col.find({"learned.interests.0": {"$exists": True},
+                                "learned.sensitivity": {"$in": labels}},
+                               {"_id": 0, "learned.interests": 1, "learned.updated_at": 1})
+        return [d["learned"] async for d in cursor]
+
+    async def update_learned(self, user_id: UserId, fields: dict) -> bool:
+        """Sets fields of users.learned (a correction by the user; the learning job writes the whole profile)."""
+        result = await self.col.update_one({"_id": user_key(user_id)},
+                                           {"$set": {f"learned.{k}": v for k, v in fields.items()}})
+        return result.matched_count == 1
+
     async def get_learned(self, user_id: UserId) -> dict | None:
         """users.learned: the profile the learning job wrote (brain/learning/profile.py), if any."""
         doc = await self.col.find_one({"_id": user_key(user_id)}, {"learned": 1})
@@ -301,6 +423,30 @@ async def ensure_user_indexes(db: AsyncDatabase) -> None:
                                    partialFilterExpression={"identities.subject": {"$exists": True}})
 
 
+class ReportsRepo:
+    """Period analyses, as documents in `conversations` (docs/DEEP_DIVE_PLAN.md, phase E): one per user and
+    period + focus, session_key "report:<start>:<end>:<focus>", kind "analysis", the report as an assistant
+    message (a rewrite adds a message; the newest is the report). No `channel` / `mcp_session_id` fields, so the
+    conversation log never appends chat to them."""
+
+    def __init__(self, db: AsyncDatabase):
+        self.col = db["conversations"]
+
+    async def get(self, user_id: UserId, key: str) -> dict | None:
+        doc = await self.col.find_one({"user_id": user_key(user_id), "session_key": key, "kind": "analysis"},
+                                      {"messages": {"$slice": -1}, "period": 1, "focus": 1, "updated_at": 1})
+        return doc
+
+    async def save(self, user_id: UserId, key: str, period: dict, focus: str | None, message: dict) -> ObjectId:
+        now = datetime.now(timezone.utc)
+        doc = await self.col.find_one_and_update(
+            {"user_id": user_key(user_id), "session_key": key},
+            {"$push": {"messages": message}, "$inc": {"message_count": 1}, "$set": {"updated_at": now},
+             "$setOnInsert": {"kind": "analysis", "period": period, "focus": focus, "started_at": now}},
+            upsert=True, projection={"_id": 1}, return_document=True)
+        return doc["_id"]
+
+
 class Repos:
     """All repositories over one database; what domain functions receive."""
 
@@ -310,3 +456,4 @@ class Repos:
         self.sources = SourcesRepo(db)
         self.digests = DigestsRepo(db)
         self.users = UsersRepo(db)
+        self.reports = ReportsRepo(db)

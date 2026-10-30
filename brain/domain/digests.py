@@ -4,6 +4,11 @@ Order: today's morning-picker choice (users.daily.selected, only if daily.date i
 then the rest by category_scores; categories without a score keep the digest's own order.
 Each item carries the highest sensitivity of the digest and its source posts; items above the
 caller's label are removed before anything is returned.
+
+Tracked topics: the pipeline searches the web for every user's followed topics (users.topics, synced into
+sources by brain/domain/topics.py) and builds one digest with trigger "topics" for all of them. Each user sees
+only the items that name one of their own followed topics, grouped by topic («⭐ Спектр-К»), before the ua and ru
+digests. It never counts as a side's digest, and the morning delivery doesn't wait for it.
 """
 from __future__ import annotations
 
@@ -20,6 +25,9 @@ from brain.domain.identity import UserContext
 
 KYIV = ZoneInfo("Europe/Kyiv")
 RU_NOTE = "Claims of Russian sources, not verified facts."
+TOPICS = "topics"            # the digests' trigger and the result's `side` for the tracked-topics digest
+TOPICS_NOTE = ("Found for the topics the user follows, partly on the web. Items marked as Russian-source claims "
+               "are claims, not facts.")
 
 
 @dataclass
@@ -30,6 +38,15 @@ class DigestView:
     side_note: str | None = None
     numbers: dict[int, int] = field(default_factory=dict)     # id(item) -> item number (see item_number)
     relevance: dict[int, "Relevance"] = field(default_factory=dict)     # id(item) -> personal relevance
+    kind: str | None = None                                   # TOPICS for the tracked-topics digest
+    claims: set[int] = field(default_factory=set)             # id(item) of Russian-source items (topics digest)
+
+    @property
+    def side(self) -> str:
+        return self.kind or self.digest.side
+
+    def claim(self, item: DigestItemDoc) -> bool:
+        return self.digest.side == "ru" if self.kind is None else id(item) in self.claims
 
     def number(self, item: DigestItemDoc) -> int:
         return self.numbers[id(item)]
@@ -81,14 +98,22 @@ def order_sections(sections: list[DigestSectionDoc], profile: UserProfileDoc | N
 
 
 async def get_digests(repos: Repos, ctx: UserContext, side: str = "both", day: str | None = None) -> DigestResultView:
-    sides = ["ua", "ru"] if side in ("both", "all", None) else [side]
+    """both: the user's tracked-topics items first (if any), then ua and ru; ua / ru: that side only; topics:
+    the tracked-topics items only."""
+    both = side in ("both", "all", None)
+    sides = ["ua", "ru"] if both else [] if side == TOPICS else [side]
     if any(s not in ("ua", "ru") for s in sides):
-        raise InvalidInput("side must be 'ua', 'ru' or 'both'")
+        raise InvalidInput("side must be 'ua', 'ru', 'topics' or 'both'")
     wanted = parse_date(day)
     start, end = kyiv_day_bounds(wanted) if wanted else (None, None)
     profile = await repos.users.get_profile(ctx.user_id)
     prefs = await relevance.load(repos, ctx, profile)
     result = DigestResultView(date=wanted.isoformat() if wanted else None)
+    if (both or side == TOPICS) and prefs.tracked:
+        digest = await repos.digests.latest_topics(start, end)
+        if digest is not None and sensitivity.is_allowed(digest.sensitivity, ctx.max_sensitivity):
+            if view := await _topics_view(repos, ctx, digest, prefs.tracked):
+                result.digests.append(view)
     for s in sides:
         digest = await repos.digests.latest(s, "day", start, end)
         if digest is None or not sensitivity.is_allowed(digest.sensitivity, ctx.max_sensitivity):
@@ -116,7 +141,8 @@ async def morning_digest(repos: Repos, ctx: UserContext, now: datetime | None = 
     res = await get_digests(repos, ctx, "both", now.date().isoformat())
     if not res.digests or (res.missing_sides and now.hour < MORNING_WAIT_UNTIL):
         return Morning("not_ready", res)
-    key = ",".join(sorted(v.digest.id for v in res.digests))
+    # The key is the sides' digests: a topics digest arriving later doesn't make the delivery new again.
+    key = ",".join(sorted(v.digest.id for v in res.digests if v.kind is None) or [res.digests[0].digest.id])
     if not await repos.users.claim_morning_digest(ctx.user_id, key, now.date().isoformat(), ctx.channel):
         return Morning("already_sent", res)
     return Morning("new", res)
@@ -157,6 +183,34 @@ async def find_item(repos: Repos, ctx: UserContext, digest_id: str | None,
                 labels = await _source_labels(repos, [item])
                 return (digest, section, item) if _item_allowed(digest, item, labels, ctx) else None
     return None
+
+
+async def _topics_view(repos: Repos, ctx: UserContext, digest: DigestDoc, tracked: list) -> DigestView | None:
+    """The tracked-topics digest as this user sees it: only items naming one of their followed topics (in the item
+    or its source posts), one section per topic in the order they follow them. None if nothing is theirs."""
+    from brain.domain.topics import matched_term                 # (topics imports this module)
+    items = [it for sec in digest.sections for it in sec.items]
+    posts = await _source_posts(repos, items)
+    labels = {pid: p.sensitivity for pid, p in posts.items()}
+    view = DigestView(digest, [], side_note=TOPICS_NOTE, kind=TOPICS)
+    view.numbers = {id(it): item_number(it, pos) for pos, it in enumerate(items, 1)}
+    groups: dict[str, list[DigestItemDoc]] = {}
+    for item in items:
+        if not _item_allowed(digest, item, labels, ctx):
+            view.hidden_items += 1
+            continue
+        sources = [posts[p] for p in item.source_post_ids if p in posts]
+        haystack = " ".join([item.text, *(p.summary for p in sources)])
+        topic = next((t for t in tracked if matched_term(t, haystack)), None)
+        if topic is None:                       # another user's topic: not theirs to see, not "hidden"
+            continue
+        groups.setdefault(topic.norm, []).append(item)
+        view.relevance[id(item)] = Relevance(relevance.W_TRACKED, [f"тема, яку ви відстежуєте: {topic.name}"])
+        if any(p.source_side == "ru" for p in sources):
+            view.claims.add(id(item))
+    view.sections = [(DigestSectionDoc(category=f"topic:{t.norm}", title=f"⭐ {t.name}"), groups[t.norm])
+                     for t in tracked if t.norm in groups]
+    return view if view.sections else None
 
 
 FOR_YOU = DigestSectionDoc(category="for_you", title="⭐ Для вас")

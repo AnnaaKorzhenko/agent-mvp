@@ -1,10 +1,15 @@
 // Shared by every widget (inlined by brain/mcp_server/widgets.py ahead of the page's own script).
-// A card shows one rated thing with 👍 / 👎 / 50/50; a press calls record_feedback through the host, then
-// offers «Чому?». Every rating made in the widget is sent to the model as context.
+// A card shows one rated thing with Корисно / Не корисно / 50/50; a press calls record_feedback through the host,
+// then offers «Чому?». Every rating made in the widget is sent to the model as context. «Глибше» puts «Глибше про
+// #N …» into the chat as the user's message: the model then runs deep_dive and searches the web (only it can).
+// «Відстежувати» puts «Відстежувати тему з #N …»: the model names the topic in three languages and calls
+// track_topic. A proposal card (an agent's suggestion) calls answer_proposal: «Так» does what it says, «Не цікаво»
+// closes it. Labels are plain text, no emoji: some desktops have no emoji font and show empty boxes.
 const { App, applyDocumentTheme, applyHostStyleVariables, applyHostFonts } = globalThis.__mcpExtApps;
 
-const REACTIONS = [["useful", "👍"], ["not_useful", "👎"], ["neutral", "50/50"]];
-const LABEL = { useful: "👍 корисно", not_useful: "👎 не корисно", neutral: "50/50" };
+const REACTIONS = [["useful", "Корисно"], ["not_useful", "Не корисно"], ["neutral", "50/50"]];
+const LABEL = { useful: "корисно", not_useful: "не корисно", neutral: "50/50" };
+const TRACKED = "тема, яку ви відстежуєте: ";      // the server's `why` for an item naming a followed topic
 const root = document.getElementById("root");
 
 function el(tag, attrs = {}, ...children) {
@@ -47,14 +52,19 @@ function errorText(result, fallback) {
 function createWidget({ name, where }) {
   const app = new App({ name, version: "1.0.0" }, {}, { autoResize: true });
   const ratings = new Map();      // card key -> {ref, text, reaction, feedback_id, comment}
+  const answers = new Map();      // proposal_id -> {title, accepted, done}
 
-  // The model sees only the latest context update, so always send every rating made in this widget.
+  // The model sees only the latest context update, so always send every rating and answer made in this widget.
   async function syncModelContext() {
     const lines = [...ratings.values()].map((r) =>
       `- #${r.ref} «${short(r.text)}»: ${LABEL[r.reaction]}` + (r.comment ? `; коментар: «${r.comment}»` : "") +
       ` (feedback_id ${r.feedback_id})`);
+    const answered = [...answers.values()].map((a) =>
+      `- пропозиція «${short(a.title)}»: ${a.accepted ? "так" : "не цікаво"} (${a.done})`);
     const text = `Оцінки, які користувач поставив кнопками ${where} (уже збережено, record_feedback повторно ` +
-                 "не викликати; коментар до оцінки можна додати через її feedback_id):\n" + lines.join("\n");
+                 "не викликати; коментар до оцінки можна додати через її feedback_id):\n" + lines.join("\n") +
+                 (answered.length ? "\nВідповіді на пропозиції (уже збережено, answer_proposal повторно не " +
+                                    "викликати):\n" + answered.join("\n") : "");
     try { await app.updateModelContext({ content: [{ type: "text", text }] }); } catch { /* host may not support it */ }
   }
 
@@ -66,8 +76,9 @@ function createWidget({ name, where }) {
   }
 
   // key: unique per rated thing; ref: the number the user sees; text: what the model is told was rated;
-  // body: nodes above the buttons; urls: source links; target: record_feedback ids for this thing.
-  function card({ key, ref, text, body, urls = [], target }) {
+  // body: nodes above the buttons; urls: source links; target: record_feedback ids for this thing;
+  // why: the server's reasons (an item already naming a followed topic shows «Відстежується»).
+  function card({ key, ref, text, body, urls = [], target, why = [] }) {
     const status = el("span", { class: "status", role: "status" });
     const box = el("textarea", { placeholder: "Чому? (необов'язково)", maxlength: "2000", "aria-label": "Коментар" });
     const send = el("button", { type: "button" }, "Надіслати");
@@ -77,8 +88,21 @@ function createWidget({ name, where }) {
       type: "button", "aria-pressed": "false", "aria-label": LABEL[reaction], title: LABEL[reaction],
       onclick: () => rate(reaction),
     }, label));
+    const deeper = el("button", { type: "button", class: "deeper", title: "Глибше: знайти більше, зокрема в інтернеті",
+                                  "aria-label": "Глибше", onclick: () => toChat(`Глибше про #${ref} «${short(text, 120)}»`,
+                                                                               `глибше про #${ref}`) }, "Глибше");
+    const followed = why.find((w) => w.startsWith(TRACKED))?.slice(TRACKED.length);
+    const track = el("button", { type: "button", class: "deeper",
+      title: followed ? `Уже відстежується: ${followed}` : "Відстежувати цю тему в наступних зведеннях",
+      "aria-label": followed ? "Уже відстежується" : "Відстежувати тему", "aria-pressed": followed ? "true" : "false",
+      onclick: () => toChat(`Відстежувати тему з #${ref} «${short(text, 120)}»`, `відстежуй тему з #${ref}`),
+    }, followed ? "Відстежується" : "Відстежувати");
+    if (followed) track.disabled = true;
 
-    function busy(on) { for (const b of [...buttons, send, skip]) b.disabled = on; }
+    function busy(on) {
+      for (const b of [...buttons, deeper, send, skip]) b.disabled = on;
+      track.disabled = on || Boolean(followed);
+    }
     function show(message, kind = "") { status.textContent = message; status.className = "status " + kind; }
 
     async function rate(reaction) {
@@ -118,6 +142,19 @@ function createWidget({ name, where }) {
         show("Не вдалося зберегти коментар: " + (e?.message || e), "error");
       } finally { busy(false); }
     }
+    // A request for the model, as the user's message. fallback: what to type if the host refuses.
+    async function toChat(message, fallback) {
+      busy(true);
+      try {
+        const result = await app.sendMessage({ role: "user", content: [{ type: "text", text: message }] });
+        if (result?.isError) throw new Error("rejected");
+        // Claude puts it into the message box rather than sending it: the user presses Enter.
+        show("Запит у полі повідомлення: надішліть його", "ok");
+      } catch {
+        show(`Напишіть у чаті: «${fallback}»`, "error");
+      } finally { busy(false); }
+    }
+
     send.addEventListener("click", () => { const t = box.value.trim(); if (t) followUp(t); else box.focus(); });
     skip.addEventListener("click", () => followUp(""));
 
@@ -125,8 +162,44 @@ function createWidget({ name, where }) {
       el("div", { class: "row" }, el("span", { class: "ref" }, `#${ref}`),
          el("div", { class: "text" }, body,
             el("div", { class: "foot" }, el("div", { class: "links" }, urls.map((u) => link(u))),
-               el("div", { class: "actions" }, status, buttons)))),
+               el("div", { class: "actions" }, status, deeper, track, buttons)))),
       comment);
+  }
+
+  // An agent's suggestion (a digest's proposals): «Так, …» does what it says, «Не цікаво» closes it.
+  function proposal(p) {
+    const status = el("span", { class: "status", role: "status" });
+    const yes = el("button", { type: "button" }, `Так, ${p.yes}`);
+    const no = el("button", { type: "button" }, "Не цікаво");
+    async function send(answer) {
+      yes.disabled = no.disabled = true;
+      status.textContent = "Зберігаю…"; status.className = "status";
+      try {
+        const user_message = `[widget] ${answer === "accept" ? "так" : "не цікаво"}: пропозиція «${short(p.title)}»`;
+        const result = await app.callServerTool({ name: "answer_proposal",
+                                                  arguments: { proposal_id: p.proposal_id, answer, user_message } });
+        const out = payload(result);
+        if (result.isError || !out?.done) throw new Error(errorText(result, "Не вдалося зберегти"));
+        answers.set(p.proposal_id, { title: p.title, accepted: answer === "accept", done: out.done });
+        status.textContent = "✓ " + out.done; status.className = "status ok";
+        await syncModelContext();
+        if (out.ask) {                       // advice whose yes is a request for Claude (a deep dive, an analysis)
+          try {
+            await app.sendMessage({ role: "user", content: [{ type: "text", text: out.ask }] });
+            status.textContent = "Запит у полі повідомлення: надішліть його";
+          } catch { status.textContent = `Напишіть у чаті: «${out.ask}»`; }
+        }
+      } catch (e) {
+        status.textContent = "Не вдалося зберегти: " + (e?.message || e); status.className = "status error";
+        yes.disabled = no.disabled = false;
+      }
+    }
+    yes.addEventListener("click", () => send("accept"));
+    no.addEventListener("click", () => send("dismiss"));
+    return el("div", { class: "card proposal" },
+      el("div", { class: "text" }, el("strong", {}, p.title), p.why ? el("div", { class: "why" }, p.why) : null,
+         el("div", { class: "foot" }, el("div", { class: "links" }, (p.links || []).map((u) => link(u))),
+            el("div", { class: "actions" }, status, yes, no))));
   }
 
   // Handlers before connect(), so the first notifications are not missed.
@@ -144,5 +217,5 @@ function createWidget({ name, where }) {
     applyContext(app.getHostContext());
   }
 
-  return { app, card, link, start };
+  return { app, card, link, proposal, start };
 }
