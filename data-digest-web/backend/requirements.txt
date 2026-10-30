@@ -1,0 +1,5 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+motor>=3.5
+pydantic-settings>=2.4
+openai>=1.40
