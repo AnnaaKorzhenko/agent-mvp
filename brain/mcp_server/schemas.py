@@ -109,6 +109,9 @@ class MorningDigestResult(DigestResult):
     status: Literal["new", "not_ready", "already_sent"] = Field(description=(
         "new: today's digest, delivered now (present it); not_ready: no complete digest for today yet; "
         "already_sent: today's digest was delivered before (don't present it again)"))
+    analysis_due: "AnalysisDue | None" = Field(None, description=(
+        "Monday / the 1st: the weekly or monthly analysis is due and not written yet. After presenting the digest, "
+        "call get_analysis with these dates, write it and save it with save_report"))
 
 
 class PostDetail(PostOut, MemoryOut):
@@ -268,3 +271,65 @@ class TopicSaved(MemoryOut):
         "Regions (ua / ru / world) no name of the topic reaches, so the web search there finds nothing: call "
         "track_topic again adding those spellings (world: Latin; ua: Ukrainian; ru: Russian)"))
     confirmation: str = Field(description="Short Ukrainian confirmation to tell the user")
+
+
+class AnalysisItem(BaseModel):
+    id: str = Field(description="digest_id/n of the item")
+    date: str
+    side: Literal["ua", "ru", "topics"] | str
+    is_russian_source_claim: bool
+    category: str
+    text: str
+    source_urls: list[str]
+    why: list[str] = Field(default_factory=list, description=WHY_HELP)
+    goals: list[str] = Field(default_factory=list, description="The user's goals this item is about")
+    topics: list[str] = Field(default_factory=list, description="The user's tracked topics it names")
+
+
+class AnalysisPeriod(BaseModel):
+    start_date: str
+    end_date: str
+    days: int
+    label: str = Field(description="How to name the period to the user, e.g. «23.10–29.10» or «жовтень 2026»")
+
+
+class AnalysisResult(MemoryOut):
+    status: Literal["stored", "to_write", "empty"] = Field(description=(
+        "stored: the report was written before (report, highlights): present it; to_write: write it now from the "
+        "pack (next_steps), then save_report; empty: no digests in the period, say so"))
+    period: AnalysisPeriod
+    previous_period: AnalysisPeriod | None = None
+    focus: str | None = None
+    title: str | None = None
+    highlights: list[str] = Field(default_factory=list)
+    report: str | None = Field(None, description="stored: the full report (markdown)")
+    written_at: str | None = None
+    goals: list[str] = Field(default_factory=list)
+    tracked_topics: list[str] = Field(default_factory=list)
+    user_summary: str | None = None
+    counts: dict = Field(default_factory=dict, description=(
+        "Exact counts over all the period's digest items (not only the selection): items and previous_items, "
+        "per_day, by_side, by_category, goals, topics (each against the previous period), top_tags"))
+    items: list[AnalysisItem] = Field(default_factory=list, description=(
+        "The items that matter to this user, oldest first (a selection; counts cover all)"))
+    selected_from: int = Field(0, description="Distinct items the selection was made from")
+    findings: list[dict] = Field(default_factory=list, description="Web findings saved on the user's topics "
+                                                                   "during the period")
+    next_steps: str | None = None
+
+
+class ReportSaved(MemoryOut):
+    period: AnalysisPeriod
+    focus: str | None
+    title: str
+    confirmation: str = Field(description="Short Ukrainian confirmation to tell the user")
+
+
+class AnalysisDue(BaseModel):
+    period: Literal["week", "month"]
+    start_date: str
+    end_date: str
+    label: str
+
+
+MorningDigestResult.model_rebuild()          # analysis_due refers to AnalysisDue, defined after it

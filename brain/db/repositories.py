@@ -164,6 +164,15 @@ class DigestsRepo:
                 return digest
         return None
 
+    async def in_range(self, start: datetime, end: datetime, limit: int = 500) -> list[DigestDoc]:
+        """Every daily digest created in [start, end), oldest first (all sides and triggers)."""
+        out = []
+        async for doc in self.col.find({"period": "day", "created_at": {"$gte": start, "$lt": end}}
+                                       ).sort("created_at", 1).limit(limit):
+            if (digest := parse(DigestDoc, doc, "digests")) and digest.sections:
+                out.append(digest)
+        return out
+
     async def get(self, digest_id: str | ObjectId) -> DigestDoc | None:
         oid = to_object_id(digest_id)
         return parse(DigestDoc, await self.col.find_one({"_id": oid}), "digests") if oid else None
@@ -372,6 +381,30 @@ async def ensure_user_indexes(db: AsyncDatabase) -> None:
                                    partialFilterExpression={"identities.subject": {"$exists": True}})
 
 
+class ReportsRepo:
+    """Period analyses, as documents in `conversations` (docs/DEEP_DIVE_PLAN.md, phase E): one per user and
+    period + focus, session_key "report:<start>:<end>:<focus>", kind "analysis", the report as an assistant
+    message (a rewrite adds a message; the newest is the report). No `channel` / `mcp_session_id` fields, so the
+    conversation log never appends chat to them."""
+
+    def __init__(self, db: AsyncDatabase):
+        self.col = db["conversations"]
+
+    async def get(self, user_id: UserId, key: str) -> dict | None:
+        doc = await self.col.find_one({"user_id": user_key(user_id), "session_key": key, "kind": "analysis"},
+                                      {"messages": {"$slice": -1}, "period": 1, "focus": 1, "updated_at": 1})
+        return doc
+
+    async def save(self, user_id: UserId, key: str, period: dict, focus: str | None, message: dict) -> ObjectId:
+        now = datetime.now(timezone.utc)
+        doc = await self.col.find_one_and_update(
+            {"user_id": user_key(user_id), "session_key": key},
+            {"$push": {"messages": message}, "$inc": {"message_count": 1}, "$set": {"updated_at": now},
+             "$setOnInsert": {"kind": "analysis", "period": period, "focus": focus, "started_at": now}},
+            upsert=True, projection={"_id": 1}, return_document=True)
+        return doc["_id"]
+
+
 class Repos:
     """All repositories over one database; what domain functions receive."""
 
@@ -381,3 +414,4 @@ class Repos:
         self.sources = SourcesRepo(db)
         self.digests = DigestsRepo(db)
         self.users = UsersRepo(db)
+        self.reports = ReportsRepo(db)

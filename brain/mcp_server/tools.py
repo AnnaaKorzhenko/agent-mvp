@@ -23,6 +23,7 @@ from brain.audit.conversations import WIDGET_PREFIX, CallRecord, ConversationLog
 from brain.audit.log import AuditLog
 from brain.config import Settings
 from brain.db.repositories import Repos, user_key
+from brain.domain import analysis as analysis_domain
 from brain.domain import digests as digests_domain
 from brain.domain import feedback as feedback_domain
 from brain.domain import goals as goals_domain
@@ -141,16 +142,39 @@ async def _renewals(svc: "Services", ctx: UserContext, result: out.DigestResult)
         logger.error(f"renewal check failed: {type(e).__name__}: {e}")
 
 
+def _period_out(p: analysis_domain.Period) -> out.AnalysisPeriod:
+    label = analysis_domain.month_name(p) or f"{p.start:%d.%m}–{p.end:%d.%m.%Y}"
+    return out.AnalysisPeriod(start_date=p.start.isoformat(), end_date=p.end.isoformat(), days=p.days, label=label)
+
+
+async def _analysis_due(svc: "Services", ctx: UserContext) -> out.AnalysisDue | None:
+    """Monday / the 1st: the scheduled analysis, if not written yet. Never breaks the digest."""
+    try:
+        if not (d := analysis_domain.due()):
+            return None
+        kind, period = d
+        if await analysis_domain.stored(svc.repos, ctx, period, None):
+            return None
+        p = _period_out(period)
+        return out.AnalysisDue(period=kind, start_date=p.start_date, end_date=p.end_date, label=p.label)
+    except Exception as e:                 # noqa: BLE001
+        logger.error(f"analysis_due failed: {type(e).__name__}: {e}")
+        return None
+
+
 def _model_text(result: out.DigestResult, prefix: str = "") -> str:
-    """What the model reads: a short index when the cards are on screen, else the full digest."""
-    if not result.shown_in_widget:
-        return prefix + result.model_dump_json()
-    text = prefix + widgets.digest_index(result)
+    """What the model reads: a short index when the cards are on screen, else the full digest; then what to do
+    after it (renewals, a due analysis), spelled out either way."""
+    text = prefix + (widgets.digest_index(result) if result.shown_in_widget else result.model_dump_json())
     if result.topics_to_renew:
         text += "\nFollowed topics about to expire (ask once, briefly, whether to keep following; on yes call " \
                 "track_topic follow with the name): " + "; ".join(
                     f"«{r.name}» " + ("expired " if r.expired else "until ") + r.expires_at
                     for r in result.topics_to_renew)
+    due = getattr(result, "analysis_due", None)
+    if due:
+        text += (f"\nThe {due.period}ly analysis for {due.label} is due: after this digest, call get_analysis with "
+                 f"start_date {due.start_date} and end_date {due.end_date}, write it and save it with save_report.")
     return text
 
 
@@ -384,6 +408,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
             result = _digest_out(m.result, out.MorningDigestResult, status="new")
             result.shown_in_widget = widget and bool(result.digests)
             await _renewals(svc, ctx, result)
+            result.analysis_due = await _analysis_due(svc, ctx)
             await _digest_done(call, m.result, result)
             return CallToolResult(content=[TextContent(type="text", text=_model_text(result, "status: new\n"))],
                                   structured_content=result.model_dump(mode="json"))
@@ -783,4 +808,82 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
             missing = topics_domain.missing_regions(r.topic.specific) if action == "follow" else []
             return out.TopicSaved(topic=_topic_out(r.topic), created=r.created, unknown_tags=r.unknown_tags,
                                   missing_regions=missing, confirmation=confirmation)
+        return await call.run(body)
+
+    @mcp.tool(title="Analysis of a week or a month", annotations=READ_ONLY)
+    async def get_analysis(
+        mcp_ctx: Context,
+        user_message: UserMessage,
+        period: Annotated[Literal["week", "month"], Field(description=(
+            "week: the last 7 days, month: the last 30 days (ending end_date, default today)"))] = "week",
+        start_date: Annotated[str | None, Field(description="Exact first day YYYY-MM-DD (with end_date)")] = None,
+        end_date: Annotated[str | None, Field(description="Last day YYYY-MM-DD (Kyiv); default today")] = None,
+        focus: Annotated[str | None, Field(max_length=120, description=(
+            "Optional: only one goal, tracked topic or thing, e.g. «Спектр-К», «НРК»"))] = None,
+        refresh: Annotated[bool, Field(description=(
+            "true only if the user asks for a fresh analysis of a period already analysed"))] = False,
+        signals: Signals = None,
+    ) -> out.AnalysisResult:
+        """Analysis of everything found in a week or a month, for this user: not a list of news but what changed,
+        trends with numbers, claims versus confirmations, why it matters for their goals and topics, what to watch.
+        Use it when the user asks for a weekly / monthly analysis, review, trends or "що змінилося за тиждень",
+        and when a morning digest says analysis_due. If the report exists, present it (status stored). Otherwise
+        (status to_write) the result is a pack of the period's data: write the analysis from it as next_steps
+        says, then save it with save_report."""
+        args = {"period": period, "start_date": start_date, "end_date": end_date, "focus": focus,
+                "refresh": refresh}
+        call = _Call(svc, "get_analysis", {**args, **_common(user_message, signals)}, mcp_ctx)
+
+        async def body(ctx: UserContext) -> out.AnalysisResult:
+            p = analysis_domain.period_for(period, start_date, end_date)
+            report = None if refresh else await analysis_domain.stored(svc.repos, ctx, p, focus)
+            if report is not None:
+                await call.done(items=1)
+                return out.AnalysisResult(status="stored", period=_period_out(p), focus=focus, title=report.title,
+                                          highlights=report.highlights, report=report.text,
+                                          written_at=report.created_at.isoformat() if report.created_at else None)
+            pack = await analysis_domain.build(svc.repos, ctx, p, focus)
+            await call.done(items=len(pack.items))
+            status = "to_write" if pack.digests_used else "empty"
+            return out.AnalysisResult(
+                status=status, period=_period_out(p), previous_period=_period_out(pack.previous), focus=focus,
+                goals=pack.goals, tracked_topics=pack.tracked, user_summary=pack.summary, counts=pack.counts,
+                selected_from=pack.selected_from, findings=pack.findings,
+                items=[out.AnalysisItem(id=i.id, date=i.date, side=i.side, is_russian_source_claim=i.claim,
+                                        category=i.category, text=i.text, source_urls=i.source_urls, why=i.why,
+                                        goals=i.goals, topics=i.topics) for i in pack.items],
+                next_steps=analysis_domain.WRITE_STEPS if status == "to_write"
+                else "There are no digests in this period: say so; don't write an analysis.")
+        return await call.run(body)
+
+    @mcp.tool(title="Save a written analysis",
+              annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False,
+                                          openWorldHint=False))
+    async def save_report(
+        mcp_ctx: Context,
+        user_message: UserMessage,
+        start_date: Annotated[str, Field(description="The analysed period's first day, as get_analysis returned")],
+        end_date: Annotated[str, Field(description="… and its last day")],
+        title: Annotated[str, Field(min_length=3, max_length=200, description="Short title, e.g. «Тиждень "
+                                                                               "23.10–29.10: РЕБ і НРК»")],
+        highlights: Annotated[list[str], Field(min_length=1, max_length=7, description=(
+            "3-7 one-line key points, most important first"))],
+        report: Annotated[str, Field(min_length=200, max_length=20000, description=(
+            "The full analysis as you presented it (markdown), with its source links"))],
+        focus: Annotated[str | None, Field(max_length=120, description="The focus passed to get_analysis, if any")]
+        = None,
+        signals: Signals = None,
+    ) -> out.ReportSaved:
+        """Save the analysis you wrote from get_analysis, so it is kept, comes back next time without rewriting, and
+        feeds later analyses. Call it once per analysis, right after presenting it."""
+        call = _Call(svc, "save_report", {"start_date": start_date, "end_date": end_date, "focus": focus,
+                                          "title": title, "highlights": highlights, "report_chars": len(report),
+                                          **_common(user_message, signals)}, mcp_ctx)
+
+        async def body(ctx: UserContext) -> out.ReportSaved:
+            p = analysis_domain.period_for("week", start_date, end_date)
+            r = await analysis_domain.save_report(svc.repos, ctx, p, focus, title, highlights, report)
+            await call.done(items=1)
+            return out.ReportSaved(period=_period_out(p), focus=focus, title=r.title,
+                                   confirmation=f"Аналіз за {_period_out(p).label} збережено")
         return await call.run(body)
