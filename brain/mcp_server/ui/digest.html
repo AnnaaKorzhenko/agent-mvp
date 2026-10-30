@@ -19,7 +19,7 @@
 <script type="module">
 /*__COMMON_JS__*/
 
-const SIDE = { topics: "⭐ Ваші теми", ua: "Українські джерела", ru: "Російські джерела" };
+const SIDE = { topics: "Ваші теми", ua: "Українські джерела", ru: "Російські джерела" };
 const FIRST = 6;                // items shown per side before «Показати ще»
 const widget = createWidget({ name: "News brain digest", where: "у віджеті зведення" });
 
@@ -54,7 +54,7 @@ function render(data) {
         if (++shown > FIRST) { c.hidden = true; folded.push(c); }
         return c;
       });
-      const section = el("div", { class: "section" }, el("h3", {}, s.title || s.category), cards);
+      const section = el("div", { class: "section" }, el("h3", {}, (s.title || s.category).replace(/^⭐\s*/, "")), cards);
       if (cards.every((c) => c.hidden)) { section.hidden = true; folded.push(section); }
       return section;
     });

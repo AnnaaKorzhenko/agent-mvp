@@ -1,5 +1,5 @@
 """Deep dives and tracked topics (users.topics): what a dive returns, saving findings, following and stopping a
-topic, and the same through the MCP tools and the widget's 🔎 button."""
+topic, and the same through the MCP tools and the widget's «Глибше» button."""
 import copy
 import itertools
 from datetime import datetime, timedelta, timezone
@@ -109,7 +109,7 @@ def test_wants_more():
 async def test_the_tools_end_to_end(test_db, user):
     svc = Services(settings=make_settings(DEV_USER_ID=user, TRUST_LEVEL="cloud"), repos=Repos(test_db),
                    audit=AuditLog(test_db), token=lambda: None)
-    msg = "🔎 Глибше про #3 «Brave1 видав гранти на РЕБ.»"
+    msg = "Глибше про #3 «Brave1 видав гранти на РЕБ.»"
     async with Client(create_server(svc)) as c:
         r = await c.call_tool("deep_dive", {"user_message": msg, "digest_id": str(DIGEST_UA), "item_n": 3})
         assert not r.is_error and "web" in r.structured_content["next_steps"]
@@ -128,14 +128,14 @@ async def test_the_tools_end_to_end(test_db, user):
         r = await c.call_tool("track_topic", {"user_message": "досить", "name": "brave1 реб", "action": "stop"})
         assert r.structured_content["topic"]["status"] == "stopped"
     doc = await test_db.conversations.find_one({"user_id": user, "messages.tool": "deep_dive"})
-    assert any(m.get("content") == msg for m in doc["messages"])                 # the 🔎 message is logged
+    assert any(m.get("content") == msg for m in doc["messages"])                 # the «Глибше» message is logged
 
 
 def test_the_cards_have_the_deeper_button():
     from brain.mcp_server import widgets
     for name in ("digest.html", "search.html"):
         html = widgets.widget_html(name)
-        assert "app.sendMessage" in html and "🔎 Глибше про #" in html and "📌 Відстежувати тему з #" in html
+        assert "app.sendMessage" in html and "Глибше про #" in html and "Відстежувати тему з #" in html
 
 
 # ---- phase C: the pipeline's keyword record and the tracked-topics digest ---------------------------------

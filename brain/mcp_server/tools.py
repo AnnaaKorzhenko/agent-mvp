@@ -698,7 +698,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
         signals: Signals = None,
     ) -> out.DeepDiveResult:
         """Start a deep dive when the user wants more on a news item or thing ("більше про це", "надо больше
-        информации", "🔎 Глибше про #N", a comment asking for details): returns what the news base already has
+        информации", "Глибше про #N", a comment asking for details): returns what the news base already has
         (the item, its source posts, related posts, the user's earlier findings on it) and the next steps. The
         news base rarely has much more on one incident: after this call, search the web yourself, then save what
         you found with save_findings. Map "#N" to the latest digest or search result's ref and pass its ids."""

@@ -1,12 +1,13 @@
 // Shared by every widget (inlined by brain/mcp_server/widgets.py ahead of the page's own script).
-// A card shows one rated thing with 👍 / 👎 / 50/50; a press calls record_feedback through the host, then
-// offers «Чому?». Every rating made in the widget is sent to the model as context. 🔎 puts «Глибше про #N …» into
-// the chat as the user's message: the model then runs deep_dive and searches the web (only it can). 📌 puts
-// «Відстежувати тему з #N …»: the model names the topic in three languages and calls track_topic.
+// A card shows one rated thing with Корисно / Не корисно / 50/50; a press calls record_feedback through the host,
+// then offers «Чому?». Every rating made in the widget is sent to the model as context. «Глибше» puts «Глибше про
+// #N …» into the chat as the user's message: the model then runs deep_dive and searches the web (only it can).
+// «Відстежувати» puts «Відстежувати тему з #N …»: the model names the topic in three languages and calls
+// track_topic. Labels are plain text, no emoji: some desktops have no emoji font and show empty boxes.
 const { App, applyDocumentTheme, applyHostStyleVariables, applyHostFonts } = globalThis.__mcpExtApps;
 
-const REACTIONS = [["useful", "👍"], ["not_useful", "👎"], ["neutral", "50/50"]];
-const LABEL = { useful: "👍 корисно", not_useful: "👎 не корисно", neutral: "50/50" };
+const REACTIONS = [["useful", "Корисно"], ["not_useful", "Не корисно"], ["neutral", "50/50"]];
+const LABEL = { useful: "корисно", not_useful: "не корисно", neutral: "50/50" };
 const TRACKED = "тема, яку ви відстежуєте: ";      // the server's `why` for an item naming a followed topic
 const root = document.getElementById("root");
 
@@ -70,7 +71,7 @@ function createWidget({ name, where }) {
 
   // key: unique per rated thing; ref: the number the user sees; text: what the model is told was rated;
   // body: nodes above the buttons; urls: source links; target: record_feedback ids for this thing;
-  // why: the server's reasons (an item already naming a followed topic shows 📌 as done).
+  // why: the server's reasons (an item already naming a followed topic shows «Відстежується»).
   function card({ key, ref, text, body, urls = [], target, why = [] }) {
     const status = el("span", { class: "status", role: "status" });
     const box = el("textarea", { placeholder: "Чому? (необов'язково)", maxlength: "2000", "aria-label": "Коментар" });
@@ -82,14 +83,14 @@ function createWidget({ name, where }) {
       onclick: () => rate(reaction),
     }, label));
     const deeper = el("button", { type: "button", class: "deeper", title: "Глибше: знайти більше, зокрема в інтернеті",
-                                  "aria-label": "Глибше", onclick: () => toChat(`🔎 Глибше про #${ref} «${short(text, 120)}»`,
-                                                                               `глибше про #${ref}`) }, "🔎");
+                                  "aria-label": "Глибше", onclick: () => toChat(`Глибше про #${ref} «${short(text, 120)}»`,
+                                                                               `глибше про #${ref}`) }, "Глибше");
     const followed = why.find((w) => w.startsWith(TRACKED))?.slice(TRACKED.length);
     const track = el("button", { type: "button", class: "deeper",
       title: followed ? `Уже відстежується: ${followed}` : "Відстежувати цю тему в наступних зведеннях",
       "aria-label": followed ? "Уже відстежується" : "Відстежувати тему", "aria-pressed": followed ? "true" : "false",
-      onclick: () => toChat(`📌 Відстежувати тему з #${ref} «${short(text, 120)}»`, `відстежуй тему з #${ref}`),
-    }, "📌");
+      onclick: () => toChat(`Відстежувати тему з #${ref} «${short(text, 120)}»`, `відстежуй тему з #${ref}`),
+    }, followed ? "Відстежується" : "Відстежувати");
     if (followed) track.disabled = true;
 
     function busy(on) {
