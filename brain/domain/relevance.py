@@ -7,14 +7,21 @@ Signals, strongest first:
   word of the topic is there;
 - active goals (users.goals) and detected goals (insights kind goal). A goal matches at three levels, from the
   learned profile's goal_keywords: specific names (full weight), broader concepts (60%), themes from the fixed tag
-  list (35%); and by its own words. Only the best match per goal counts, and `why` names the matched word;
+  list (35%); and by its own words. Only the best match per goal counts, and `why` names the matched word. A theme
+  tag counts once per item whatever the number of goals listing it (nearly every defense item carries one: per
+  goal it stacked into «Для вас» on tags alone, 2026-11-02);
 - current intents (users.learned.intents: what the user is working on now), W_INTENT while they last;
 - learned interests with their weights (users.learned, written by the learning job: only confirmed ones, fading
   without fresh evidence, brain/domain/interests.py) and detected interests;
 - the bot's scores from ratings: category_scores per side, tag_scores;
 - negative: what the user avoids (users.learned.avoid) and, slightly, what they already know.
-Only insights and learned profiles this client may read are used. Topics match on word starts, like search;
-generic words ("знайти", "року", …) are ignored so a goal doesn't match everything.
+Only insights and learned profiles this client may read are used. Topics match on word starts, like search, in
+the item's own text (not its tags: «нова технологія» matched «нов…» anywhere plus the tag «оборонні технології»);
+a short phrase (≤ PHRASE_STEMS words) only when its words stand within PHRASE_WINDOW characters of each other.
+Generic words ("знайти", "року", …) are ignored so a goal doesn't match everything.
+
+`strong` is the part of the score that names something of the user's (a followed topic, a goal's names or
+phrases, an intent, an interest), without categories, rated tags and theme tags: what «Для вас» requires.
 """
 from __future__ import annotations
 
@@ -47,6 +54,8 @@ _GENERIC = """знайти знайду хочу хочемо стежити с�
 
 
 TOPIC_STEM = 5          # shorter than search stems: a topic should match every form («грантами» ~ «гранти»)
+PHRASE_STEMS = 4
+PHRASE_WINDOW = 40      # characters: «нова модифікація "Герані"», not «нова …» in one sentence and «модифікація» later
 
 
 def _generic() -> set[str]:
@@ -54,11 +63,24 @@ def _generic() -> set[str]:
     return {_stem(w)[:TOPIC_STEM] for w in _GENERIC.split()}
 
 
-def _stems(text: str) -> list[str]:
-    from brain.domain.posts import query_words
+def _stems(text: str, keep_generic: bool = False) -> list[str]:
+    """keep_generic: a keyword phrase, where every word but the connecting ones carries meaning («нова» in «нова
+    технологія»: a stop word for search and a generic word for goal sentences, but half of this phrase)."""
+    from brain.domain.posts import _WORD, _stem, query_words
+    if keep_generic:
+        words = [w.strip("'") for w in _WORD.findall((text or "").lower())]
+        words = [w for w in words if len(w) >= 3 and w not in _LINKS and not w.isdigit()]
+        # A short word loses its last letter too: «нова» ~ «нові», «новий»; «дрони» ~ «дронів».
+        return list(dict.fromkeys((w[:len(w) - 1] if len(w) <= 5 else _stem(w)[:TOPIC_STEM]).rstrip("'")
+                                  for w in words))
     generic = _generic()
     stems = [s[:TOPIC_STEM].rstrip("'") for s in query_words(text)]
     return list(dict.fromkeys(s for s in stems if s not in generic))
+
+
+# Connecting words: the only ones a keyword phrase drops.
+_LINKS = set("""та для від про над під при без між через або але що який яка які the and for with from into
+над под при для что или как это""".split())
 
 
 @dataclass
@@ -69,31 +91,47 @@ class Topic:
     need: int             # how many of the patterns must match
     group: str = ""       # goals: the goal it belongs to (only the best match per goal counts)
     tag: str | None = None   # a theme-level topic: matches this exact tag instead of words
+    window: int | None = None    # short phrases: the needed words within this many characters
 
     def matches(self, haystack: str, tags: set[str] = frozenset()) -> bool:
         if self.tag is not None:
             return self.tag in tags
-        return sum(bool(p.search(haystack)) for p in self.patterns) >= self.need
+        if self.window is None or self.need < 2:
+            return sum(bool(p.search(haystack)) for p in self.patterns) >= self.need
+        hits = sorted((m.start(), n) for n, p in enumerate(self.patterns) for m in p.finditer(haystack))
+        lo = 0
+        for hi in range(len(hits)):
+            while hits[hi][0] - hits[lo][0] > self.window:
+                lo += 1
+            if len({n for _, n in hits[lo:hi + 1]}) >= self.need:
+                return True
+        return False
 
 
 def _short(text: str, n: int = 60) -> str:
     return text if len(text) <= n else text[:n - 1] + "…"
 
 
-def _topic(kind: str, text: str, weight: float, label: str | None = None, group: str = "") -> Topic | None:
+def _topic(kind: str, text: str, weight: float, label: str | None = None, group: str = "",
+           phrase: bool = False) -> Topic | None:
+    """phrase: a keyword phrase written as one (goal keywords, a topic's area): all its words count, «нова» too
+    («нова технологія» is not «технологія»). Otherwise (a goal's or an interest's own sentence) generic words drop."""
     from brain.domain.posts import stem_pattern
-    stems = _stems(text)
+    stems = _stems(text, keep_generic=phrase)
+    if phrase and len(stems) > PHRASE_STEMS:
+        stems = _stems(text)
     if not stems:
         return None
     need = len(stems) if len(stems) <= 2 else max(2, math.ceil(len(stems) * 0.4))
     return Topic(label or f"{kind}: {_short(text)}", weight, [re.compile(stem_pattern(s), re.I) for s in stems],
-                 need, group)
+                 need, group, window=PHRASE_WINDOW if len(stems) <= PHRASE_STEMS else None)
 
 
 @dataclass
 class Relevance:
     score: float = 0.0
     why: list[str] = field(default_factory=list)
+    strong: float = 0.0       # the part that names something of the user's (see the module docstring)
 
 
 @dataclass
@@ -118,7 +156,7 @@ class Interests:
         r = Relevance()
         if self.empty:
             return r
-        haystack = " ".join([text, *tags]).lower()
+        haystack = text.lower()                     # words in the item's own text; tags are matched as tags
         tagset = {t.lower() for t in tags}
         positive: list[tuple[float, str]] = []
         by_cat = self.categories.get(side or "", {})
@@ -143,31 +181,44 @@ class Interests:
             for t, near in zip(self.tracked, self.near):
                 if matched_term(t, haystack):
                     r.score += W_TRACKED
+                    r.strong += W_TRACKED
                     positive.append((W_TRACKED + 10, f"тема, яку ви відстежуєте: {t.name}"))
                 elif near and any(n.matches(haystack, tagset) for n in near) and not excluded(t, haystack):
                     r.score += W_TRACKED_NEAR
+                    r.strong += W_TRACKED_NEAR
                     positive.append((W_TRACKED_NEAR + 10, f"близько до теми «{t.name}»"))
-        topic_score = 0.0
-        best: dict[str, Topic] = {}                          # per goal: its strongest matching level
+        topic_score = strong = 0.0
+        best: dict[str, Topic] = {}                          # per goal: its strongest matching words
+        theme: Topic | None = None                           # one theme tag for all goals
         for t in self.goals:
-            if (t.group not in best or t.weight > best[t.group].weight) and t.matches(haystack, tagset):
+            if t.tag is not None:
+                if theme is None and t.matches(haystack, tagset):
+                    theme = t
+            elif (t.group not in best or t.weight > best[t.group].weight) and t.matches(haystack, tagset):
                 best[t.group] = t
         for t in best.values():
             topic_score += t.weight
+            strong += t.weight
             positive.append((t.weight + 1, t.label))         # goals first among the reasons
+        if theme is not None:
+            topic_score += theme.weight
+            positive.append((theme.weight, f"тема ваших цілей: «{theme.tag}»"))
         doing: dict[str, Topic] = {}
         for t in self.intents:
             if t.group not in doing and t.matches(haystack, tagset):
                 doing[t.group] = t
         for t in doing.values():
             topic_score += t.weight
+            strong += t.weight
             positive.append((t.weight + 0.5, t.label))
         for t in self.topics:
             if t.matches(haystack, tagset):
                 part = W_TOPIC * t.weight / 5
                 topic_score += part
+                strong += part
                 positive.append((part, t.label))
         r.score += min(topic_score, TOPIC_CAP)
+        r.strong = round(r.strong + min(strong, TOPIC_CAP), 3)
         r.score += sum(W_AVOID for t in self.avoid if t.matches(haystack, tagset))
         r.score += sum(W_KNOWN for t in self.known if t.matches(haystack, tagset))
         seen: set[str] = set()
@@ -184,6 +235,18 @@ def _norm(text: str) -> str:
     return " ".join(str(text).lower().split())
 
 
+_QUOTED_NAME = re.compile(r"«([^»]{2,40})»")
+_LATIN_NAME = re.compile(r"(?<![\w-])([A-Z][A-Za-z0-9.-]{2,}|[A-Z]{2,}[A-Za-z0-9-]*)(?![\w-])")
+
+
+def names_in(text: str) -> list[str]:
+    """The names inside an interest's sentence: in «…» quotes, and Latin names (ICEYE, Nokia, Brave1)."""
+    found = [m.group(1) for m in _QUOTED_NAME.finditer(text or "")]
+    rest = _QUOTED_NAME.sub(" ", text or "")
+    found += [m.group(1) for m in _LATIN_NAME.finditer(rest)]
+    return list(dict.fromkeys(n.strip() for n in found if len(n.strip()) >= 3))
+
+
 def _goal_levels(out: Interests, mappings: list[dict], active: dict[str, str]) -> None:
     """Topics from the learned profile's goal_keywords, for goals that are still active."""
     for m in mappings:
@@ -194,7 +257,7 @@ def _goal_levels(out: Interests, mappings: list[dict], active: dict[str, str]) -
         for level in ("specific", "broader"):
             for term in m.get(level) or []:
                 t = _topic("ціль", term, W_GOAL * LEVELS[level], label=f"ціль: {goal} («{_short(term, 30)}»)",
-                           group=key)
+                           group=key, phrase=True)
                 if t:
                     out.goals.append(t)
         for tag in m.get("tags") or []:
@@ -233,10 +296,16 @@ async def load(repos: Repos, ctx: UserContext, profile: UserProfileDoc | None = 
         from brain.domain import interests
         for i, w in interests.counted(learned):
             add(out.topics, "інтерес", i.get("topic", ""), w)
+            for name in names_in(i.get("topic", "")):         # «Рассвет» in «Супутникові системи: «Рассвет», ICEYE…»
+                key = f"{_norm(i.get('topic', ''))}|{_norm(name)}"
+                if key not in seen and (t := _topic("інтерес", name, w, label=f"інтерес: {_short(name, 50)}",
+                                                    phrase=True)):
+                    seen.add(key)
+                    out.topics.append(t)
         for i in interests.active_intents(learned):
             label = f"ваш поточний запит: {_short(i['text'], 50)}"
-            for term in [i["text"], *(i.get("terms") or [])]:
-                if t := _topic("запит", term, W_INTENT, label=label, group=_norm(i["text"])):
+            for n, term in enumerate([i["text"], *(i.get("terms") or [])]):
+                if t := _topic("запит", term, W_INTENT, label=label, group=_norm(i["text"]), phrase=n > 0):
                     out.intents.append(t)
         for a in learned.get("avoid") or []:
             add(out.avoid, "уникати", a, 5)
@@ -244,7 +313,8 @@ async def load(repos: Repos, ctx: UserContext, profile: UserProfileDoc | None = 
             add(out.known, "відомо", k, 5)
     from brain.domain.topics import followed
     out.tracked = await followed(repos, ctx)
-    out.near = [[n for b in t.broader if (n := _topic("тема", b, W_TRACKED_NEAR))] for t in out.tracked]
+    out.near = [[n for b in t.broader if (n := _topic("тема", b, W_TRACKED_NEAR, phrase=True))]
+                for t in out.tracked]
     for i in await repos.users.get_insights(ctx.user_id):
         if not sensitivity.is_allowed(i.sensitivity, ctx.max_sensitivity):
             continue

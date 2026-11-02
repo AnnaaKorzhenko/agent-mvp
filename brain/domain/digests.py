@@ -214,7 +214,10 @@ async def _topics_view(repos: Repos, ctx: UserContext, digest: DigestDoc, tracke
 
 
 FOR_YOU = DigestSectionDoc(category="for_you", title="⭐ Для вас")
-FOR_YOU_MIN = 1.2        # relevance needed for «Для вас»: a goal or interest match, not a favourite category alone
+# «Для вас» needs this much of the score that names something of the user's (relevance `strong`): a goal's own name
+# (2.0), a followed topic (3.0) or its area (1.5), an intent (1.5), a strong interest (weight 5: 1.5), or broader
+# phrases of two goals. One broad phrase (1.2), theme tags, categories and rated tags alone only order the sections.
+FOR_YOU_MIN = 1.5
 FOR_YOU_MAX = 8          # items per side in it
 
 
@@ -245,7 +248,7 @@ async def _view(repos: Repos, ctx: UserContext, digest: DigestDoc, profile: User
             kept.sort(key=lambda it: -view.why(it).score)                 # stable
             ordered.append(((0 if section.category in chosen else 1, base), section, kept))
     sections = [(section, kept) for _, section, kept in sorted(ordered, key=lambda x: x[0])]
-    picked = sorted((it for _, kept in sections for it in kept if view.why(it).score >= FOR_YOU_MIN),
+    picked = sorted((it for _, kept in sections for it in kept if view.why(it).strong >= FOR_YOU_MIN),
                     key=lambda it: -view.why(it).score)[:FOR_YOU_MAX]
     if picked:
         taken = {id(it) for it in picked}

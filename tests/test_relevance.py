@@ -107,4 +107,23 @@ async def test_a_goal_matches_at_three_levels_best_one_counts(repos, test_db, us
     none = prefs.score(side="ua", category="x", text="Футбол: результати")
     assert s.score == 2.0 and b.score == 1.2 and t.score == 0.7 and none.score == 0   # one goal: its best level only
     assert s.why == [f"ціль: {goal[:49]}… («Герань»)"]
-    assert b.why[0].endswith("(«ударные беспилотники»)") and t.why[0].endswith("(тема «оборонні технології»)")
+    assert b.why[0].endswith("(«ударные беспилотники»)") and t.why[0] == "тема ваших цілей: «оборонні технології»"
+    assert (s.strong, b.strong, t.strong) == (2.0, 1.2, 0.0)              # a theme tag alone names nothing of his
+
+
+async def test_a_theme_tag_counts_once_and_broad_phrases_need_their_words_together(repos, test_db, user):
+    """2026-11-02: «Для вас» held Zelensky on refineries «for new technology»: the tag counted once per goal, and
+    «нова технологія» matched «нов…» anywhere plus «технолог…» from the tag."""
+    goals = ["Track new technology", "Follow new drone variants", "Follow drone incidents"]
+    await set_user(test_db, user, goals=[{"text": g, "active": True} for g in goals], learned={
+        "sensitivity": "internal", "goal_keywords": [
+            {"goal": g, "specific": [], "broader": ["нова технологія"], "tags": ["оборонні технології"]}
+            for g in goals]})
+    prefs = await relevance.load(repos, cloud(user))
+    refineries = prefs.score(side="ua", category="x", tags=["оборонні технології"],
+                             text="Зеленський заявив, що Україна припинить атаки на НПЗ; нові деталі згодом")
+    assert refineries.score == 0.7 and refineries.strong == 0                 # one tag, nothing named
+    apart = prefs.score(side="ua", category="x", text="Нова партія прибула. Через тиждень покажуть усю технологію "
+                                                      "виробництва, яку розробили інженери заводу")
+    together = prefs.score(side="ua", category="x", text="Нові технології виявлення дронів")
+    assert apart.strong == 0 and together.strong == relevance.TOPIC_CAP      # three goals' phrase, capped
