@@ -21,7 +21,7 @@ logger = logging.getLogger("brain.audit")
 
 COLLECTION = "audit_log"
 EVENTS = ("auth_token_accepted", "auth_failed", "access_denied", "sensitivity_filtered", "model_call",
-          "conversation_log_error")
+          "conversation_log_error", "web_login")
 # Keys that hold secrets: a token itself (token, access_token, id_token…) but not counts like input_tokens.
 _SECRET_KEYS = re.compile(r"(^|[_-])token$|^bearer|secret|password|api[_-]?key|authorization|cookie", re.I)
 MAX_DETAIL_CHARS = 300

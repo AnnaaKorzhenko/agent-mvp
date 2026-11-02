@@ -155,3 +155,10 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .card h2 { margin: 0; font-size: 17px; font-weight: 600; }
 .btn-primary { min-height: 44px; padding: 0 20px; border: 0; border-radius: 10px; background: var(--accent); color: #fff; font-size: 15px; font-weight: 500; }
 .saved { font-size: 14px; color: var(--accent); }
+
+/* ---------- Brain data (docs/WEB_PLAN.md 5.1) ---------- */
+.h2 { margin: 6px 0 0; font-family: var(--serif); font-weight: 400; font-size: 24px; }
+ul.plain { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; font-size: 15px; line-height: 1.5; }
+.logout { margin-left: auto; font-size: 13px; color: var(--muted); text-decoration: none; }
+.logout:hover { color: var(--ink); }
+.story p { white-space: pre-line; }

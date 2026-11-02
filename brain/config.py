@@ -28,7 +28,8 @@ class Settings(BaseSettings):
     max_sensitivity_local: Sensitivity = Field("restricted", alias="MAX_SENSITIVITY_LOCAL")
     # OAuth client_id / client_name (lower-case) -> feedback channel
     channel_by_client: dict[str, str] = Field(
-        default_factory=lambda: {"claude": "claude", "chatgpt": "chatgpt", "openai": "chatgpt", "local": "local"},
+        default_factory=lambda: {"claude": "claude", "chatgpt": "chatgpt", "openai": "chatgpt", "local": "local",
+                                 "web": "web"},
         alias="CHANNEL_BY_CLIENT")
 
     # --- HTTP ---
@@ -47,6 +48,16 @@ class Settings(BaseSettings):
     auto_create_users: bool = Field(True, alias="AUTO_CREATE_USERS")
     # If set, only these emails (from the Action's email claim) may use the server
     allowed_emails: list[str] = Field(default_factory=list, alias="ALLOWED_EMAILS")
+
+    # --- Our own web app (brain/web, docs/WEB_PLAN.md): its own Render service, PUBLIC_BASE_URL = its URL ---
+    # Auth0 login: a Regular Web Application in the same tenant (OAUTH_ISSUER), callback PUBLIC_BASE_URL/auth/callback
+    web_client_id: str | None = Field(None, alias="WEB_CLIENT_ID")
+    web_client_secret: SecretStr | None = Field(None, alias="WEB_CLIENT_SECRET")
+    # Signs the session cookie; 32+ random bytes, e.g. `python -c "import secrets; print(secrets.token_urlsafe(48))"`
+    web_session_secret: SecretStr | None = Field(None, alias="WEB_SESSION_SECRET")
+    web_session_days: int = Field(14, ge=1, le=90, alias="WEB_SESSION_DAYS")
+    # The UI's files; default: data-digest-web/frontend in the repo
+    web_frontend_dir: str | None = Field(None, alias="WEB_FRONTEND_DIR")
 
     # --- Model backends (not used by v0 tools) ---
     model_backend: Literal["local", "anthropic"] = Field("local", alias="MODEL_BACKEND")

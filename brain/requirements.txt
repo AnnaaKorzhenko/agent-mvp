@@ -8,3 +8,5 @@ python-dotenv>=1.0
 anthropic>=2.3,<3
 # The adapter calls the local-model track's client, which is built on openai:
 openai>=1.0
+# The web app (brain/web): its API; the login uses httpx2 and PyJWT, already here through mcp
+fastapi>=0.160,<1

@@ -1,80 +1,66 @@
-// Шар доступу до даних.
-// Поки USE_MOCK = true, все працює на демо-даних з data.js.
-// Коли з'явиться бекенд (напр. FastAPI поруч з ботом, що читає MongoDB "News"),
-// постав USE_MOCK = false і API_BASE на його адресу. Очікувані ендпоінти описані нижче.
+// Шар доступу до даних: API «мозку» (brain/web/app.py), той самий сервер, що віддає інтерфейс.
+// Користувач визначається сесією (вхід через Auth0), ніколи не параметрами запиту.
+// USE_MOCK = true — демо-дані з data.js без бекенду (лише для верстки).
 
-const API_BASE = '/api';   // фронт і бекенд на одному сервері
-const USE_MOCK = false;  // true — демо-дані без бекенду
+const API_BASE = '/api';
+const USE_MOCK = false;
 
 async function http(path, options = {}) {
   const res = await fetch(API_BASE + path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options
+    credentials: 'same-origin',
+    ...options,
+    headers: { 'Content-Type': 'application/json', 'X-Brain': '1', ...(options.headers || {}) }
   });
-  if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+  if (res.status === 401) {                       // сесії немає або вона скінчилась — на вхід
+    location.href = '/login?next=' + encodeURIComponent(location.pathname + location.hash);
+    throw new Error('Потрібно увійти');
+  }
+  if (!res.ok) {
+    let detail = '';
+    try { detail = (await res.json()).detail; } catch (e) { /* не JSON */ }
+    throw new Error(typeof detail === 'string' && detail ? detail : `Помилка сервера (${res.status})`);
+  }
   return res.json();
 }
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 window.api = {
-  // GET /digest?period=day|week&category=all|tech|front|invest
-  // -> [{ id, title, summary, category, side, relevance: high|medium|low, posts_count }]
-  async getDigest(period, category) {
-    if (!USE_MOCK) return http(`/digest?period=${encodeURIComponent(period)}&category=${encodeURIComponent(category)}`);
-    await delay(150);
-    return DEMO.stories
-      .filter((s) => period === 'week' || s.period === 'day')
-      .filter((s) => category === 'all' || s.category === category);
+  // GET /me -> { name, email, picture, dev }
+  async me() {
+    if (USE_MOCK) return { name: 'Демо', email: '', picture: null, dev: true };
+    return http('/me');
   },
 
-  // GET /posts?q=...&platform=all|Telegram|X|Web&lang=all|UA|RU|EN
-  // -> [{ id, platform, source, lang, date, category, summary, url }]
-  async searchPosts(q, platform, lang) {
-    if (!USE_MOCK) {
-      const p = new URLSearchParams({ q, platform, lang });
-      return http(`/posts?${p}`);
-    }
-    await delay(150);
-    const query = q.trim().toLowerCase();
-    return DEMO.posts
-      .filter((p) => platform === 'all' || p.platform === platform)
-      .filter((p) => lang === 'all' || p.lang === lang)
-      .filter((p) => !query || (p.summary + ' ' + p.source).toLowerCase().includes(query));
+  // GET /digest?side=both|ua|ru|topics[&date=YYYY-MM-DD]
+  // -> { date, digests: [{ side, side_note, digest_id, sections: [{ category, title, items: [
+  //        { ref, n, text, source_urls, source_post_ids, is_russian_source_claim, why: [..], relevance }] }] }],
+  //      missing_sides, note, proposals: [...], topics_to_renew: [...] }
+  async getDigest(side, date) {
+    if (USE_MOCK) { await delay(150); return { date: null, digests: [], missing_sides: [], note: 'Демо-режим' }; }
+    const p = new URLSearchParams({ side });
+    if (date) p.set('date', date);
+    return http(`/digest?${p}`);
   },
 
-  // POST /chat  body: { messages: [{ role: 'user'|'assistant', content }] }
-  // -> { content, sources: [{ platform, name, url }] }
+  // GET /posts?q=...&side=all|ua|ru&days=1..30
+  // -> { query, results: [{ ref, post_id, summary, tags, category, source_side, is_russian_source_claim,
+  //        channel: { username, country }, post_url, published_at, importance, why }], note }
+  async searchPosts(q, side, days) {
+    if (USE_MOCK) { await delay(150); return { query: q, results: [] }; }
+    return http(`/posts?${new URLSearchParams({ q, side, days })}`);
+  },
+
+  // POST /chat — з'явиться на кроці 5.2 (docs/WEB_PLAN.md)
   async askAnalyst(messages) {
-    if (!USE_MOCK) return http('/chat', { method: 'POST', body: JSON.stringify({ messages }) });
-    await delay(700);
-    return {
-      content:
-        'За останні 7 днів у базі є кілька сюжетів на цю тему.\n\n' +
-        '1. [Сюжет 1] — коротко, що сталося і хто про це повідомив.\n' +
-        '2. [Сюжет 2] — як це подають українські та російські канали.\n' +
-        '3. [Сюжет 3] — що це може означати для оборонних інвестицій.\n\n' +
-        'Хочете розгорнути будь-який сюжет або порівняти наративи UA та RU?',
-      sources: [
-        { platform: 'TG', name: '[канал UA]', url: '#' },
-        { platform: 'TG', name: '[канал RU]', url: '#' },
-        { platform: 'X', name: '[акаунт]', url: '#' },
-        { platform: 'Web', name: '[сайт]', url: '#' }
-      ]
-    };
+    if (USE_MOCK) { await delay(700); return { content: 'Демо-відповідь.', sources: [] }; }
+    return http('/chat', { method: 'POST', body: JSON.stringify({ messages }) });
   },
 
-  // GET /profile -> { interests: [id], schedule: daily|weekly|off, sides: ['UA','RU','Світ'] }
+  // GET /profile -> { goals: [..], topics: [{ name, status, expires_at, ... }], top_tags: [{ tag, score }],
+  //                   top_categories: [...], categories_today: {...}, about_user: { kind: [text] } }
   async getProfile() {
-    if (!USE_MOCK) return http('/profile');
-    return structuredClone(DEMO.profile);
-  },
-
-  // PUT /profile  body: той самий об'єкт
-  async saveProfile(profile) {
-    if (!USE_MOCK) return http('/profile', { method: 'PUT', body: JSON.stringify(profile) });
-    await delay(200);
-    DEMO.profile = structuredClone(profile);
-    return { ok: true };
+    if (USE_MOCK) return { goals: [], topics: [], top_tags: [], top_categories: [], about_user: {} };
+    return http('/profile');
   }
 };
