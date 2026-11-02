@@ -172,11 +172,13 @@ class ProposalDoc(_Doc):
     action: ProposalActionDoc | None = None
     links: Annotated[list[str], BeforeValidator(_as_list)] = []      # sources to look at (web finds)
     agent: str = ""
+    priority: float | None = None    # the agent's; None: by kind (brain/domain/proposals.DEFAULT_PRIORITY)
     status: str = "open"             # open | accepted | dismissed | stale
     created_at: datetime | None = None
     expires_at: datetime | None = None
     shown_at: datetime | None = None
     shown_count: int = 0
+    mentioned_at: datetime | None = None     # mentioned in an ordinary chat answer (at most one a day)
     answered_at: datetime | None = None
     sensitivity: str = "internal"
 

@@ -262,7 +262,7 @@ class Scout:
                                              why=_why(item, r), agent="scout", days=OPEN_DAYS,
                                              label=item.get("label", "internal"),
                                              links=[x["url"] for x in item.get("sources", [])],
-                                             action={"tool": "track_topic", "args": args})
+                                             action={"tool": "track_topic", "args": args}, priority=round(r.score, 2))
             made += status == "ok"
         return Report(f"{len(items)} trends, {len(scored)} fit, {made} proposed")
 

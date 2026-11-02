@@ -148,7 +148,8 @@ async def test_a_yes_adds_the_goal_a_no_closes_it_and_both_are_feedback(own):
     await proposals.propose(repos, me, kind="topic", title="Рассвет-3", agent="scout",
                             action={"tool": "track_topic", "args": {"name": "Рассвет-3",
                                                                     "queries": ["«Рассвет-3» спутники"]}})
-    goal_p, topic_p = await proposals.open_for(repos, cloud(me))
+    by_kind = {p.kind: p for p in await proposals.open_for(repos, cloud(me))}
+    goal_p, topic_p = by_kind["goal"], by_kind["topic"]
     r = await proposals.answer(repos, cloud(me), goal_p.id, True, mcp_channels=["claude"])
     assert r.done == "додано ціль «знайти 3 НРК-компанії»"
     assert [g.text for g in (await repos.users.get_profile(me)).goals] == ["знайти 3 НРК-компанії"]

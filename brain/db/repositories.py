@@ -403,6 +403,14 @@ class UsersRepo:
                                {"_id": 0, "learned.interests": 1, "learned.updated_at": 1})
         return [d["learned"] async for d in cursor]
 
+    async def get_agent_prefs(self, user_id: UserId) -> dict | None:
+        doc = await self.col.find_one({"_id": user_key(user_id)}, {"agent_prefs": 1})
+        return (doc or {}).get("agent_prefs")
+
+    async def set_agent_prefs(self, user_id: UserId, prefs: dict) -> bool:
+        result = await self.col.update_one({"_id": user_key(user_id)}, {"$set": {"agent_prefs": prefs}})
+        return result.matched_count == 1
+
     async def update_learned(self, user_id: UserId, fields: dict) -> bool:
         """Sets fields of users.learned (a correction by the user; the learning job writes the whole profile)."""
         result = await self.col.update_one({"_id": user_key(user_id)},

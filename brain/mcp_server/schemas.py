@@ -32,14 +32,12 @@ class ProposalOut(BaseModel):
 
 class MemoryOut(BaseModel):
     """On every tool result: what the server learned from this call's user_message / signals."""
-    goals_to_offer: list[str] = Field(default_factory=list, description=(
-        "Goals detected in the user's messages that aren't active yet: ask the user once whether to add them "
-        "(set_goal)"))
     about_user: AboutUser | None = Field(None, description=(
         "Only on the first call of a conversation: " + ABOUT_USER_HELP))
     proposal_to_mention: ProposalOut | None = Field(None, description=(
-        "At most once a day, outside the digest: one of the system's open suggestions. Mention it in one line at the "
-        "end of your answer (what and why) and ask; on the user's yes or no call answer_proposal"))
+        "One of the system's open suggestions: at most once a day outside the digest, or a goal the user just said "
+        "(why: «ви щойно про це сказали»). Mention it in one line at the end of your answer (what and why) and ask; "
+        "on the user's yes or no call answer_proposal"))
 
 
 WHY_HELP = ("Why this matters to this user (their goals, interests, rated topics), strongest first; empty if "
@@ -110,6 +108,12 @@ class TopicRenewal(BaseModel):
 
 class ProposalsResult(MemoryOut):
     proposals: list[ProposalOut] = Field(description="Open suggestions, newest first; empty: there are none")
+
+
+class AgentPrefsOut(MemoryOut):
+    cards: int = Field(description="Suggestion cards per digest")
+    off: list[str] = Field(description="Kinds of suggestions turned off")
+    mentions: bool = Field(description="Whether a suggestion may come up in ordinary chat answers")
 
 
 class CorrectionResult(MemoryOut):

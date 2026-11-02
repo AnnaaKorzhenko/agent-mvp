@@ -36,6 +36,8 @@ logger = logging.getLogger("brain.agents.advisor")
 DAILY = "advisor_daily"
 AGENT = "advisor"
 MAX_ADVICE = 3
+NEWS_PRIORITY = 3.0           # what changed comes before a quiet note
+QUIET_PRIORITY = 1.0
 OPEN_DAYS = 5
 MAX_OUTPUT = 3000
 
@@ -120,6 +122,8 @@ class Advisor:
         sigs = [s for s in sigs if f"advice:{s.key}" not in existing]
         if not sigs:
             return Report("nothing new to say")
+        if "advice" in (await proposals.prefs_of(self.repos, ctx.user_id)).off:
+            return Report("advice turned off by the user")          # no model call for nothing
         made, calls = 0, []
         for sig in [s for s in sigs if s.kind not in advice.NEEDS_MODEL]:
             title, text = said_by_code(sig)
@@ -153,7 +157,8 @@ class Advisor:
     async def _propose(self, user_key, sig: advice.Signal, title: str, text: str, step: str, urls: list[str]) -> int:
         status = await proposals.propose(self.repos, user_key, kind="advice", title=title, why=text, agent=AGENT,
                                          key=f"advice:{sig.key}", days=OPEN_DAYS, links=urls,
-                                         action=action(step, sig))
+                                         action=action(step, sig),
+                                         priority=NEWS_PRIORITY if sig.kind in advice.NEEDS_MODEL else QUIET_PRIORITY)
         return int(status == "ok")
 
 

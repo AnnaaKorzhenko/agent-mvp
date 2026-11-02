@@ -117,9 +117,8 @@ class Memory:
     """What _Call.remember() did with the call's signals."""
     saved: list[ObjectId] = field(default_factory=list)
     duplicates: int = 0
-    goals_to_offer: list[str] = field(default_factory=list)
     about_user: dict | None = None
-    proposal: Any = None              # one open suggestion to mention (ProposalDoc), at most once a day
+    proposal: Any = None              # one open suggestion to mention (ProposalDoc): once a day, or a goal just said
 
 
 def _digest_out(res: digests_domain.DigestResultView, cls: type[out.DigestResult] = out.DigestResult,
@@ -318,18 +317,22 @@ class _Call:
                 self.memory.saved.append(r.id)
                 if sig["kind"] == "goal":
                     goals.append(sig["text"])
-            if goals:
+            just_said = None
+            if goals:                         # a goal the user said: one suggestion, asked once, with one button
                 active = {g.lower() for g in (await profile_domain.get_profile(self.svc.repos, ctx)).goals}
-                self.memory.goals_to_offer = [g for g in goals if g.lower() not in active]
+                for text in [g for g in goals if g.lower() not in active]:
+                    if await proposals_domain.propose(
+                            self.svc.repos, ctx.user_id, kind="goal", title=text, agent="chat",
+                            why="ви щойно про це сказали", action={"tool": "set_goal", "args": {"text": text}},
+                            priority=proposals_domain.JUST_SAID) == "ok" and just_said is None:
+                        just_said = next((p.id for p in await self.svc.repos.users.get_proposals(ctx.user_id)
+                                          if p.key == proposals_domain.key_of("goal", text)), None)
             # The digest and the profile usually open a chat, and a new chat can't be told from the last one
             # without a session id: they always bring the profile; other tools only after a quiet spell.
             if first or self.name in ALWAYS_ABOUT:
                 self.memory.about_user = await insights_domain.about_user(self.svc.repos, ctx) or None
-            if self.name not in NO_MENTION:
-                today = digests_domain.kyiv_day_bounds(datetime.now(timezone.utc).astimezone(digests_domain.KYIV)
-                                                       .date())[0]
-                found = await proposals_domain.open_for(self.svc.repos, ctx, limit=1, not_shown_since=today)
-                self.memory.proposal = found[0] if found else None
+            if self.name not in NO_MENTION or just_said:
+                self.memory.proposal = await proposals_domain.to_mention(self.svc.repos, ctx, just_said=just_said)
         except Exception as e:             # noqa: BLE001 - memory must never break a tool
             logger.error(f"remember() failed in {self.name}: {type(e).__name__}: {e}")
 
@@ -342,12 +345,11 @@ class _Call:
 
     def _attach(self, result):
         m = self.memory
-        if not (m.goals_to_offer or m.about_user or m.proposal):
+        if not (m.about_user or m.proposal):
             return result
         mention = _proposal_out(m.proposal) if m.proposal else None
         if isinstance(result, CallToolResult):
-            extra = {"goals_to_offer": m.goals_to_offer, "about_user": m.about_user,
-                     **({"proposal_to_mention": mention.model_dump()} if mention else {})}
+            extra = {"about_user": m.about_user, **({"proposal_to_mention": mention.model_dump()} if mention else {})}
             if isinstance(result.structured_content, dict):
                 result.structured_content.update(extra)
             for block in result.content:
@@ -356,7 +358,6 @@ class _Call:
                     break
             return result
         if isinstance(result, out.MemoryOut):
-            result.goals_to_offer = m.goals_to_offer
             result.proposal_to_mention = mention
             if not result.about_user:
                 result.about_user = m.about_user
@@ -745,6 +746,35 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
             found = await proposals_domain.list_open(svc.repos, ctx)
             await call.done(items=len(found))
             return out.ProposalsResult(proposals=[_proposal_out(p) for p in found])
+        return await call.run(body)
+
+    @mcp.tool(title="How the system suggests things",
+              annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True,
+                                          openWorldHint=False))
+    async def set_agent_prefs(
+        mcp_ctx: Context,
+        user_message: UserMessage,
+        cards: Annotated[int | None, Field(ge=0, le=3, description=(
+            "Suggestion cards per digest, 0-3 (default 3): «менше пропозицій» 1, «не показуй пропозиції» 0"))] = None,
+        turn_off: Annotated[list[Literal["goal", "topic", "advice"]] | None, Field(description=(
+            "Kinds the user doesn't want: goal (suggested goals), topic (new things to follow), advice (what "
+            "changed and what to do): «не пропонуй мені теми», «вимкни поради»"))] = None,
+        turn_on: Annotated[list[Literal["goal", "topic", "advice"]] | None, Field(description=(
+            "Kinds to bring back: «знову показуй поради»"))] = None,
+        mentions: Annotated[bool | None, Field(description=(
+            "false: no suggestion in ordinary chat answers («не згадуй пропозиції в розмові»); true: back on"))] = None,
+        signals: Signals = None,
+    ) -> out.AgentPrefsOut:
+        """When the user says how much or what kind of suggestions they want, in any words: «менше пропозицій»,
+        «не пропонуй мені нові теми», «вимкни поради», «не згадуй це в розмові», «поверни все як було». Pass only
+        what they changed. Kinds turned off are no longer even made. Confirm the new settings in one line."""
+        args = {"cards": cards, "turn_off": turn_off, "turn_on": turn_on, "mentions": mentions}
+        call = _Call(svc, "set_agent_prefs", {**args, **_common(user_message, signals)}, mcp_ctx)
+
+        async def body(ctx: UserContext) -> out.AgentPrefsOut:
+            p = await proposals_domain.set_prefs(svc.repos, ctx, **args)
+            await call.done(items=1)
+            return out.AgentPrefsOut(cards=p.cards, off=p.off, mentions=p.mentions)
         return await call.run(body)
 
     @mcp.tool(title="Correct what the system inferred",

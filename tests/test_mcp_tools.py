@@ -16,10 +16,10 @@ UID = 800_000_001
 TOOLS = {"get_digest", "search_posts", "get_post", "get_profile", "record_feedback", "set_goal", "save_insight",
          "get_insights", "log_turn", "get_morning_digest", "deep_dive", "save_findings", "track_topic",
          "get_analysis", "save_report", "answer_proposal",
-         "get_proposals", "correct_profile"}
+         "get_proposals", "correct_profile", "set_agent_prefs"}
 WRITE_TOOLS = {"record_feedback", "set_goal", "save_insight", "log_turn", "get_morning_digest", "save_findings",
                "track_topic", "save_report", "answer_proposal",
-               "correct_profile"}
+               "correct_profile", "set_agent_prefs"}
 SECRET_TEXTS = ("Оцінка постачання дронів", "Внутрішня оцінка", "Закритий звіт")
 
 

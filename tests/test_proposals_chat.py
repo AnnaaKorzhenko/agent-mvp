@@ -123,3 +123,64 @@ async def test_correcting_an_inference_takes_effect_at_once(own):
 def test_word_starts_match_across_endings_only_for_the_same_thing():
     assert corrections.matches("космос", "космічні запуски") and corrections.matches("кораблі", "корабельний флот")
     assert not corrections.matches("космос", "морські дрони")
+
+
+# ---- 6-8: order, one goal channel, the user's settings ----------------------------------------------------
+
+async def test_cards_are_ranked_and_mixed_by_kind(own):
+    me = await add_user(own)
+    repos = Repos(own)
+    for n in range(3):
+        await proposals.propose(repos, me, kind="advice", title=f"порада {n}", agent="advisor", priority=3.0)
+    await proposals.propose(repos, me, kind="topic", title="слабка тема", agent="scout", priority=1.2)
+    await proposals.propose(repos, me, kind="topic", title="сильна тема", agent="scout", priority=2.6)
+    await goal_proposal(own, me)
+    shown = await proposals.open_for(repos, cloud(me))
+    assert [p.title for p in shown] == ["порада 0", "сильна тема", "знайти 3 НРК-компанії"]   # one of each, best
+
+
+async def test_one_mention_a_day_but_a_goal_just_said_comes_at_once(own):
+    me = await add_user(own)
+    await goal_proposal(own, me, "перша ціль")
+    await proposals.propose(Repos(own), me, kind="topic", title="тема", agent="scout")
+    async with Client(create_server(services(own, me))) as c:
+        r = await c.call_tool("log_turn", {"user_message": "дякую"})
+        assert r.structured_content["proposal_to_mention"]["title"] == "тема"            # the better one
+        r = await c.call_tool("log_turn", {"user_message": "ок"})
+        assert r.structured_content.get("proposal_to_mention") is None                   # one a day in all
+        r = await c.call_tool("log_turn", {"user_message": "хочу знайти 2 стартапи з РЕБ", "signals": [
+            {"kind": "goal", "text": "знайти 2 стартапи з РЕБ"}]})
+        offer = r.structured_content["proposal_to_mention"]
+        assert offer["title"] == "знайти 2 стартапи з РЕБ" and offer["why"] == "ви щойно про це сказали"
+
+
+async def test_the_users_settings_decide_how_many_and_which(own):
+    me = await add_user(own)
+    repos = Repos(own)
+    await goal_proposal(own, me)
+    await proposals.propose(repos, me, kind="advice", title="порада", agent="advisor")
+    async with Client(create_server(services(own, me))) as c:
+        r = await c.call_tool("set_agent_prefs", {"user_message": "менше пропозицій, і без порад",
+                                                  "cards": 1, "turn_off": ["advice"], "mentions": False})
+        assert r.structured_content["cards"] == 1 and r.structured_content["off"] == ["advice"]
+        r = await c.call_tool("get_digest", {"user_message": "дайджест"})
+        assert [p["kind"] for p in r.structured_content["proposals"]] == ["goal"]
+        r = await c.call_tool("log_turn", {"user_message": "дякую"})
+        assert r.structured_content.get("proposal_to_mention") is None                   # mentions off
+    assert await proposals.propose(repos, me, kind="advice", title="ще порада", agent="advisor") == "off"
+    from brain.agents import advisor
+    from brain.agents.runtime import Runtime
+    from datetime import timedelta as td
+    from tests.test_learning import FakeBackend
+    from brain.domain import advice as advice_domain
+    adv = advisor.Advisor(own, FakeBackend(AuditLog(own), []), Runtime(own), td(hours=24))
+    advice_domain_signals = advice_domain.signals
+    async def one_signal(repos, ctx, today=None):
+        return [advice_domain.Signal("spike:x:w", "spike", "X", {}, ["deep_dive"], [{"text": "t", "source_urls": ["u"]}])]
+    advice_domain.signals = one_signal
+    try:
+        assert (await adv.advise(me, "test")).outcome == "advice turned off by the user"  # no model call at all
+    finally:
+        advice_domain.signals = advice_domain_signals
+    p = await proposals.set_prefs(repos, cloud(me), turn_on=["advice"], mentions=True)
+    assert p.off == [] and p.mentions and p.cards == 1
