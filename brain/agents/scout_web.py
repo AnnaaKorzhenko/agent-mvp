@@ -3,7 +3,7 @@ haven't reached, found by searching the web.
 
 Agent «scout_web», scope global, every SCOUT_WEB_EVERY_HOURS:
 1. Areas, by code: each active goal's broader phrases (the learned goal_keywords) and each confirmed lasting
-   interest of weight ≥ AREA_MIN_WEIGHT, from every user served in the last ACTIVE_DAYS whose profile is internal
+   interest of weight ≥ AREA_MIN_WEIGHT, from every user served in the last common.ACTIVE_DAYS whose profile is internal
    or public. Users with overlapping areas share one search. Only these phrases leave the brain: never a goal's
    own text, an insight or anything about who has the area.
 2. Search, one model call per area (the busiest SCOUT_WEB_AREAS areas, while the day's search budget lasts): the
@@ -27,7 +27,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from pymongo.asynchronous.database import AsyncDatabase
 
-from brain.agents import scout
+from brain.agents import common, scout
 from brain.agents.runs import GLOBAL, AgentRuns
 from brain.agents.runtime import Budget, Report, Runtime
 from brain.db.repositories import Repos
@@ -38,7 +38,6 @@ from brain.integrations.backends import ModelBackend
 logger = logging.getLogger("brain.agents.scout_web")
 
 AGENT = "scout_web"
-ACTIVE_DAYS = 30
 AREA_MIN_WEIGHT = 3.0
 PHRASES_PER_GOAL = 5
 MERGE_SHARE = 0.5
@@ -108,12 +107,8 @@ class Finds(BaseModel):
 
 
 def _parse(text: str) -> Finds:
-    cleaned = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
-    start, end = cleaned.rfind('{"finds"'), cleaned.rfind("}")
-    start = start if start >= 0 else cleaned.find("{")
-    if start < 0 or end <= start:
-        raise ValueError("no JSON object in the answer")
-    return Finds.model_validate(json.loads(cleaned[start:end + 1]))
+    """The final JSON of a search answer: the model may write other text (and JSON) while it searches."""
+    return common.parse(Finds, text, start='{"finds"')
 
 
 # ---- areas ----------------------------------------------------------------------------------------------
@@ -274,7 +269,7 @@ class WebScout:
 
     async def _users(self, now: datetime) -> list[dict]:
         cursor = self.db.users.find({"identities.0": {"$exists": True},
-                                     "last_seen": {"$gte": now - timedelta(days=ACTIVE_DAYS)}},
+                                     "last_seen": {"$gte": now - timedelta(days=common.ACTIVE_DAYS)}},
                                     {"goals": 1, "learned": 1})
         return [u async for u in cursor]
 
@@ -339,7 +334,7 @@ class WebScout:
             return Report("no areas: no active users with goals or strong interests")
         used = (await self.runs.usage(now, agent=AGENT)).web_searches
         kept, dropped, searched, calls = await self.search_areas(areas, now, self.searches_per_day - used)
-        found_users = await scout.active_users(self.db, now)
+        found_users = await common.active_users(self.db, now)
         if kept:
             for uid in found_users:
                 await self.runtime.submit(scout.MATCH, uid, "web")
@@ -349,13 +344,6 @@ class WebScout:
 
 
 def web_scout(db: AsyncDatabase, settings, runtime: Runtime) -> WebScout | None:
-    """The web scout, if its backend can search (only the anthropic backend can)."""
-    from brain.audit.log import AuditLog
-    from brain.integrations.backends import get_backend
-    update = {"model_backend": "anthropic"}
-    model = settings.scout_web_model or settings.scout_model
-    if model:
-        update["anthropic_model"] = model
-    backend = get_backend(settings.model_copy(update=update), AuditLog(db))
-    return WebScout(db, backend, runtime, timedelta(hours=settings.scout_web_every_hours),
+    """The web scout (always the anthropic backend: only it can search)."""
+    return WebScout(db, common.backend_for(db, settings, AGENT), runtime, timedelta(hours=settings.scout_web_every_hours),
                     searches_per_day=settings.scout_web_searches_per_day, max_areas=settings.scout_web_areas)

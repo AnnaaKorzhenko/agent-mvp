@@ -1,8 +1,9 @@
-"""Learning job: turns a user's logged messages, ratings and insights into `users.learned`, which get_profile and
-about_user hand to the client model so its answers adapt (docs/LEARNING_PLAN.md).
+"""The learner's job (agent «learner», brain/agents/learner.py): turns a user's logged messages, ratings and insights
+into `users.learned`, which get_profile and about_user hand to the client model so its answers adapt
+(docs/LEARNING_PLAN.md).
 
 Per user: collect what's new since the last run (chat messages, feedback, insights), ask the configured model
-backend (MODEL_BACKEND: anthropic now, the local model later) to merge it with the previous learned profile, check
+backend (the learner's, brain/agents/common.py: anthropic now, the local model later) to merge it with the previous learned profile, check
 the answer against LearnedProfile, and save it. Data above the backend's allowed label is never sent: a cloud
 backend gets `public` / `internal` only. Every model call is in audit_log (model_call). Nothing else is changed:
 not the bot's interest scores, not the insights.
@@ -11,22 +12,22 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, field_validator
 from pymongo.asynchronous.database import AsyncDatabase
 
+from brain.agents import common
 from brain.db.repositories import user_key
 from brain.domain import interests as interests_domain
 from brain.domain import sensitivity
 from brain.domain.tag_list import TAG_LIST
 from brain.integrations.backends import ModelBackend, ModelResult
 
-logger = logging.getLogger("brain.learning")
+logger = logging.getLogger("brain.agents.learner")
 
 MAX_CHAT = 300          # newest chat messages per run
 MAX_FEEDBACK = 200
@@ -359,11 +360,7 @@ def _save_failure(user_id, attempt: int, text: str) -> Path:
 
 def parse(text: str) -> LearnedProfile:
     """The model's answer as a LearnedProfile: tolerates ```json fences and text around the object."""
-    cleaned = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
-    start, end = cleaned.find("{"), cleaned.rfind("}")
-    if start < 0 or end <= start:
-        raise ValueError("no JSON object in the answer")
-    return LearnedProfile.model_validate(json.loads(cleaned[start:end + 1]))
+    return common.parse(LearnedProfile, text)
 
 
 @dataclass
@@ -373,30 +370,15 @@ class Outcome:
 
 
 async def learn(backend: ModelBackend, act: Activity) -> Outcome:
-    """Asks the backend for the updated profile; one retry with the error if the answer doesn't parse."""
-    label = act.label
+    """Asks the backend for the updated profile; one retry with the error if the answer doesn't parse. Bad answers
+    are kept in FAILURES for a look."""
     messages = [{"role": "user", "content": "Data (JSON):\n" + json.dumps(act.payload(), ensure_ascii=False,
                                                                          default=str)}]
-    calls: list[ModelResult] = []
-    for attempt in (1, 2):
-        result = await backend.complete(messages, system=SYSTEM, max_tokens=MAX_OUTPUT, sensitivity=label,
-                                        user_id=str(act.user_id))
-        calls.append(result)
-        try:
-            return Outcome(parse(result.text), calls)
-        except (ValueError, ValidationError) as e:
-            cut = result.stop_reason == "max_tokens"
-            saved = _save_failure(act.user_id, attempt, result.text)
-            problem = (f"the answer was cut off at {MAX_OUTPUT} tokens" if cut else str(e)[:300])
-            if attempt == 2:
-                raise ValueError(f"the model's answer didn't match the profile format twice ({problem}); "
-                                 f"answers saved in {saved.parent}") from e
-            hint = ("It was too long: keep every list within its limit and the texts short." if cut else
-                    "Check that every string is closed and contains no \" character (use «…»).")
-            messages += [{"role": "assistant", "content": result.text},
-                         {"role": "user", "content": f"That wasn't valid JSON for the format ({problem}). {hint} "
-                                                     "Answer again with only the JSON object."}]
-    raise RuntimeError("unreachable")
+    profile, calls = await common.ask_json(
+        backend, messages, LearnedProfile, system=SYSTEM, max_tokens=MAX_OUTPUT, sensitivity=act.label,
+        user_id=str(act.user_id), what=f"the model's profile (bad answers in {FAILURES})",
+        on_bad=lambda attempt, call: _save_failure(act.user_id, attempt, call.text))
+    return Outcome(profile, calls)
 
 
 def merged_goal_keywords(act: Activity, new: list[GoalMatch]) -> list[dict]:

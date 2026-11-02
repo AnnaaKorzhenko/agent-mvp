@@ -19,7 +19,7 @@ from brain.domain import interests, proposals, relevance, sensitivity, topics
 from brain.domain.errors import InvalidInput
 from brain.domain.identity import UserContext
 from brain.integrations.backends import ModelResult
-from brain.learning import auto, profile
+from brain.agents import learner as auto, learner_profile as profile
 from brain.mcp_server.server import create_server
 from brain.mcp_server.tools import Services
 from tests.conftest import make_settings

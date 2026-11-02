@@ -53,17 +53,23 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = Field(None, alias="ANTHROPIC_API_KEY")
     anthropic_model: str = Field("claude-opus-5-5", alias="ANTHROPIC_MODEL")
 
-    # --- Automatic learning (brain/learning/auto.py): runs inside the MCP service ---
+    # --- Agents' backend and model (brain/agents/common.py): an agent's own setting, else these ---
+    agent_backend: Literal["local", "anthropic"] | None = Field(None, alias="AGENT_BACKEND")
+    agent_model: str | None = Field(None, alias="AGENT_MODEL")
+
+    # --- Automatic learning (brain/agents/learner.py): runs inside the MCP service ---
     learning_auto: bool = Field(False, alias="LEARNING_AUTO")
     learning_feedback_threshold: int = Field(20, ge=1, alias="LEARNING_FEEDBACK_THRESHOLD")
     learning_goal_delay_minutes: int = Field(2, ge=0, alias="LEARNING_GOAL_DELAY_MINUTES")
     learning_cooldown_minutes: int = Field(30, ge=0, alias="LEARNING_COOLDOWN_MINUTES")
     learning_max_runs_per_day: int = Field(20, ge=0, alias="LEARNING_MAX_RUNS_PER_DAY")
-    learning_backend: Literal["local", "anthropic"] | None = Field(None, alias="LEARNING_BACKEND")  # default: MODEL_BACKEND
+    learning_backend: Literal["local", "anthropic"] | None = Field(None, alias="LEARNING_BACKEND")
+    # A merge of a profile doesn't need the largest model (ANTHROPIC_MODEL's default).
+    learning_model: str | None = Field("claude-sonnet-5-5", alias="LEARNING_MODEL")
     # Agents (docs/AGENT_PLAN.md): tokens one user's runs of one agent may use per UTC day.
     agent_user_tokens_per_day: int = Field(300_000, ge=0, alias="AGENT_USER_TOKENS_PER_DAY")
-    # The scout (docs/AGENT_PLAN.md phase 2): rising names in our posts, proposed to users they fit. Its backend
-    # and model default to the learning job's; SCOUT_MODEL can name a smaller one (e.g. claude-haiku-5-5).
+    # The scout (docs/AGENT_PLAN.md phase 2): rising names in our posts, proposed to users they fit. Its backend:
+    # SCOUT_BACKEND, else AGENT_BACKEND, else LEARNING_BACKEND; SCOUT_MODEL can name a smaller one (claude-haiku-5-5).
     scout_auto: bool = Field(False, alias="SCOUT_AUTO")
     scout_every_hours: int = Field(6, ge=1, le=48, alias="SCOUT_EVERY_HOURS")
     scout_backend: Literal["local", "anthropic"] | None = Field(None, alias="SCOUT_BACKEND")

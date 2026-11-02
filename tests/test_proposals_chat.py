@@ -90,7 +90,7 @@ async def test_suggestions_are_listed_and_answered_from_any_chat_with_a_reason(o
     [fb] = (await own.users.find_one({"_id": me}))["feedback"]
     assert fb["target_type"] == "suggestion" and fb["text"] == "не пропонуй мені про кораблі"
     assert [p.status for p in await proposals.list_open(Repos(own), cloud(me))] == ["open"]   # listing isn't showing
-    from brain.learning import profile
+    from brain.agents import learner_profile as profile
     assert "goes to avoid" in profile.SYSTEM                                         # the learner is told what to do
 
 

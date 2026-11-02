@@ -14,7 +14,7 @@ from brain.db.repositories import Repos
 from brain.domain import insights, sensitivity
 from brain.domain.identity import UserContext
 from brain.integrations.backends import ModelResult, _AuditedBackend
-from brain.learning import profile
+from brain.agents import learner_profile as profile
 from tests.fixtures.sample_data import USERS
 
 _ids = itertools.count(1)

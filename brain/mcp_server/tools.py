@@ -51,7 +51,7 @@ class Services:
     audit: AuditLog               # security events only
     token: TokenProvider          # the verified OAuth token (None in dev mode)
     conversations: ConversationLog | None = field(default=None)
-    learner: Any = None           # brain.learning.auto.Learner when LEARNING_AUTO is on: set_goal nudges it
+    learner: Any = None           # brain.agents.learner.Learner when LEARNING_AUTO is on: set_goal nudges it
     agents: Any = None            # brain.agents.runtime.Runtime when an agent is on: its worker runs queued work
 
     def __post_init__(self) -> None:

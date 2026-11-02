@@ -25,7 +25,7 @@ from brain.config import get_settings
 from brain.db.client import close_client, get_client
 from brain.db.repositories import Repos
 from brain.integrations.backends import get_backend
-from brain.learning import profile
+from brain.agents import learner_profile as profile
 
 
 def _user_id(raw: str):

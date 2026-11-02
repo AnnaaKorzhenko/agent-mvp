@@ -9,7 +9,7 @@ from bson import ObjectId
 
 from brain.db.repositories import Repos
 from brain.domain import digests, interests
-from brain.learning import auto
+from brain.agents import learner as auto
 from tests.conftest import make_settings
 from tests.fixtures.sample_data import USERS
 from tests.test_agents import cloud

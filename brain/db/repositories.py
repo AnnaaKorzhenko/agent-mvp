@@ -418,7 +418,7 @@ class UsersRepo:
         return result.matched_count == 1
 
     async def get_learned(self, user_id: UserId) -> dict | None:
-        """users.learned: the profile the learning job wrote (brain/learning/profile.py), if any."""
+        """users.learned: the profile the learning job wrote (brain/agents/learner_profile.py), if any."""
         doc = await self.col.find_one({"_id": user_key(user_id)}, {"learned": 1})
         return (doc or {}).get("learned")
 

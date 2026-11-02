@@ -25,7 +25,7 @@ from brain.agents.advisor import advisor
 from brain.agents.runtime import Runtime
 from brain.agents.scout import scout
 from brain.agents.scout_web import web_scout
-from brain.learning.auto import learner
+from brain.agents.learner import learner
 from brain.mcp_server.tools import Services, register_tools
 
 INSTRUCTIONS = """\
@@ -125,7 +125,7 @@ def build_services(settings: Settings) -> Services:
         advisor(db, settings, runtime)
     return Services(settings=settings, repos=Repos(db), audit=AuditLog(db), token=token_provider(settings),
                     learner=learner(db, settings, runtime) if settings.learning_auto else None,
-                    agents=runtime if agents_on else None)
+                    agents=runtime)
 
 
 def transport_security(settings: Settings) -> TransportSecuritySettings | None:
@@ -146,7 +146,7 @@ def create_app():
     app = mcp.streamable_http_app(transport_security=transport_security(settings))
     if svc.learner is not None:
         _start_with(app, svc.learner.watch)
-    if svc.agents is not None:                  # the worker for queued and scheduled agents (the scout)
+    if svc.agents is not None:                  # the worker for queued and scheduled runs (learner, scout, advisor)
         _start_with(app, svc.agents.work)
     return app
 
