@@ -52,11 +52,11 @@ def topic(name, days_ago=20):
 
 async def add_user(db, **fields):
     doc = copy.deepcopy(USERS[0])
+    doc.pop("learned", None)
     doc.update({"_id": next(_ids), "goals": [], "feedback": [], "insights": [],
                 "interests": {"category_scores": {}, "tag_scores": {}},
                 "identities": [{"provider": "p", "subject": str(ObjectId())}],
                 "last_seen": datetime.now(timezone.utc), **fields})
-    doc.pop("learned", None)
     await db.users.insert_one(doc)
     return doc["_id"]
 

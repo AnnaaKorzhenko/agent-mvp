@@ -25,7 +25,7 @@ from brain.agents.advisor import advisor
 from brain.agents.runtime import Runtime
 from brain.agents.scout import scout
 from brain.agents.scout_web import web_scout
-from brain.learning.auto import learner
+from brain.agents.learner import learner
 from brain.mcp_server.tools import Services, register_tools
 
 INSTRUCTIONS = """\
@@ -69,6 +69,10 @@ what changed with a next step): nothing changes until the user says yes. When an
 carry that request out right away. A result's proposal_to_mention: one line at the end of your answer, then \
 ask. When the user asks about suggestions or answers one from another conversation, get_proposals first. A no \
 with a reason: pass the reason.
+- A lasting interest the user states («мене цікавить…», «хочу більше про…» an area, not one specific thing): \
+save_insight kind interest; it reaches the daily interests digest. One specific thing to follow: track_topic.
+- When the user says how much or what kind of suggestions they want («менше пропозицій», «вимкни поради»), call \
+set_agent_prefs with only what changed.
 - When the user says something the system assumed about them is wrong («мене це не цікавить», «я вже цим не \
 займаюсь», «чому ти вирішив, що…»), call correct_profile. In the widget they are cards with buttons; otherwise mention each once, in one \
 line, and on the user's clear yes or no call answer_proposal. Never answer one for the user.
@@ -77,7 +81,7 @@ reveals: goals, interests, preferences, facts about their work, feedback, things
 words). For a message that needs no other News brain tool (thanks, corrections, opinions, things about \
 themselves), call log_turn with it.
 - When a result has about_user, adapt to it for the whole conversation: follow their preferences, skip what they \
-already know, connect news to their goals and interests. When it has goals_to_offer, ask once whether to add them.
+already know, connect news to their goals and interests.
 - Digests and search results are already ordered by the user's goals and interests; each item's `why` says why it \
 matters to them. Lead with items whose `why` names a goal. In every answer, summary or analysis, connect the \
 findings to the user's goals and interests and say which goal they serve; leave out what they already know or avoid. \
@@ -121,7 +125,7 @@ def build_services(settings: Settings) -> Services:
         advisor(db, settings, runtime)
     return Services(settings=settings, repos=Repos(db), audit=AuditLog(db), token=token_provider(settings),
                     learner=learner(db, settings, runtime) if settings.learning_auto else None,
-                    agents=runtime if agents_on else None)
+                    agents=runtime)
 
 
 def transport_security(settings: Settings) -> TransportSecuritySettings | None:
@@ -142,7 +146,7 @@ def create_app():
     app = mcp.streamable_http_app(transport_security=transport_security(settings))
     if svc.learner is not None:
         _start_with(app, svc.learner.watch)
-    if svc.agents is not None:                  # the worker for queued and scheduled agents (the scout)
+    if svc.agents is not None:                  # the worker for queued and scheduled runs (learner, scout, advisor)
         _start_with(app, svc.agents.work)
     return app
 

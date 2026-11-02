@@ -8,12 +8,13 @@ inferred like a learned interest), and it expires. It lives through three steps:
   chooses to follow it), so the next dive and the period analysis build on it instead of starting over;
 - track_topic(): the user confirms; the topic becomes `active` with names / broader terms / exclusions that later
   phases match against digests and posts. It expires after `days` (default TTL_DAYS) unless renewed.
-Following feeds the pipeline: every followed, unexpired topic's names go into one `sources` record
-(platform "search_keywords", name "User interests", queries [{q, region}]), the union over all users and nothing
-about who follows what. Region by the term's script: Latin -> world; Cyrillic -> ua and ru, or only ua / ru when
+Following feeds the pipeline: every followed, unexpired topic's web queries go into one `sources` record
+(platform "search_keywords", name "User interests", queries [{q, region}]), together with the web queries of
+every user's confirmed lasting interests (brain/domain/interests.py), the union over all users and nothing about
+who follows what. Topics come first; an interest's query that is the same search as a topic's isn't repeated. Region by the term's script: Latin -> world; Cyrillic -> ua and ru, or only ua / ru when
 the spelling has letters only that language uses (і ї є ґ / ы э ъ ё). The pipeline searches the web for them, keeps
-what it finds in posts and builds a digest with trigger "topics"; get_digest shows each user the items that match
-their own topics, first (brain/domain/digests.py).
+what it finds in posts and builds a digest with side "interests" (earlier: trigger "topics"); get_digest shows
+each user the items that match their own topics and interests, first (brain/domain/digests.py).
 An active topic past expires_at reads as `expired`; nothing rewrites it. From RENEW_NOTICE_DAYS before expiry
 until RENEW_GRACE_DAYS after, the digest asks the client to offer renewal, at most once a day per topic
 (to_renew(); `renew_offered_on` records the Kyiv date it was offered). Topics are keyed by their normalized
@@ -191,28 +192,27 @@ def keyword_queries(active: list[TopicDoc]) -> list[dict]:
     return sorted(out.values(), key=lambda x: (x["q"].lower(), x["region"]))
 
 
-async def sync_queries(repos: Repos, now: datetime | None = None) -> bool:
-    """Rewrites the pipeline's keyword record from all followed, unexpired topics. True if it changed."""
-    now = now or datetime.now(timezone.utc)
-    queries = keyword_queries(await repos.users.all_active_topics(now))
-    if await repos.sources.get_keyword_queries() == queries:
-        return False
-    await repos.sources.set_keyword_queries(queries)
-    return True
-
-
 PIPELINE_LABELS = ["public", "internal"]       # profiles whose interests may become pipeline searches
 
 
-async def sync_profile_queries(repos: Repos, now: datetime | None = None) -> bool:
-    """Rewrites the pipeline's «Profile interests» record from every user's lasting interests
-    (brain/domain/interests.profile_queries). True if it changed."""
+async def all_queries(repos: Repos, now: datetime | None = None) -> list[dict]:
+    """The record's queries: every followed topic's, then every user's lasting interests' that aren't the same
+    search, sorted."""
     from brain.domain import interests
-    record = repos.sources.PROFILE_KEYWORDS
-    queries = interests.profile_queries(await repos.users.all_learned_interests(PIPELINE_LABELS), now)
-    if await repos.sources.get_keyword_queries(record) == queries:
+    now = now or datetime.now(timezone.utc)
+    out = {(query_key(q["q"]), q["region"]): q for q in keyword_queries(await repos.users.all_active_topics(now))}
+    for q in interests.profile_queries(await repos.users.all_learned_interests(PIPELINE_LABELS), now):
+        out.setdefault((query_key(q["q"]), q["region"]), q)
+    return sorted(out.values(), key=lambda x: (x["q"].lower(), x["region"]))
+
+
+async def sync_queries(repos: Repos, now: datetime | None = None) -> bool:
+    """Rewrites the pipeline's keyword record from all followed, unexpired topics and all users' lasting
+    interests. True if it changed."""
+    queries = await all_queries(repos, now)
+    if await repos.sources.get_keyword_queries() == queries:
         return False
-    await repos.sources.set_keyword_queries(queries, record)
+    await repos.sources.set_keyword_queries(queries)
     return True
 
 

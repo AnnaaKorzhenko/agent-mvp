@@ -44,8 +44,7 @@ def matches(text: str, other: str) -> bool:
     return small <= big
 
 
-async def not_interested(repos: Repos, ctx: UserContext, text: str | None, *,
-                         profile_keywords: bool = False) -> Corrected:
+async def not_interested(repos: Repos, ctx: UserContext, text: str | None) -> Corrected:
     text = " ".join((text or "").split())[:MAX_TEXT]
     if not text:
         raise InvalidInput("Say what the user isn't interested in, in their words")
@@ -75,6 +74,6 @@ async def not_interested(repos: Repos, ctx: UserContext, text: str | None, *,
         await insights.save_insight(repos, ctx, f"не цікавить: {text}", kind="preference", origin="explicit")
     except InvalidInput:
         pass                                   # full: the learned profile already holds it
-    if profile_keywords and out.dropped_interests:
-        await topics.sync_profile_queries(repos)
+    if out.dropped_interests:
+        await topics.sync_queries(repos)            # its searches leave the pipeline's record
     return out

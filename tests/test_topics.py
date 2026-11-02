@@ -344,7 +344,7 @@ async def test_the_digest_asks_to_renew(test_db, user):
 
 async def test_followed_topics_reach_about_user_and_the_learning_job(own):
     from brain.domain import insights
-    from brain.learning import profile
+    from brain.agents import learner_profile as profile
     repos = Repos(own)
     me = await add_user(own)
     await topics.track_topic(repos, cloud(me), "Спектр-К", specific=["Spektr-K"], goal="Track new technology",

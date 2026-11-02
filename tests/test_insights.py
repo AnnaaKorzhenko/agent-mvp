@@ -139,7 +139,8 @@ async def test_log_turn_records_the_message_and_saves_signals(test_db, user):
     async with Client(create_server(svc)) as c:
         first = (await c.call_tool("log_turn", {"user_message": message, "signals": signals})).structured_content
         assert first["saved"] == 6 and first["duplicates"] == 0
-        assert first["goals_to_offer"] == ["знайти 3 компанії для інвестицій до кінця року"]
+        offer = first["proposal_to_mention"]                       # a goal just said: one card, asked now
+        assert offer["title"] == "знайти 3 компанії для інвестицій до кінця року" and offer["yes"] == "додати ціль"
         # about_user comes on the first message of a conversation, read after this message's signals were saved
         assert first["about_user"]["preference"] == ["пиши коротше"]
         assert "мій партнер — Іван" not in str(first["about_user"])                 # private: not for Claude
@@ -147,8 +148,7 @@ async def test_log_turn_records_the_message_and_saves_signals(test_db, user):
         again = (await c.call_tool("log_turn", {
             "user_message": "пиши коротше", "previous_reply": "Показав 3 новини про НРК інвестиції",
             "signals": [{"kind": "preference", "text": "Пиши   коротше"}]})).structured_content
-        assert again == {"saved": 0, "duplicates": 1, "goals_to_offer": [], "about_user": None,
-                     "proposal_to_mention": None}
+        assert again == {"saved": 0, "duplicates": 1, "about_user": None, "proposal_to_mention": None}
 
     doc = await test_db.users.find_one({"_id": user})
     by_kind = {i["kind"]: i for i in doc["insights"]}
@@ -199,7 +199,7 @@ async def test_any_tool_saves_signals_and_brings_the_profile_first(test_db, user
             "signals": [{"kind": "goal", "text": "знайти, куди інвестувати в морські дрони"},
                         {"kind": "interest", "text": "морські дрони"}]})
         d = s1.structured_content
-        assert d["goals_to_offer"] == ["знайти, куди інвестувати в морські дрони"]
+        assert d["proposal_to_mention"]["title"] == "знайти, куди інвестувати в морські дрони"
         assert d["about_user"]["preference"] == ["Люблю короткі відповіді"]          # first call: the profile
         assert "About the user" in s1.content[0].text
         # A second tool for the same message: no second copy of the message; no profile again (search) ...

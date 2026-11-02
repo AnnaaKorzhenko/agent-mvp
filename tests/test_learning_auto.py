@@ -11,7 +11,7 @@ from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from brain.audit.log import AuditLog
-from brain.learning import auto
+from brain.agents import learner as auto
 from brain.mcp_server.server import _start_with
 from tests.conftest import make_settings
 from tests.fixtures.sample_data import USERS
@@ -117,7 +117,8 @@ async def test_a_failure_is_logged_and_frees_the_user(db):
     [(who, reason, outcome)] = [x for x in await learner.run_once(NOW) if x[0] == uid]
     assert reason == "goal" and outcome.startswith("failed")
     run = await db.agent_runs.find_one({"agent": "learner", "scope": uid})
-    assert run["status"] == "failed" and "ValueError" in run["error"]
+    assert run["status"] == "failed" and "BadAnswer" in run["error"]
+    assert run["model_calls"] == 2 and run["tokens_in"] == 2000                 # the bad answers still count
     assert uid in await due(db)                                   # not stuck as running
 
 
@@ -155,7 +156,9 @@ async def test_set_goal_in_claude_starts_the_run(db):
             assert not r.is_error
         learner.settings = s.model_copy(update={"learning_goal_delay_minutes": 0})
         learner.nudge(uid, delay_seconds=0)                                    # (skip the 2-minute wait)
-        await learner.pending[uid]
+        await asyncio.gather(*learner.pending.values())                        # the nudges are queued
+    assert await db.agent_runs.count_documents({"agent": "learner", "status": "queued"}) == 1   # one, not four
+    assert (await learner.runtime.work_once()).startswith("saved")             # what the worker does
     assert len(backend.sent) == 1                                              # debounced into one run
     learned = (await db.users.find_one({"_id": uid}))["learned"]
     assert learned["goal_keywords"][0]["goal"] == "стежити за НРК"
@@ -206,7 +209,7 @@ async def test_a_goal_written_to_the_database_starts_a_run_through_the_stream(db
     backend = FakeBackend(AuditLog(db), [json.dumps({**ANSWER, "goal_keywords": [
         {"goal": "стежити за НРК", "specific": ["НРК"], "broader": [], "tags": []}]}, ensure_ascii=False)])
     learner = auto.Learner(db, s, backend)
-    task = asyncio.create_task(learner.watch())
+    tasks = [asyncio.create_task(learner.watch()), asyncio.create_task(learner.runtime.work())]   # as the server
     try:
         await asyncio.sleep(3)                                   # the stream is open
         await db.users.update_one({"_id": uid}, {"$push": {"goals": {
@@ -216,7 +219,8 @@ async def test_a_goal_written_to_the_database_starts_a_run_through_the_stream(db
                 break
             await asyncio.sleep(0.5)
     finally:
-        task.cancel()
+        for t in tasks:
+            t.cancel()
     learned = (await db.users.find_one({"_id": uid}))["learned"]
     assert learned["goal_keywords"][0]["goal"] == "стежити за НРК" and len(backend.sent) == 1
 
@@ -243,3 +247,17 @@ async def test_a_comment_from_the_stream_is_debounced_like_a_goal(db):
     await learner.on_change({"operationType": "update", "documentKey": {"_id": uid},
                              "updateDescription": {"updatedFields": {"feedback.0.text": "більше"}}})
     assert nudged == [uid]
+
+
+async def test_a_delayed_run_survives_a_restart(db):
+    """The 2-minute delay used to be an in-memory task: a deploy in between lost the run. Now it's queued."""
+    uid = await add_user(db, goals=[goal("Знайти напрямки для інвестицій у defense tech", 10)])
+    answer = json.dumps(ANSWER, ensure_ascii=False)
+    before = auto.Learner(db, settings(), FakeBackend(AuditLog(db), []))
+    before.nudge(uid, delay_seconds=120)
+    await asyncio.gather(*before.pending.values())
+    after = auto.Learner(db, settings(), FakeBackend(AuditLog(db), [answer]))       # a new process
+    assert await after.runtime.work_once() is None                                  # not due yet
+    later = datetime.now(timezone.utc) + timedelta(minutes=3)
+    assert (await after.runtime.work_once(later)).startswith("saved")
+    assert (await db.users.find_one({"_id": uid}))["learned"]["goal_keywords"]

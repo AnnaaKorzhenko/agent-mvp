@@ -3,7 +3,7 @@ one next step, as proposals of kind advice.
 
 Agents on the runtime:
 - «advisor_daily», scope global, every ADVISOR_EVERY_HOURS: queues «advisor» for every user served in the last
-  scout.ACTIVE_DAYS.
+  common.ACTIVE_DAYS.
 - «advisor», per user: the signals (brain/domain/advice.py, code). Quiet topics and goals are said by code
   («nothing on «X» in 14 days»). Signals with news (a busier topic or goal, new findings) go to the model in one
   call: for each it writes what changed and why it matters for which goal, and picks one of the signal's steps.
@@ -17,18 +17,16 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from datetime import datetime, timedelta, timezone
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 from pymongo.asynchronous.database import AsyncDatabase
 
-from brain.agents import scout
+from brain.agents import common
 from brain.agents.runs import GLOBAL
 from brain.agents.runtime import Budget, Report, Runtime
-from brain.db.repositories import Repos, _public_id
+from brain.db.repositories import Repos
 from brain.domain import advice, proposals
-from brain.domain.identity import UserContext
 from brain.integrations.backends import ModelBackend
 
 logger = logging.getLogger("brain.agents.advisor")
@@ -36,6 +34,8 @@ logger = logging.getLogger("brain.agents.advisor")
 DAILY = "advisor_daily"
 AGENT = "advisor"
 MAX_ADVICE = 3
+NEWS_PRIORITY = 3.0           # what changed comes before a quiet note
+QUIET_PRIORITY = 1.0
 OPEN_DAYS = 5
 MAX_OUTPUT = 3000
 
@@ -69,11 +69,7 @@ class Answer(BaseModel):
 
 
 def _parse(text: str) -> Answer:
-    cleaned = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
-    start, end = cleaned.find("{"), cleaned.rfind("}")
-    if start < 0 or end <= start:
-        raise ValueError("no JSON object in the answer")
-    return Answer.model_validate(json.loads(cleaned[start:end + 1]))
+    return common.parse(Answer, text)
 
 
 def action(step: str, sig: advice.Signal) -> dict:
@@ -108,18 +104,20 @@ class Advisor:
         runtime.schedule(DAILY, GLOBAL, every)
 
     async def daily(self, scope, trigger: str) -> Report:
-        users = await scout.active_users(self.db, datetime.now(timezone.utc))
+        users = await common.active_users(self.db, datetime.now(timezone.utc))
         for uid in users:
             await self.runtime.submit(AGENT, uid, "daily")
         return Report(f"queued {len(users)} user(s)")
 
     async def advise(self, user_key, trigger: str) -> Report:
-        ctx = UserContext(_public_id(user_key), "cloud", "agent", "internal")
+        ctx = common.agent_ctx(user_key)
         sigs = await advice.signals(self.repos, ctx)
         existing = {p.key for p in await self.repos.users.get_proposals(ctx.user_id)}
         sigs = [s for s in sigs if f"advice:{s.key}" not in existing]
         if not sigs:
             return Report("nothing new to say")
+        if "advice" in (await proposals.prefs_of(self.repos, ctx.user_id)).off:
+            return Report("advice turned off by the user")          # no model call for nothing
         made, calls = 0, []
         for sig in [s for s in sigs if s.kind not in advice.NEEDS_MODEL]:
             title, text = said_by_code(sig)
@@ -131,13 +129,12 @@ class Advisor:
                        "signals": [{"signal": s.key, "kind": s.kind, "about": s.subject, "facts": s.facts,
                                     "steps": s.steps, "items": s.items} for s in news]}
             messages = [{"role": "user", "content": "Data (JSON):\n" + json.dumps(payload, ensure_ascii=False)}]
-            call = await self.backend.complete(messages, system=SYSTEM, max_tokens=MAX_OUTPUT, sensitivity="internal",
-                                               user_id=str(ctx.user_id))
-            calls.append(call)
             try:
-                answer = _parse(call.text)
-            except (ValueError, ValidationError) as e:
-                return Report(f"{made} said by code; the model's advice didn't parse ({str(e)[:100]})", calls)
+                answer, calls = await common.ask_json(self.backend, messages, Answer, system=SYSTEM,
+                                                      max_tokens=MAX_OUTPUT, user_id=str(ctx.user_id),
+                                                      what="the model's advice")
+            except common.BadAnswer as e:            # what code said stays; the news waits for the next day
+                return Report(f"{made} said by code; {str(e)[:120]}", e.calls)
             by_key = {s.key: s for s in news}
             for a in answer.advice:
                 sig = by_key.get(a.signal)
@@ -153,17 +150,11 @@ class Advisor:
     async def _propose(self, user_key, sig: advice.Signal, title: str, text: str, step: str, urls: list[str]) -> int:
         status = await proposals.propose(self.repos, user_key, kind="advice", title=title, why=text, agent=AGENT,
                                          key=f"advice:{sig.key}", days=OPEN_DAYS, links=urls,
-                                         action=action(step, sig))
+                                         action=action(step, sig),
+                                         priority=NEWS_PRIORITY if sig.kind in advice.NEEDS_MODEL else QUIET_PRIORITY)
         return int(status == "ok")
 
 
 def advisor(db: AsyncDatabase, settings, runtime: Runtime) -> Advisor:
-    from brain.audit.log import AuditLog
-    from brain.integrations.backends import get_backend
-    update = {"model_backend": settings.scout_backend or settings.learning_backend or settings.model_backend}
-    model = settings.advisor_model or settings.scout_model
-    if model:
-        update["anthropic_model"] = model
-    backend = get_backend(settings.model_copy(update=update), AuditLog(db))
-    return Advisor(db, backend, runtime, timedelta(hours=settings.advisor_every_hours),
+    return Advisor(db, common.backend_for(db, settings, AGENT), runtime, timedelta(hours=settings.advisor_every_hours),
                    user_tokens_per_day=settings.agent_user_tokens_per_day)

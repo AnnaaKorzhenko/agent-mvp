@@ -13,12 +13,12 @@ import asyncio
 import json
 
 from brain.agents import advisor as advisor_agent
+from brain.agents import common
 from brain.agents.runtime import Runtime
 from brain.config import get_settings
 from brain.db.client import close_client, get_client
-from brain.db.repositories import Repos, _public_id, user_key
+from brain.db.repositories import Repos, user_key
 from brain.domain import advice
-from brain.domain.identity import UserContext
 
 
 async def main(db_name: str | None, user: str, do_advise: bool, backend: str | None, model: str | None) -> None:
@@ -29,7 +29,7 @@ async def main(db_name: str | None, user: str, do_advise: bool, backend: str | N
         settings = settings.model_copy(update={"advisor_model": model})
     db = get_client(settings)[db_name or settings.mongo_db]
     uid = int(user) if user.isdigit() else user
-    ctx = UserContext(_public_id(user_key(uid)), "cloud", "agent", "internal")
+    ctx = common.agent_ctx(user_key(uid))
     sigs = await advice.signals(Repos(db), ctx)
     print(f"database {db.name}, user {uid}: {len(sigs)} signal(s)")
     for s in sigs:

@@ -112,7 +112,11 @@ class Runtime:
             report = await self.agents[name].handler(scope, trigger)
         except Exception as e:                 # noqa: BLE001 - one run's failure never stops the others
             outcome = f"failed: {type(e).__name__}: {e}"
-            await self.runs.finish(run_id, "failed", outcome, error=f"{type(e).__name__}: {e}")
+            calls = getattr(e, "calls", [])     # common.BadAnswer: the model was called, count it
+            await self.runs.finish(run_id, "failed", outcome, error=f"{type(e).__name__}: {e}",
+                                   model=calls[-1].model if calls else None, model_calls=len(calls),
+                                   tokens_in=sum(c.input_tokens for c in calls),
+                                   tokens_out=sum(c.output_tokens for c in calls))
             return outcome
         calls = report.calls
         await self.runs.finish(run_id, "done", report.outcome, model=calls[-1].model if calls else None,

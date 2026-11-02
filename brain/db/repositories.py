@@ -122,10 +122,9 @@ class SourcesRepo:
                 out[src.id] = src
         return out
 
-    # The records the pipeline reads for web searches: users' followed topics (agreed 2026-10-29), and their
-    # lasting interests (the same shape; written only with PROFILE_KEYWORDS on, docs/AGENT_PLAN.md §4 ①).
+    # The record the pipeline reads for web searches (agreed 2026-10-29): users' followed topics and lasting
+    # interests (brain/domain/topics.sync_queries).
     KEYWORDS = {"platform": "search_keywords", "name": "User interests"}
-    PROFILE_KEYWORDS = {"platform": "search_keywords", "name": "Profile interests"}
 
     async def get_keyword_queries(self, record: dict = KEYWORDS) -> list[dict] | None:
         doc = await self.col.find_one(record, {"queries": 1})
@@ -147,7 +146,8 @@ class DigestsRepo:
         base: dict = {"period": period, "side": side}
         if start or end:
             base["created_at"] = {**({"$gte": start} if start else {}), **({"$lt": end} if end else {})}
-        # trigger "topics" is the pipeline's digest of users' tracked topics: never a side's digest.
+        # The pipeline's digest of users' topics and interests (side "interests"; earlier trigger "topics") is never a
+        # side's digest: the side filter keeps it out, and the trigger filter the older ones.
         for query in ({**base, "trigger": "scheduled"}, {**base, "trigger": {"$ne": "topics"}}):
             async for doc in self.col.find(query).sort("created_at", -1).limit(5):
                 digest = parse(DigestDoc, doc, "digests")
@@ -155,9 +155,12 @@ class DigestsRepo:
                     return digest
         return None
 
+    TOPICS_DIGEST = {"$or": [{"side": "interests"}, {"trigger": "topics"}]}
+
     async def latest_topics(self, start: datetime | None = None, end: datetime | None = None) -> DigestDoc | None:
-        """The latest digest of tracked topics (trigger "topics"), any side and period."""
-        query: dict = {"trigger": "topics"}
+        """The latest daily digest of users' topics and interests: side "interests" (the pipeline since 2026-10-31;
+        it names the keyword record in `interest`), or trigger "topics" (the first agreement)."""
+        query: dict = {**self.TOPICS_DIGEST, "period": "day"}
         if start or end:
             query["created_at"] = {**({"$gte": start} if start else {}), **({"$lt": end} if end else {})}
         async for doc in self.col.find(query).sort("created_at", -1).limit(5):
@@ -400,6 +403,14 @@ class UsersRepo:
                                {"_id": 0, "learned.interests": 1, "learned.updated_at": 1})
         return [d["learned"] async for d in cursor]
 
+    async def get_agent_prefs(self, user_id: UserId) -> dict | None:
+        doc = await self.col.find_one({"_id": user_key(user_id)}, {"agent_prefs": 1})
+        return (doc or {}).get("agent_prefs")
+
+    async def set_agent_prefs(self, user_id: UserId, prefs: dict) -> bool:
+        result = await self.col.update_one({"_id": user_key(user_id)}, {"$set": {"agent_prefs": prefs}})
+        return result.matched_count == 1
+
     async def update_learned(self, user_id: UserId, fields: dict) -> bool:
         """Sets fields of users.learned (a correction by the user; the learning job writes the whole profile)."""
         result = await self.col.update_one({"_id": user_key(user_id)},
@@ -407,7 +418,7 @@ class UsersRepo:
         return result.matched_count == 1
 
     async def get_learned(self, user_id: UserId) -> dict | None:
-        """users.learned: the profile the learning job wrote (brain/learning/profile.py), if any."""
+        """users.learned: the profile the learning job wrote (brain/agents/learner_profile.py), if any."""
         doc = await self.col.find_one({"_id": user_key(user_id)}, {"learned": 1})
         return (doc or {}).get("learned")
 

@@ -7,7 +7,9 @@
 (no options)  the rising names in the last 48 h of posts (code only, free)
 --review      also asks the model which are worth following, and how to name them (one call; --backend /
               --model, else SCOUT_BACKEND / SCOUT_MODEL, else the learning job's backend)
---user ID     with --review or --search: what that user would be offered, and why the rest isn't
+--user ID     with --review or --search: what that user would be offered, and why the rest isn't; with --review
+              also the model's check by meaning of the new things that miss on words (one small call per user).
+              Several users: --user ID1,ID2
 --web         the web scout's areas, from the profiles of the users served in the last 30 days (free)
 --search N    with --web: searches the first N areas (at most 5 searches each: billed per search, plus tokens)
 """
@@ -16,14 +18,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 
+from brain.agents import common
 from brain.agents import scout as scout_agent
 from brain.agents import scout_web
 from brain.agents.runtime import Runtime
 from brain.config import get_settings
 from brain.db.client import close_client, get_client
-from brain.db.repositories import Repos, _public_id, user_key
+from brain.db.repositories import Repos, user_key
 from brain.domain import relevance, topics, trends
-from brain.domain.identity import UserContext
 
 
 async def web(db, settings, search: int, user: str | None) -> None:
@@ -48,15 +50,15 @@ async def web(db, settings, search: int, user: str | None) -> None:
         await _for_user(db, user, kept)
 
 
-async def _for_user(db, user: str, kept: list[dict]) -> None:
+async def _for_user(db, user: str, kept: list[dict], s=None) -> None:
     uid = int(user) if user.isdigit() else user
     repos = Repos(db)
-    ctx = UserContext(_public_id(user_key(uid)), "cloud", "agent", "internal")
+    ctx = common.agent_ctx(user_key(uid))
     prefs = await relevance.load(repos, ctx)
     followed = await topics.followed(repos, ctx)
-    records = [q["q"] for rec in (repos.sources.KEYWORDS, repos.sources.PROFILE_KEYWORDS)
-               for q in await repos.sources.get_keyword_queries(rec) or []]
+    records = [q["q"] for q in await repos.sources.get_keyword_queries() or []]
     print(f"\nfor user {uid} (threshold {scout_agent.FIT_MIN}):")
+    maybe = []
     for k in kept:
         if scout_agent.covered(k, prefs, followed, records):
             print(f"  covered already: {k['name']}")
@@ -64,6 +66,16 @@ async def _for_user(db, user: str, kept: list[dict]) -> None:
         r = scout_agent.fit(k, prefs)
         mark = "PROPOSE" if r.score >= scout_agent.FIT_MIN else "skip   "
         print(f"  {mark} {r.score:4.2f} {k['name']}: {'; '.join(r.why) or 'nothing in their profile'}")
+        if r.score < scout_agent.FIT_MIN and (k.get("novelty") in scout_agent.NOVEL or k.get("origin") == "web"):
+            maybe.append((r.score, k))
+    if s is not None and maybe:
+        checked, calls = await s._check(ctx, maybe)
+        used = sum(c.input_tokens + c.output_tokens for c in calls)
+        yes = {i["name"]: r for _, i, r, _ in checked}
+        print(f"  by meaning ({used} tokens):")
+        for _, k in maybe:
+            print(f"    {'PROPOSE' if k['name'] in yes else 'skip   '} {k['name']}"
+                  + (f": {yes[k['name']].why[0]}" if k["name"] in yes else ""))
 
 
 async def main(db_name: str | None, do_review: bool, user: str | None, backend: str | None = None,
@@ -94,9 +106,10 @@ async def main(db_name: str | None, do_review: bool, user: str | None, backend: 
     print(f"\nmodel {calls[-1].model if calls else '-'}: kept {len(kept)}, dropped {len(found) - len(kept)} "
           f"({used} tokens)")
     for k in kept:
-        print(f"  {k['name']} [{k['kind']}]: {k['what']}\n      search: {k['web_queries']}")
-    if user:
-        await _for_user(db, user, kept)
+        print(f"  {k['name']} [{k['kind']}, {k.get('novelty', '?')}: {k.get('new_now', '')}]: {k['what']}\n"
+              f"      search: {k['web_queries']}")
+    for u in (user.split(",") if user else []):
+        await _for_user(db, u.strip(), kept, s)
     await close_client()
 
 
