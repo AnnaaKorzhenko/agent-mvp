@@ -55,9 +55,11 @@ class Auth0Login:
         self.http = http
 
     def authorize_url(self, redirect_uri: str, state: str, nonce: str) -> str:
+        # audience=/userinfo: no API token. Otherwise the tenant's Default Audience (the MCP API, for Claude's
+        # connector) applies, and this app isn't, and needn't be, authorized for it.
         return f"{self.base}/authorize?" + urlencode({
             "response_type": "code", "client_id": self.client_id, "redirect_uri": redirect_uri,
-            "scope": "openid profile email", "state": state, "nonce": nonce})
+            "scope": "openid profile email", "audience": f"{self.base}/userinfo", "state": state, "nonce": nonce})
 
     def logout_url(self, return_to: str) -> str:
         return f"{self.base}/v2/logout?" + urlencode({"client_id": self.client_id, "returnTo": return_to})

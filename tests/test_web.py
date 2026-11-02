@@ -82,6 +82,7 @@ async def sign_in(c, auth0, **claims):
     q = parse_qs(urlparse(r.headers["location"]).query)
     assert r.headers["location"].startswith(f"{ISS}authorize?") and q["client_id"] == [CLIENT]
     assert q["redirect_uri"] == [f"{BASE}/auth/callback"] and q["scope"] == ["openid profile email"]
+    assert q["audience"] == [f"{ISS}userinfo"]                  # not the MCP API (the tenant's default)
     auth0.tokens["code-1"] = id_token(q["nonce"][0], **claims)
     return await c.get("/auth/callback", params={"code": "code-1", "state": q["state"][0]})
 
