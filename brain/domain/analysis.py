@@ -151,7 +151,7 @@ def _pick(found: list[DigestDoc]) -> list[DigestDoc]:
     """One digest per side (or the topics digest) and Kyiv day: the latest scheduled one, else the latest."""
     best: dict[tuple[str, str], DigestDoc] = {}
     for d in found:
-        kind = "topics" if d.trigger == "topics" else d.side
+        kind = "topics" if digests.is_topics_digest(d) else d.side
         k = (kind, d.created_at.astimezone(digests.KYIV).date().isoformat())
         cur = best.get(k)
         if cur is None or (d.trigger == "scheduled") >= (cur.trigger == "scheduled"):
@@ -167,7 +167,7 @@ async def _rows(repos: Repos, ctx: UserContext, period: Period, user_topics: lis
     labels = {pid: p.sensitivity for pid, p in posts.items()}
     rows = []
     for d in chosen:
-        is_topics = d.trigger == "topics"
+        is_topics = digests.is_topics_digest(d)
         day = d.created_at.astimezone(digests.KYIV).date().isoformat()
         position = 0
         for s in d.sections:

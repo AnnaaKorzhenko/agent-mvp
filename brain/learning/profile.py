@@ -422,9 +422,10 @@ async def save(db: AsyncDatabase, act: Activity, outcome: Outcome) -> None:
     await db.users.update_one({"_id": act.user_id}, {"$set": {"learned": doc}})
 
 
-async def after_save(repos, act: Activity, outcome: Outcome, *, profile_keywords: bool = False) -> None:
-    """What follows a saved profile: the goals it found become proposals (the user's yes adds them), and with
-    `profile_keywords` the pipeline's profile keyword record is rebuilt. Never raises: the profile is saved."""
+async def after_save(repos, act: Activity, outcome: Outcome) -> None:
+    """What follows a saved profile: the goals it found become proposals (the user's yes adds them), and the
+    pipeline's keyword record is rebuilt (its lasting interests' searches are in it). Never raises: the profile is
+    saved."""
     from brain.domain import proposals, topics           # (domain modules; the learning job is below them)
     try:
         active = {_norm(g) for g in act.goals}
@@ -433,8 +434,7 @@ async def after_save(repos, act: Activity, outcome: Outcome, *, profile_keywords
                 await proposals.propose(repos, act.user_id, kind="goal", title=text, agent="learner",
                                         why="ви про це говорили, а такої цілі ще немає",
                                         action={"tool": "set_goal", "args": {"text": text}}, label=act.label)
-        if profile_keywords:
-            await topics.sync_profile_queries(repos)
+        await topics.sync_queries(repos)
     except Exception as e:                 # noqa: BLE001
         logger.error(f"after learning {act.user_id}: {type(e).__name__}: {e}")
 

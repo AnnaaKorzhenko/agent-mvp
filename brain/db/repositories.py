@@ -122,10 +122,9 @@ class SourcesRepo:
                 out[src.id] = src
         return out
 
-    # The records the pipeline reads for web searches: users' followed topics (agreed 2026-10-29), and their
-    # lasting interests (the same shape; written only with PROFILE_KEYWORDS on, docs/AGENT_PLAN.md §4 ①).
+    # The record the pipeline reads for web searches (agreed 2026-10-29): users' followed topics and lasting
+    # interests (brain/domain/topics.sync_queries).
     KEYWORDS = {"platform": "search_keywords", "name": "User interests"}
-    PROFILE_KEYWORDS = {"platform": "search_keywords", "name": "Profile interests"}
 
     async def get_keyword_queries(self, record: dict = KEYWORDS) -> list[dict] | None:
         doc = await self.col.find_one(record, {"queries": 1})
@@ -147,7 +146,8 @@ class DigestsRepo:
         base: dict = {"period": period, "side": side}
         if start or end:
             base["created_at"] = {**({"$gte": start} if start else {}), **({"$lt": end} if end else {})}
-        # trigger "topics" is the pipeline's digest of users' tracked topics: never a side's digest.
+        # The pipeline's digest of users' topics and interests (side "interests"; earlier trigger "topics") is never a
+        # side's digest: the side filter keeps it out, and the trigger filter the older ones.
         for query in ({**base, "trigger": "scheduled"}, {**base, "trigger": {"$ne": "topics"}}):
             async for doc in self.col.find(query).sort("created_at", -1).limit(5):
                 digest = parse(DigestDoc, doc, "digests")
@@ -155,9 +155,12 @@ class DigestsRepo:
                     return digest
         return None
 
+    TOPICS_DIGEST = {"$or": [{"side": "interests"}, {"trigger": "topics"}]}
+
     async def latest_topics(self, start: datetime | None = None, end: datetime | None = None) -> DigestDoc | None:
-        """The latest digest of tracked topics (trigger "topics"), any side and period."""
-        query: dict = {"trigger": "topics"}
+        """The latest daily digest of users' topics and interests: side "interests" (the pipeline since 2026-10-31;
+        it names the keyword record in `interest`), or trigger "topics" (the first agreement)."""
+        query: dict = {**self.TOPICS_DIGEST, "period": "day"}
         if start or end:
             query["created_at"] = {**({"$gte": start} if start else {}), **({"$lt": end} if end else {})}
         async for doc in self.col.find(query).sort("created_at", -1).limit(5):

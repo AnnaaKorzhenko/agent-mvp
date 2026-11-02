@@ -6,6 +6,8 @@ import itertools
 import json
 from datetime import datetime, timedelta, timezone
 
+from bson import ObjectId
+
 import pytest
 from mcp import Client
 
@@ -305,17 +307,21 @@ def test_the_profile_record_is_shared_ranked_and_quoted():
     assert interests.profile_queries([lone]) == []                                 # a lone word is never searched
 
 
-async def test_the_profile_record_has_the_agreed_shape_and_leaves_the_topics_record_alone(own):
+async def test_interests_and_topics_share_the_one_record_the_pipeline_reads(own):
+    """2026-11-02: the pipeline reads only «User interests»: lasting interests go there with the followed topics."""
     repos = Repos(own)
-    await repos.sources.set_keyword_queries([{"q": "Спектр-К", "region": "ua"}])
     me = await add_user(own)
-    await own.users.update_one({"_id": me}, {"$set": {"learned": _profile(("НРК", 5, ["«НРК» штурмові групи"]))}})
+    await own.users.update_one({"_id": me}, {"$set": {
+        "learned": _profile(("НРК", 5, ["«НРК» штурмові групи"]), ("Спектр-К", 5, ["«Спектр-К»"])),
+        "topics": [{"id": ObjectId(), "name": "Спектр-К", "norm": "спектр-к", "status": "active",
+                    "specific": ["Спектр-К"], "expires_at": datetime.now(timezone.utc) + timedelta(days=5)}]}})
     secret = await add_user(own)
     await own.users.update_one({"_id": secret}, {"$set": {"learned": _profile(
         ("закрита тема", 5, ["закритий проєкт «Х-1»"]), label="confidential")}})
-    assert await topics.sync_profile_queries(repos) is True
-    doc = await own.sources.find_one({"platform": "search_keywords", "name": "Profile interests"})
+    assert await topics.sync_queries(repos) is True
+    doc = await own.sources.find_one({"platform": "search_keywords", "name": "User interests"})
     assert sorted(doc) == ["_id", "name", "platform", "queries"]
-    assert doc["queries"] == [{"q": '"НРК" штурмові групи', "region": "ua"}]   # nothing from a confidential profile
-    assert await repos.sources.get_keyword_queries() == [{"q": "Спектр-К", "region": "ua"}]
-    assert await topics.sync_profile_queries(repos) is False
+    assert doc["queries"] == [{"q": '"НРК" штурмові групи', "region": "ua"},          # the interest's search
+                              {"q": '"Спектр-К"', "region": "ru"}, {"q": '"Спектр-К"', "region": "ua"}]  # once
+    assert await own.sources.count_documents({"name": "Profile interests"}) == 0     # no second record
+    assert await topics.sync_queries(repos) is False

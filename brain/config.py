@@ -62,9 +62,6 @@ class Settings(BaseSettings):
     learning_backend: Literal["local", "anthropic"] | None = Field(None, alias="LEARNING_BACKEND")  # default: MODEL_BACKEND
     # Agents (docs/AGENT_PLAN.md): tokens one user's runs of one agent may use per UTC day.
     agent_user_tokens_per_day: int = Field(300_000, ge=0, alias="AGENT_USER_TOKENS_PER_DAY")
-    # Write the pipeline's second keyword record («Profile interests») from users' lasting interests. Off until the
-    # pipeline reads it (agreed with the pipeline's owner).
-    profile_keywords: bool = Field(False, alias="PROFILE_KEYWORDS")
     # The scout (docs/AGENT_PLAN.md phase 2): rising names in our posts, proposed to users they fit. Its backend
     # and model default to the learning job's; SCOUT_MODEL can name a smaller one (e.g. claude-haiku-5-5).
     scout_auto: bool = Field(False, alias="SCOUT_AUTO")

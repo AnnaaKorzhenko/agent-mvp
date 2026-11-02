@@ -7,6 +7,9 @@ with an OAuth login):
   an active goal then has no keywords (removing a goal doesn't cost a model call);
 - a comment on a rating (a new rating with text, or text added later) starts a run after the same delay: it is
   the strongest signal there is («more on this device»), so it doesn't wait for the threshold;
+- an interest, goal or preference the user stated themselves (an explicit insight: «мене цікавлять морські
+  дрони») starts a run after the same delay, so its web searches reach the pipeline's keyword record the same day
+  (detected ones wait for the other triggers);
 - a rating counts toward LEARNING_FEEDBACK_THRESHOLD ratings since the last run; at the threshold, and at least
   LEARNING_COOLDOWN_MINUTES after the last run, it starts a run.
 The job's own writes (learned, proposals, last_seen) don't trigger anything. Runs go in the background, so the
@@ -15,7 +18,7 @@ stream keeps reading; after a dropped connection the stream resumes from the las
 (brain/agents, agent «learner»): agent_runs keeps two runs of one user from overlapping (across processes too),
 logs each run with its tokens, and holds the budgets: LEARNING_MAX_RUNS_PER_DAY runs that call the model, all
 users, and AGENT_USER_TOKENS_PER_DAY tokens per user. After a run: the goals it found become proposals
-(brain/domain/proposals.py) and, with PROFILE_KEYWORDS on, the pipeline's profile keyword record is rebuilt.
+(brain/domain/proposals.py) and the pipeline's keyword record is rebuilt with the lasting interests' searches.
 Off unless LEARNING_AUTO is true. Every model call is in audit_log (model_call).
 """
 from __future__ import annotations
@@ -38,19 +41,20 @@ from brain.learning import profile
 logger = logging.getLogger("brain.learning.auto")
 
 AGENT = "learner"
+STATED_KINDS = ("interest", "goal", "preference")      # explicit insights that start a run by themselves
 # Only changes that can make a user due reach the server: updates touching goals or feedback, and new records.
 STREAM = [{"$match": {"$or": [
     {"operationType": {"$in": ["insert", "replace"]}},
     {"operationType": "update", "$expr": {"$gt": [{"$size": {"$filter": {
         "input": {"$objectToArray": "$updateDescription.updatedFields"},
-        "cond": {"$regexMatch": {"input": "$$this.k", "regex": "^(goals|feedback)(\\.|$)"}}}}}, 0]}},
+        "cond": {"$regexMatch": {"input": "$$this.k", "regex": "^(goals|feedback|insights)(\\.|$)"}}}}}, 0]}},
 ]}}, {"$project": {"documentKey": 1, "operationType": 1, "updateDescription.updatedFields": 1}}]
 
 
 @dataclass
 class Due:
     user_id: object
-    reason: str           # "goal" | "comment" | "feedback"
+    reason: str           # "goal" | "comment" | "interest" | "feedback"
 
 
 def _utc(dt: datetime | None) -> datetime | None:
@@ -69,7 +73,8 @@ async def due_users(db: AsyncDatabase, settings: Settings, now: datetime | None 
         query["_id"] = user_id
     cursor = db.users.find(query,
                            {"goals": 1, "feedback.at": 1, "feedback.text": 1, "feedback.text_at": 1, "learned.processed_until": 1, "learned.updated_at": 1,
-                            "learned.goal_keywords.goal": 1})
+                            "learned.goal_keywords.goal": 1, "insights.kind": 1, "insights.origin": 1,
+                            "insights.created_at": 1})
     async for u in cursor:
         if u["_id"] in running:
             continue
@@ -89,6 +94,11 @@ async def due_users(db: AsyncDatabase, settings: Settings, now: datetime | None 
         delay = now - timedelta(minutes=settings.learning_goal_delay_minutes)
         if commented and (not goal_delay or max(commented) <= delay):
             out.append(Due(u["_id"], "comment"))
+            continue
+        stated = [t for i in u.get("insights") or [] if i.get("origin") == "explicit"
+                  and i.get("kind") in STATED_KINDS and (t := _utc(i.get("created_at"))) and (since is None or t > since)]
+        if stated and (not goal_delay or max(stated) <= delay):
+            out.append(Due(u["_id"], "interest"))
             continue
         new = sum(1 for f in u.get("feedback") or [] if f.get("at") and (since is None or _utc(f["at"]) > since))
         last = _utc(learned.get("updated_at"))
@@ -122,7 +132,7 @@ class Learner:
             return Report("nothing new")
         result = await profile.learn(self.backend, act)
         await profile.save(self.db, act, result)
-        await profile.after_save(Repos(self.db), act, result, profile_keywords=self.settings.profile_keywords)
+        await profile.after_save(Repos(self.db), act, result)
         used = sum(c.input_tokens + c.output_tokens for c in result.calls)
         return Report(f"saved ({used} tokens)", result.calls)
 
@@ -155,8 +165,8 @@ class Learner:
                 await asyncio.sleep(delay)
                 self.pending.pop(user_id, None)
                 due = await due_users(self.db, self.settings, user_id=user_id, goal_delay=False)
-                if reason := next((d.reason for d in due if d.reason in ("goal", "comment")), None):
-                    await self.run_user(user_id, "goal added" if reason == "goal" else "comment")
+                if reason := next((d.reason for d in due if d.reason in ("goal", "comment", "interest")), None):
+                    await self.run_user(user_id, {"goal": "goal added"}.get(reason, reason))
 
             self.pending[user_id] = asyncio.get_running_loop().create_task(later())
         except Exception as e:                 # noqa: BLE001 - a nudge must never break set_goal
@@ -178,6 +188,10 @@ class Learner:
             fields = ["goals", "feedback"]
         if any(f == "goals" or f.startswith("goals.") for f in fields):
             self.nudge(user_id)
+        elif any(f == "insights" or f.startswith("insights.") for f in fields):
+            due = await due_users(self.db, self.settings, user_id=user_id, goal_delay=False)
+            if any(d.reason == "interest" for d in due):
+                self.nudge(user_id)
         elif any(f == "feedback" or f.startswith("feedback.") for f in fields):
             due = await due_users(self.db, self.settings, user_id=user_id, goal_delay=False)
             if any(d.reason == "comment" for d in due):

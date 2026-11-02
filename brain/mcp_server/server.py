@@ -69,6 +69,8 @@ what changed with a next step): nothing changes until the user says yes. When an
 carry that request out right away. A result's proposal_to_mention: one line at the end of your answer, then \
 ask. When the user asks about suggestions or answers one from another conversation, get_proposals first. A no \
 with a reason: pass the reason.
+- A lasting interest the user states («мене цікавить…», «хочу більше про…» an area, not one specific thing): \
+save_insight kind interest; it reaches the daily interests digest. One specific thing to follow: track_topic.
 - When the user says something the system assumed about them is wrong («мене це не цікавить», «я вже цим не \
 займаюсь», «чому ти вирішив, що…»), call correct_profile. In the widget they are cards with buttons; otherwise mention each once, in one \
 line, and on the user's clear yes or no call answer_proposal. Never answer one for the user.

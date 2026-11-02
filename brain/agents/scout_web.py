@@ -285,8 +285,7 @@ class WebScout:
         last = await self.runs.latest_output(AGENT, newer_than=now - timedelta(days=REMEMBER_DAYS))
         names += [i["name"] for i in (last or {}).get("kept", [])]
         names += [t.name for t in await self.repos.users.all_active_topics(now)]
-        for rec in (self.repos.sources.KEYWORDS, self.repos.sources.PROFILE_KEYWORDS):
-            names += [q["q"].replace('"', "") for q in await self.repos.sources.get_keyword_queries(rec) or []]
+        names += [q["q"].replace('"', "") for q in await self.repos.sources.get_keyword_queries() or []]
         return list(dict.fromkeys(n for n in names if n))[:KNOWN_MAX]
 
     async def areas(self, now: datetime) -> list[dict]:

@@ -54,8 +54,7 @@ async def _for_user(db, user: str, kept: list[dict]) -> None:
     ctx = UserContext(_public_id(user_key(uid)), "cloud", "agent", "internal")
     prefs = await relevance.load(repos, ctx)
     followed = await topics.followed(repos, ctx)
-    records = [q["q"] for rec in (repos.sources.KEYWORDS, repos.sources.PROFILE_KEYWORDS)
-               for q in await repos.sources.get_keyword_queries(rec) or []]
+    records = [q["q"] for q in await repos.sources.get_keyword_queries() or []]
     print(f"\nfor user {uid} (threshold {scout_agent.FIT_MIN}):")
     for k in kept:
         if scout_agent.covered(k, prefs, followed, records):

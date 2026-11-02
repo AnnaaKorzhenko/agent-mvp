@@ -590,7 +590,10 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
         """Save something the user explicitly asks you to remember ("запам'ятай", "remember") or clearly wants
         kept: knowledge from their work, judgements, how they want analysis done, people and organizations. This
         is the user's News brain memory: save it here even if you also keep your own memory. Keep `text`
-        verbatim, in the user's language. (Things detected in ordinary messages go through log_turn signals.)"""
+        verbatim, in the user's language. A lasting interest the user states in any words («мене цікавлять морські
+        дрони», «хочу більше про РЕБ», «слідкуй за супутниковим зв'язком загалом») is kind interest here: within
+        minutes it becomes web searches for the daily interests digest. (A specific thing to follow for a while is
+        track_topic; things only detected in ordinary messages go through log_turn signals.)"""
         args = {"text": text, "kind": kind, "area": area, "tags": tags, "sensitivity": sensitivity}
         call = _Call(svc, "save_insight", {**args, **_common(user_message, signals)}, mcp_ctx)
         message_id = call.record.word_ids.setdefault("insight", ObjectId())   # the logged user message
@@ -764,8 +767,7 @@ def register_tools(mcp: MCPServer, svc: Services) -> None:
                      mcp_ctx)
 
         async def body(ctx: UserContext) -> out.CorrectionResult:
-            r = await corrections_domain.not_interested(svc.repos, ctx, not_interested,
-                                                         profile_keywords=svc.settings.profile_keywords)
+            r = await corrections_domain.not_interested(svc.repos, ctx, not_interested)
             await call.done(items=len(r.dropped_interests) + len(r.dropped_intents))
             return out.CorrectionResult(not_interested=r.text, dropped_interests=r.dropped_interests,
                                         dropped_intents=r.dropped_intents, closed_proposals=r.closed_proposals,

@@ -19,7 +19,7 @@
 <script type="module">
 /*__COMMON_JS__*/
 
-const SIDE = { topics: "Ваші теми", ua: "Українські джерела", ru: "Російські джерела" };
+const SIDE = { topics: "Ваші теми й інтереси", ua: "Українські джерела", ru: "Російські джерела" };
 const FIRST = 6;                // items shown per side before «Показати ще»
 const widget = createWidget({ name: "News brain digest", where: "у віджеті зведення" });
 
@@ -49,7 +49,7 @@ function render(data) {
   for (const digest of data.digests) {
     const heading = el("h2", {}, SIDE[digest.side] || digest.side,
       digest.side === "ru" ? el("span", { class: "claim" }, "заяви рос. каналів, не факти") : null,
-      digest.side === "topics" ? el("span", { class: "note" }, "за темами, які ви відстежуєте") : null,
+      digest.side === "topics" ? el("span", { class: "note" }, "за темами, які ви відстежуєте, і вашими інтересами") : null,
       data.date ? el("span", { class: "note" }, data.date) : null);
     let shown = 0;
     const folded = [];

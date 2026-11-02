@@ -239,8 +239,7 @@ class Scout:
         ctx = UserContext(_public_id(user_key), "cloud", "agent", "internal")
         prefs = await relevance.load(self.repos, ctx)
         followed = await topics.followed(self.repos, ctx)
-        records = [q["q"] for rec in (self.repos.sources.KEYWORDS, self.repos.sources.PROFILE_KEYWORDS)
-                   for q in await self.repos.sources.get_keyword_queries(rec) or []]
+        records = [q["q"] for q in await self.repos.sources.get_keyword_queries() or []]
         scored = []
         for item in items:
             if not sensitivity.is_allowed(item.get("label", "internal"), ctx.max_sensitivity):
