@@ -58,6 +58,12 @@ class Settings(BaseSettings):
     web_session_days: int = Field(14, ge=1, le=90, alias="WEB_SESSION_DAYS")
     # The UI's files; default: data-digest-web/frontend in the repo
     web_frontend_dir: str | None = Field(None, alias="WEB_FRONTEND_DIR")
+    # The web chat (brain/web/chat.py): Claude through the Anthropic backend (needs ANTHROPIC_API_KEY)
+    web_chat_model: str = Field("claude-sonnet-5-5", alias="WEB_CHAT_MODEL")
+    web_chat_tokens_per_day: int = Field(500_000, ge=0, alias="WEB_CHAT_TOKENS_PER_DAY")     # per user, UTC day
+    web_chat_max_rounds: int = Field(8, ge=1, le=20, alias="WEB_CHAT_MAX_ROUNDS")      # model calls per message
+    web_chat_history: int = Field(30, ge=2, le=200, alias="WEB_CHAT_HISTORY")          # earlier messages sent
+    web_chat_web_search: bool = Field(True, alias="WEB_CHAT_WEB_SEARCH")               # for deep dives
 
     # --- Model backends (not used by v0 tools) ---
     model_backend: Literal["local", "anthropic"] = Field("local", alias="MODEL_BACKEND")

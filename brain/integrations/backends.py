@@ -9,6 +9,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+import anyio
+
 from brain.audit.log import AuditLog
 from brain.config import Settings
 from brain.domain.sensitivity import SensitivityError, max_for, require_allowed
@@ -130,9 +132,9 @@ class AnthropicBackend(_AuditedBackend):
     trust = "cloud"
     FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
-    def __init__(self, audit: AuditLog, settings: Settings, client: Any | None = None):
+    def __init__(self, audit: AuditLog, settings: Settings, client: Any | None = None, model: str | None = None):
         super().__init__(audit)
-        self.model = settings.anthropic_model
+        self.model = model or settings.anthropic_model
         if client is None:
             import anthropic
             key = settings.anthropic_api_key.get_secret_value() if settings.anthropic_api_key else None
@@ -200,6 +202,59 @@ class AnthropicBackend(_AuditedBackend):
             convo = list(messages) + [{"role": "assistant", "content": resp.content}]
         return ModelResult("".join(text_parts).strip(), tokens_in, tokens_out, resp.model if resp else self.model,
                            self.name, resp.stop_reason if resp else None, searches, tuple(sources.values()))
+
+
+    async def stream(self, messages: list[dict[str, Any]], system: Any, tools: list[dict], max_tokens: int = 16000,
+                     sensitivity: str = "internal", user_id: int | str | None = None):
+        """One round of a chat with tools (brain/web/chat.py), streamed: yields each text delta (str), then the
+        final message. Gated and audited like complete(): refused before anything leaves the process, and one
+        model_call per round, also when the caller stops reading (outcome "cancelled")."""
+        import anthropic
+        try:
+            require_allowed(sensitivity, self.max_label, f"payload for backend '{self.name}'")
+        except SensitivityError as e:
+            await self.audit.model_call(backend=self.name, model=self.model, max_sensitivity=sensitivity,
+                                        outcome="refused", error=str(e), user_id=user_id)
+            raise
+        kwargs: dict[str, Any] = {"model": self.model, "max_tokens": max_tokens, "messages": messages,
+                                  "system": system, "tools": tools, "thinking": {"type": "adaptive"},
+                                  "cache_control": {"type": "ephemeral"},     # the prefix so far: system, tools, turns
+                                  "betas": [self.FALLBACK_BETA], "fallbacks": "default"}
+        final, outcome, error = None, "cancelled", "the caller stopped reading"
+        try:
+            for attempt in (1, 2):
+                try:
+                    async with self.client.beta.messages.stream(**kwargs) as s:
+                        async for event in s:
+                            if event.type == "text":
+                                yield event.text
+                        final = await s.get_final_message()
+                    break
+                except anthropic.BadRequestError as e:    # a model without programmatic tool calling: direct search
+                    search = next((t for t in tools if t.get("type") == self.SEARCH_TOOL), None)
+                    if attempt == 2 or search is None or "allowed_callers" not in str(e):
+                        raise
+                    search["allowed_callers"] = ["direct"]
+            outcome, error = "ok", None
+        except Exception as e:
+            outcome, error = "error", f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            usage = getattr(final, "usage", None)
+            with anyio.CancelScope(shield=True):          # the audit entry is written even on a cancelled stream
+                await self.audit.model_call(
+                    backend=self.name, model=getattr(final, "model", None) or self.model,
+                    max_sensitivity=sensitivity, input_tokens=_input_tokens(usage),
+                    output_tokens=getattr(usage, "output_tokens", 0) or 0, outcome=outcome, error=error,
+                    user_id=user_id,
+                    web_searches=getattr(getattr(usage, "server_tool_use", None), "web_search_requests", 0) or 0)
+        yield final
+
+
+def _input_tokens(usage) -> int:
+    """Every input token billed in full: uncached plus written to the cache (cache reads are a tenth of the price
+    and are left out)."""
+    return (getattr(usage, "input_tokens", 0) or 0) + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
 
 
 def get_backend(settings: Settings, audit: AuditLog) -> ModelBackend:

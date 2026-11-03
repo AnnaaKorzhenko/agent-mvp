@@ -2,7 +2,7 @@
 
 const state = {
   screen: 'chat',
-  chat: { title: 'Новий чат', messages: [], loading: false },
+  chat: { id: null, title: 'Новий чат', messages: [], loading: false },
   digest: { side: 'both', data: null, loading: false, error: '' },
   search: { q: '', side: 'all', days: 7, items: [], note: '', error: '', loading: false },
   profile: null
@@ -37,23 +37,77 @@ function render() {
   }
 }
 
+// ---------- Нещодавні чати ----------
+let recentChats = [];
+
 function renderRecent() {
-  document.getElementById('recent-list').innerHTML = DEMO.recentChats
-    .map((t, i) => `<button class="recent-item" data-recent="${i}" title="${esc(t)}">${esc(t)}</button>`)
-    .join('');
+  const box = document.getElementById('recent-list');
+  box.innerHTML = recentChats.length
+    ? recentChats.map((c) =>
+      `<button class="recent-item ${c.id === state.chat.id ? 'on' : ''}" data-recent="${esc(c.id)}" title="${esc(c.title)}">${esc(c.title)}</button>`).join('')
+    : '<span class="sub recent-empty">Тут з’являться ваші чати.</span>';
+}
+
+async function loadRecent() {
+  try { recentChats = (await api.listChats()).chats || []; } catch (e) { recentChats = []; }
+  renderRecent();
 }
 
 // ---------- Чат ----------
+const TOOL_LABEL = {
+  search_posts: 'Шукаю в постах…', get_digest: 'Відкриваю дайджест…', get_morning_digest: 'Відкриваю ранковий дайджест…',
+  get_post: 'Читаю пост…', get_profile: 'Дивлюсь ваш профіль…', get_insights: 'Згадую, що знаю про вас…',
+  deep_dive: 'Збираю все про це…', save_findings: 'Зберігаю знахідки…', get_analysis: 'Готую аналіз…',
+  save_report: 'Зберігаю звіт…', track_topic: 'Додаю тему до відстеження…', set_goal: 'Оновлюю цілі…',
+  save_insight: 'Запам’ятовую…', record_feedback: 'Записую відгук…', get_proposals: 'Дивлюсь пропозиції…',
+  answer_proposal: 'Виконую…', set_agent_prefs: 'Оновлюю налаштування…', correct_profile: 'Виправляю профіль…'
+};
+const ICON_STOP = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+
+// Невеликий безпечний markdown: спершу екрануємо все, потім — посилання (лише http/https), жирний, курсив, списки, заголовки.
+function inline(s) {
+  return s
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+    .replace(/(^|[\s(])_([^_\n]+)_(?=$|[\s.,;:!?)])/g, '$1<i>$2</i>');
+}
+
+function md(src) {
+  const out = [];
+  let list = null;
+  const close = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  for (const raw of esc(src).split('\n')) {
+    const line = raw.trimEnd();
+    let m;
+    if ((m = line.match(/^\s*[-*•]\s+(.*)$/)) || (m = line.match(/^\s*\d+[.)]\s+(.*)$/))) {
+      const kind = /^\s*\d/.test(line) ? 'ol' : 'ul';
+      if (list !== kind) { close(); out.push(`<${kind}>`); list = kind; }
+      out.push(`<li>${inline(m[1])}</li>`);
+    } else if ((m = line.match(/^#{1,4}\s+(.*)$/))) {
+      close(); out.push(`<h3>${inline(m[1])}</h3>`);
+    } else if (!line.trim()) {
+      close();
+    } else {
+      close(); out.push(`<p>${inline(line)}</p>`);
+    }
+  }
+  close();
+  return out.join('');
+}
+
 function composer(big) {
-  const dis = state.chat.loading ? 'disabled' : '';
+  const busy = state.chat.loading;
+  const button = busy
+    ? `<button class="send stop" type="button" data-action="stop" aria-label="Зупинити">${ICON_STOP}</button>`
+    : `<button class="send" type="submit" aria-label="Надіслати">${ICON_SEND}</button>`;
   if (big) {
     return `
       <form class="composer big" data-form="chat">
         <label for="composer" class="sr-only">Повідомлення аналітику</label>
         <input id="composer" name="q" autocomplete="off" placeholder="Запитайте про новини, сюжети чи тренди…">
         <div class="composer-bar">
-          <div class="row"><span class="mini-pill">Період: 7 днів</span><span class="mini-pill">UA + RU</span></div>
-          <button class="send" type="submit" aria-label="Надіслати" ${dis}>${ICON_SEND}</button>
+          <div class="row"><span class="mini-pill">Пости UA + RU · ваші цілі</span></div>
+          ${button}
         </div>
       </form>`;
   }
@@ -61,18 +115,33 @@ function composer(big) {
     <form class="composer small" data-form="chat">
       <label for="composer" class="sr-only">Повідомлення аналітику</label>
       <input id="composer" name="q" autocomplete="off" placeholder="Уточніть або поставте нове питання…">
-      <button class="send" type="submit" aria-label="Надіслати" ${dis}>${ICON_SEND}</button>
+      ${button}
     </form>`;
 }
 
+function botHtml(m) {
+  const status = m.streaming
+    ? `<div class="bot-status typing">${esc(m.status || 'Думаю…')}</div>` : '';
+  return `
+    <div class="msg-bot">
+      <div class="bot-avatar" aria-hidden="true">${ICON_BOT}</div>
+      <div class="bot-body">
+        <div class="bot-text md">${md(m.content)}</div>
+        ${status}
+        ${m.error ? `<div class="bot-error">${esc(m.error)}</div>` : ''}
+      </div>
+    </div>`;
+}
+
 function renderChat() {
-  const { messages, title, loading } = state.chat;
+  const { messages, title } = state.chat;
   const header = `
     <header class="chat-header">
       <span class="chat-title">${esc(title)}</span>
       <span class="pill">База: News · оновлюється щодня</span>
     </header>`;
 
+  if (state.chat.opening) return `<div class="chat">${header}<div class="empty"><p class="sub">Відкриваю чат…</p></div></div>`;
   if (!messages.length) {
     return `
       <div class="chat">${header}
@@ -90,23 +159,12 @@ function renderChat() {
 
   const items = messages.map((m) => m.role === 'user'
     ? `<div class="msg-user"><div>${esc(m.content)}</div></div>`
-    : `<div class="msg-bot">
-         <div class="bot-avatar" aria-hidden="true">${ICON_BOT}</div>
-         <div class="bot-body">
-           <div class="bot-text">${esc(m.content)}</div>
-           ${m.sources?.length ? `<div class="row">${m.sources.map((s) =>
-             `<a class="source" href="${esc(s.url || '#')}" target="_blank" rel="noopener"><b>${esc(s.platform)}</b>${esc(s.name)}</a>`).join('')}</div>` : ''}
-         </div>
-       </div>`).join('');
-
-  const typing = loading
-    ? `<div class="msg-bot"><div class="bot-avatar" aria-hidden="true">${ICON_BOT}</div><div class="bot-text typing">Аналізую джерела…</div></div>`
-    : '';
+    : botHtml(m)).join('');
 
   return `
     <div class="chat">${header}
       <div class="thread-wrap">
-        <div class="thread" aria-live="polite">${items}${typing}</div>
+        <div class="thread" aria-live="polite">${items}</div>
         <div class="composer-dock">
           ${composer(false)}
           <p class="disclaimer">Відповіді базуються на зібраних постах — перевіряйте джерела.</p>
@@ -115,29 +173,75 @@ function renderChat() {
     </div>`;
 }
 
+// Під час відповіді оновлюємо лише останнє повідомлення, щоб не перемальовувати весь екран на кожен шматок тексту.
+function paintLast() {
+  const last = state.chat.messages[state.chat.messages.length - 1];
+  const el = $main.querySelector('.thread .msg-bot:last-child');
+  if (state.screen !== 'chat' || !el || !last || last.role !== 'assistant') return;
+  el.outerHTML = botHtml(last);
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
 async function ask(text) {
   const t = (text || '').trim();
   if (!t || state.chat.loading) return;
-  if (state.screen !== 'chat') { state.screen = 'chat'; go('chat'); }
-  if (!state.chat.messages.length) state.chat.title = t.length > 48 ? t.slice(0, 48) + '…' : t;
-  state.chat.messages.push({ role: 'user', content: t });
-  state.chat.loading = true;
+  if (state.screen !== 'chat') go('chat');
+  const chat = state.chat;
+  if (!chat.messages.length) chat.title = t.length > 48 ? t.slice(0, 48) + '…' : t;
+  chat.messages.push({ role: 'user', content: t });
+  const reply = { role: 'assistant', content: '', streaming: true, status: 'Думаю…' };
+  chat.messages.push(reply);
+  chat.loading = true;
+  chat.controller = new AbortController();
   render();
   try {
-    const history = state.chat.messages.map(({ role, content }) => ({ role, content }));
-    const res = await api.askAnalyst(history);
-    state.chat.messages.push({ role: 'assistant', content: res.content, sources: res.sources || [] });
+    if (!chat.id) chat.id = (await api.newChat()).id;
+    await api.sendMessage(chat.id, t, (ev) => {
+      if (ev.type === 'text') { reply.content += ev.text; reply.status = 'Пишу…'; }
+      else if (ev.type === 'tool') reply.status = TOOL_LABEL[ev.name] || 'Працюю з даними…';
+      else if (ev.type === 'error') reply.error = ev.detail;
+      if (state.chat === chat) paintLast();
+    }, chat.controller.signal);
   } catch (e) {
-    state.chat.messages.push({ role: 'assistant', content: 'Не вдалося отримати відповідь: ' + e.message });
+    if (e.name === 'AbortError') reply.error = reply.content ? 'Зупинено.' : 'Зупинено до відповіді.';
+    else reply.error = 'Не вдалося отримати відповідь: ' + e.message;
   } finally {
-    state.chat.loading = false;
-    if (state.screen === 'chat') render();
+    reply.streaming = false;
+    chat.loading = false;
+    chat.controller = null;
+    if (state.chat === chat && state.screen === 'chat') render();
+    loadRecent();
   }
 }
 
+function stopAnswer() {
+  if (state.chat.controller) state.chat.controller.abort();
+}
+
 function newChat() {
-  state.chat = { title: 'Новий чат', messages: [], loading: false };
+  stopAnswer();
+  state.chat = { id: null, title: 'Новий чат', messages: [], loading: false };
   go('chat');
+  renderRecent();
+}
+
+async function openChat(id) {
+  stopAnswer();
+  const known = recentChats.find((c) => c.id === id);
+  state.chat = { id, title: known ? known.title : 'Чат', messages: [], loading: false, opening: true };
+  go('chat');
+  renderRecent();
+  try {
+    const res = await api.getChat(id);
+    if (state.chat.id !== id) return;
+    state.chat.messages = res.messages.map((m) => ({ role: m.role, content: m.content,
+      error: m.role === 'assistant' && !m.content ? 'Відповідь не завершилась.' : '' }));
+  } catch (e) {
+    if (state.chat.id !== id) return;
+    state.chat.messages = [{ role: 'assistant', content: '', error: 'Не вдалося відкрити чат: ' + e.message }];
+  }
+  state.chat.opening = false;
+  if (state.screen === 'chat') render();
 }
 
 // ---------- Дайджести ----------
@@ -359,11 +463,7 @@ document.querySelector('.sidebar').addEventListener('click', (e) => {
   if (nav) return go(nav.dataset.screen);
   if (e.target.closest('[data-action="new-chat"]')) return newChat();
   const recent = e.target.closest('[data-recent]');
-  if (recent) {
-    state.chat = { title: DEMO.recentChats[+recent.dataset.recent], messages: [], loading: false };
-    go('chat');
-    ask(state.chat.title);
-  }
+  if (recent) return openChat(recent.dataset.recent);
 });
 
 $main.addEventListener('submit', (e) => {
@@ -382,6 +482,7 @@ $main.addEventListener('click', async (e) => {
   if (!el) return;
   const d = el.dataset;
 
+  if (d.action === 'stop') return stopAnswer();
   if (d.ask) return ask(d.ask);
   if (d.sideDigest) { state.digest.side = d.sideDigest; return loadDigest(); }
   if (d.searchSide) { state.search.side = d.searchSide; render(); return loadSearch(); }
@@ -390,5 +491,5 @@ $main.addEventListener('click', async (e) => {
 
 // ---------- Старт ----------
 loadMe();
-renderRecent();
+loadRecent();
 go('chat');

@@ -12,27 +12,30 @@ On Render: its own web service, `python -m brain.web --host 0.0.0.0` (the MCP se
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import secrets
 from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from brain.audit.conversations import WIDGET_PREFIX
 from brain.audit.log import AuditLog
 from brain.config import Settings, get_settings
 from brain.db.client import get_db
 from brain.db.repositories import Repos
-from brain.domain.identity import IdentityError, resolve_user
+from brain.domain.identity import IdentityError, UserContext, resolve_user
+from brain.integrations.backends import AnthropicBackend
 from brain.tools import catalog
 from brain.tools.base import Origin, Services
 from brain.web import session
+from brain.web.chat import Chat, new_chat_id, valid_chat_id
 from brain.web.auth import Auth0Login, LoginError, WebUser
 
 logger = logging.getLogger("brain.web")
@@ -42,6 +45,11 @@ FRONTEND = Path(__file__).resolve().parents[2] / "data-digest-web" / "frontend"
 LOGIN_MAX_AGE = 600                       # seconds to finish the Auth0 login
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 CSRF_HEADER = "x-brain"                   # every write sends it: a cross-site form can't
+CLIENT = {"name": "web", "version": VERSION}
+
+
+class ChatIn(BaseModel):
+    content: str = Field(min_length=1, max_length=8000)
 
 
 def build_services(settings: Settings) -> Services:
@@ -62,8 +70,15 @@ def _next(path: str | None) -> str:
     return path if path and path.startswith("/") and not path.startswith("//") else "/"
 
 
+def chat_backend(settings: Settings, audit: AuditLog) -> AnthropicBackend | None:
+    """Claude for the chat, or None without ANTHROPIC_API_KEY (the chat then answers 503)."""
+    if not settings.anthropic_api_key:
+        return None
+    return AnthropicBackend(audit, settings, model=settings.web_chat_model)
+
+
 def create_app(settings: Settings | None = None, svc: Services | None = None,
-               login: Auth0Login | None = None) -> FastAPI:
+               login: Auth0Login | None = None, backend: AnthropicBackend | None = None) -> FastAPI:
     settings = settings or get_settings()
     svc = svc or build_services(settings)
     login = login or (None if settings.dev_mode else Auth0Login(settings))
@@ -74,6 +89,8 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
     cookie = {"httponly": True, "samesite": "lax", "secure": base.startswith("https://"), "path": "/"}
     session_age = settings.web_session_days * 86400
     specs = catalog.build(svc)
+    backend = backend or chat_backend(settings, svc.audit)
+    chat = Chat(svc, specs, backend, CLIENT) if backend else None
     app = FastAPI(title="News brain web", version=VERSION, docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.middleware("http")
@@ -146,13 +163,22 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
             raise HTTPException(401, "Not signed in")
         return WebUser(**data)
 
+    def caller(user: WebUser) -> Services:
+        """The services as this user: the tools resolve the user from this token, never from arguments."""
+        return dataclasses.replace(svc, token=(lambda: None) if login is None
+                                   else (lambda: user.token(login.client_id)))
+
+    async def context(user: WebUser) -> UserContext:
+        try:
+            return await resolve_user(settings, caller(user).token(), svc.repos.users)
+        except IdentityError as e:
+            raise HTTPException(403, str(e)) from None
+
     async def tool(user: WebUser, name: str, args: dict, did: str):
         """Runs a brain tool as this user; `did`: what the user did in the UI, logged as a button press."""
-        caller = dataclasses.replace(svc, token=(lambda: None) if login is None
-                                     else (lambda: user.token(login.client_id)))
-        origin = Origin(f"web:{user.sid}", {"name": "web", "version": VERSION}, lambda: True)
+        origin = Origin(f"web:{user.sid}", CLIENT, lambda: True)
         try:
-            result = await catalog.call(caller, specs[name], args, f"{WIDGET_PREFIX} {did}", origin)
+            result = await catalog.call(caller(user), specs[name], args, f"{WIDGET_PREFIX} {did}", origin)
         except ValidationError as e:
             raise HTTPException(422, e.errors(include_url=False, include_input=False)) from None
         except ToolError as e:
@@ -191,9 +217,48 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
     async def profile(user: WebUser = Depends(web_user)):
         return await tool(user, "get_profile", {}, "відкрив профіль")
 
-    @app.post("/api/chat")
-    async def chat(user: WebUser = Depends(web_user)):
-        raise HTTPException(503, "Чат з аналітиком з'явиться на наступному кроці (5.2).")
+    # ---- the chat (brain/web/chat.py) ---------------------------------------------------------------------
+
+    def chat_on() -> Chat:
+        if chat is None:
+            raise HTTPException(503, "Чат вимкнено: на сервері не задано ANTHROPIC_API_KEY.")
+        return chat
+
+    def chat_id_ok(chat_id: str) -> str:
+        if not valid_chat_id(chat_id):
+            raise HTTPException(404, "Немає такого чату")
+        return chat_id
+
+    @app.post("/api/chats")
+    async def new_chat(user: WebUser = Depends(web_user)):
+        chat_on()
+        return {"id": new_chat_id()}            # nothing is stored until its first message
+
+    @app.get("/api/chats")
+    async def chats(user: WebUser = Depends(web_user)):
+        return {"chats": await chat_on().chats(await context(user))}
+
+    @app.get("/api/chats/{chat_id}")
+    async def chat_thread(chat_id: str, user: WebUser = Depends(web_user)):
+        messages = await chat_on().thread(await context(user), chat_id_ok(chat_id))
+        if not messages:
+            raise HTTPException(404, "Немає такого чату")
+        return {"id": chat_id, "messages": messages}
+
+    @app.post("/api/chats/{chat_id}/messages")
+    async def chat_message(chat_id: str, body: ChatIn, user: WebUser = Depends(web_user)):
+        """Server-sent events: one `data: {json}` line per event (brain/web/chat.py Chat.turn)."""
+        c, chat_id, ctx = chat_on(), chat_id_ok(chat_id), await context(user)
+        text = body.content.strip()
+        if not text:
+            raise HTTPException(422, "Порожнє повідомлення")
+
+        async def events():
+            async for event in c.turn(caller(user), ctx, chat_id, text, user.name):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(events(), media_type="text/event-stream",
+                                 headers={"X-Accel-Buffering": "no"})
 
     frontend = Path(settings.web_frontend_dir) if settings.web_frontend_dir else FRONTEND
     if frontend.is_dir():

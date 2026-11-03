@@ -51,10 +51,61 @@ window.api = {
     return http(`/posts?${new URLSearchParams({ q, side, days })}`);
   },
 
-  // POST /chat — з'явиться на кроці 5.2 (docs/WEB_PLAN.md)
-  async askAnalyst(messages) {
-    if (USE_MOCK) { await delay(700); return { content: 'Демо-відповідь.', sources: [] }; }
-    return http('/chat', { method: 'POST', body: JSON.stringify({ messages }) });
+  // ---- Чат з аналітиком (brain/web/chat.py). Історію зберігає сервер, клієнт шле лише нове повідомлення.
+
+  // POST /chats -> { id }  (нічого не зберігається до першого повідомлення)
+  async newChat() {
+    if (USE_MOCK) return { id: 'demo' };
+    return http('/chats', { method: 'POST' });
+  },
+
+  // GET /chats -> { chats: [{ id, title, updated_at }] }, найновіші першими
+  async listChats() {
+    if (USE_MOCK) return { chats: [] };
+    return http('/chats');
+  },
+
+  // GET /chats/:id -> { id, messages: [{ id, role, content, created_at }] }
+  async getChat(id) {
+    if (USE_MOCK) return { id, messages: [] };
+    return http(`/chats/${encodeURIComponent(id)}`);
+  },
+
+  // POST /chats/:id/messages { content } -> потік server-sent events, по одному JSON у рядку `data: …`:
+  //   { type: 'text', text } | { type: 'tool', name } | { type: 'done', message_id, stop_reason } | { type: 'error', detail }
+  // onEvent викликається для кожної події; signal (AbortController) зупиняє відповідь.
+  async sendMessage(id, content, onEvent, signal) {
+    if (USE_MOCK) { await delay(500); onEvent({ type: 'text', text: 'Демо-відповідь.' }); onEvent({ type: 'done' }); return; }
+    const res = await fetch(`${API_BASE}/chats/${encodeURIComponent(id)}/messages`, {
+      method: 'POST', credentials: 'same-origin', signal,
+      headers: { 'Content-Type': 'application/json', 'X-Brain': '1' },
+      body: JSON.stringify({ content })
+    });
+    if (res.status === 401) {
+      location.href = '/login?next=' + encodeURIComponent(location.pathname + location.hash);
+      throw new Error('Потрібно увійти');
+    }
+    if (!res.ok) {
+      let detail = '';
+      try { detail = (await res.json()).detail; } catch (e) { /* не JSON */ }
+      throw new Error(typeof detail === 'string' && detail ? detail : `Помилка сервера (${res.status})`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n\n')) >= 0) {
+        const chunk = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        for (const line of chunk.split('\n')) {
+          if (line.startsWith('data: ')) onEvent(JSON.parse(line.slice(6)));
+        }
+      }
+    }
   },
 
   // GET /profile -> { goals: [..], topics: [{ name, status, expires_at, ... }], top_tags: [{ tag, score }],

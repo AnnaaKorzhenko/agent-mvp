@@ -93,7 +93,7 @@ async def test_the_api_needs_a_session_and_writes_need_the_header(oauth_app):
         assert (await c.get("/api/health")).json() == {"ok": True}
         assert (await c.get("/api/digest")).status_code == 401
         assert (await c.get("/api/me", headers={"cookie": f"{session.SESSION_COOKIE}=forged.value"})).status_code == 401
-        assert (await c.post("/api/chat")).status_code == 403                       # no X-Brain: refused first
+        assert (await c.post("/api/chats")).status_code == 403                      # no X-Brain: refused first
         r = await c.get("/")
         assert r.status_code == 200 and "Data Digest" in r.text                    # the UI itself is public
 
