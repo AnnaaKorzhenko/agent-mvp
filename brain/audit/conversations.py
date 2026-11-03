@@ -279,6 +279,16 @@ class ConversationLog:
                 s.update(part=doc.get("part", 1), started_at=doc.get("started_at"), first=first or s.get("first"))
         return list(found.values())[:limit]
 
+    async def rate(self, user_id, channel: str, mcp_session_id: str, message_id: ObjectId, rating: dict) -> bool:
+        """Puts the user's rating on one of the session's replies (the latest rating replaces an earlier one)."""
+        if self.col is None:
+            return False
+        r = await self.col.update_one(
+            {"user_id": user_id, "channel": channel, "mcp_session_id": mcp_session_id,
+             "messages": {"$elemMatch": {"id": message_id, "role": "assistant"}}},
+            {"$set": {"messages.$.rating": rating}})
+        return r.modified_count == 1
+
     async def assistant_tokens(self, user_id, channel: str, since: datetime) -> int:
         """Tokens of the replies logged since `since` (input + output), for a daily budget."""
         if self.col is None:

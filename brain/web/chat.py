@@ -200,7 +200,27 @@ class Chat:
         msgs = await self.svc.conversations.thread(user_key(ctx.user_id), ctx.channel, session_of(chat_id))
         return [{"id": str(m["id"]), "role": m["role"], "content": m.get("content") or "",
                  "created_at": m["created_at"].isoformat(),
-                 **({"stop_reason": m.get("stop_reason")} if m["role"] == "assistant" else {})} for m in msgs]
+                 **({"stop_reason": m.get("stop_reason"), "rating": (m.get("rating") or {}).get("reaction")}
+                    if m["role"] == "assistant" else {})} for m in msgs]
+
+    async def reply(self, ctx: UserContext, chat_id: str, message_id: str) -> tuple[str, dict] | None:
+        """One of the chat's replies and the user's message it answered: (question, reply), or None."""
+        if not ObjectId.is_valid(message_id):
+            return None
+        msgs = await self.svc.conversations.thread(user_key(ctx.user_id), ctx.channel, session_of(chat_id))
+        question = ""
+        for m in msgs:
+            if m["role"] == "user":
+                question = m.get("content") or ""
+            elif str(m["id"]) == message_id:
+                return question, m
+        return None
+
+    async def rate(self, ctx: UserContext, chat_id: str, message_id: str, reaction: str,
+                   feedback_id: str | None, text: str | None = None) -> bool:
+        rating = {"reaction": reaction, "feedback_id": feedback_id, "text": text, "at": datetime.now(timezone.utc)}
+        return await self.svc.conversations.rate(user_key(ctx.user_id), ctx.channel, session_of(chat_id),
+                                                 ObjectId(message_id), rating)
 
     async def used_today(self, ctx: UserContext) -> int:
         return await self.svc.conversations.assistant_tokens(user_key(ctx.user_id), ctx.channel,

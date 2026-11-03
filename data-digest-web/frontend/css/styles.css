@@ -176,3 +176,22 @@ ul.plain { margin: 0; padding-left: 18px; display: flex; flex-direction: column;
 .send.stop { background: var(--ink-2); }
 .recent-item.on { background: #E3E0D8; }
 .recent-empty { display: block; padding: 6px 10px; font-size: 13px; }
+
+/* Кнопки дій (крок 5.3): оцінки, пропозиції, редагування профілю */
+.nav-item .badge { margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 10px; background: var(--accent); color: #fff; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; }
+.rate-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.rate { min-height: 30px; padding: 0 10px; border: 1px solid var(--border-2); border-radius: 8px; background: var(--surface); color: var(--muted); font-size: 13px; }
+.rate:hover { border-color: var(--accent); color: var(--accent); }
+.rate.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+.comment, .reason, .inline-form { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; margin-top: 6px; }
+.comment input, .reason input, .inline-form input { flex: 1 1 240px; min-height: 36px; padding: 0 12px; border: 1px solid var(--border-2); border-radius: 8px; background: var(--surface); font: inherit; font-size: 14px; color: var(--ink); }
+.btn-text { min-height: 32px; padding: 0 8px; border: 0; background: transparent; color: var(--accent); font-size: 14px; text-decoration: underline; text-underline-offset: 2px; }
+.btn-primary.small, .proposal .btn-primary { min-height: 36px; padding: 0 14px; font-size: 14px; border-radius: 8px; }
+.proposal .done { color: var(--accent); }
+.notice { display: block; width: 100%; text-align: left; padding: 10px 14px; border: 1px solid var(--accent); border-radius: 10px; background: var(--accent-soft); color: var(--accent); font-size: 14px; }
+button.notice:hover { background: #D6E4DE; }
+.notice.static { border-color: var(--border-2); background: var(--surface); color: var(--ink-2); margin: 0; }
+ul.plain.editable li { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.pref { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 6px 0; }
+.segmented.small button { min-height: 30px; padding: 0 12px; }
+.nav-item .badge[hidden] { display: none; }

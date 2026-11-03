@@ -109,9 +109,54 @@ window.api = {
   },
 
   // GET /profile -> { goals: [..], topics: [{ name, status, expires_at, ... }], top_tags: [{ tag, score }],
-  //                   top_categories: [...], categories_today: {...}, about_user: { kind: [text] } }
+  //                   top_categories: [...], categories_today: {...}, about_user: { kind: [text] },
+  //                   agent_prefs: { cards, off: [kind], mentions } }
   async getProfile() {
-    if (USE_MOCK) return { goals: [], topics: [], top_tags: [], top_categories: [], about_user: {} };
+    if (USE_MOCK) return { goals: [], topics: [], top_tags: [], top_categories: [], about_user: {}, agent_prefs: { cards: 3, off: [], mentions: true } };
     return http('/profile');
+  },
+
+  // ---- Кнопки: кожна виконує один інструмент «мозку» (як кнопки карток у Claude) ----
+
+  // GET /proposals -> { proposals: [{ proposal_id, kind: goal|topic|advice, title, why, yes, links, ask }] }
+  async getProposals() {
+    if (USE_MOCK) return { proposals: [] };
+    return http('/proposals');
+  },
+
+  // POST /proposals/:id { answer: accept|dismiss, reason? } -> { accepted, done, ask }  (ask: запит до аналітика)
+  async answerProposal(id, answer, reason) {
+    return http(`/proposals/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({ answer, reason: reason || null }) });
+  },
+
+  // POST /goals { action: add|remove, text } -> { goals: [..] }
+  async setGoal(action, text) {
+    return http('/goals', { method: 'POST', body: JSON.stringify({ action, text }) });
+  },
+
+  // POST /topics { name, action: follow|stop } -> { topic, confirmation }  (follow — продовжити ще на 30 днів)
+  async setTopic(name, action) {
+    return http('/topics', { method: 'POST', body: JSON.stringify({ name, action }) });
+  },
+
+  // POST /profile/not-interested { text } -> { dropped_interests, dropped_intents, closed_proposals, followed_matching }
+  async notInterested(text) {
+    return http('/profile/not-interested', { method: 'POST', body: JSON.stringify({ text }) });
+  },
+
+  // POST /prefs { cards?, turn_off?, turn_on?, mentions? } -> { cards, off, mentions }
+  async setPrefs(change) {
+    return http('/prefs', { method: 'POST', body: JSON.stringify(change) });
+  },
+
+  // POST /feedback { reaction?, target_type: post|digest_item, post_id | digest_id + item_n, text? } -> { confirmation }
+  async rate(target, reaction, text) {
+    return http('/feedback', { method: 'POST', body: JSON.stringify({ ...target, reaction: reaction || null, text: text || null }) });
+  },
+
+  // POST /chats/:id/messages/:mid/rating { reaction, text? } — оцінка відповіді аналітика
+  async rateReply(chatId, messageId, reaction, text) {
+    return http(`/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/rating`,
+      { method: 'POST', body: JSON.stringify({ reaction, text: text || null }) });
   }
 };

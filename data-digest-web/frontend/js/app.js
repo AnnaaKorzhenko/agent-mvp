@@ -5,7 +5,12 @@ const state = {
   chat: { id: null, title: 'Новий чат', messages: [], loading: false },
   digest: { side: 'both', data: null, loading: false, error: '' },
   search: { q: '', side: 'all', days: 7, items: [], note: '', error: '', loading: false },
-  profile: null
+  proposals: { items: [], loading: false, error: '', answered: {}, reasonFor: null },
+  profile: null,
+  profileNote: '',
+  ratings: {},         // що оцінено -> useful | not_useful
+  rateError: {},
+  commentFor: null     // після «Не корисно»: де показати поле «Чому?»
 };
 
 const $main = document.getElementById('main');
@@ -19,15 +24,18 @@ const ICON_SEARCH = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none"
 // ---------- Навігація ----------
 function go(screen) {
   state.screen = screen;
+  if (screen === 'profile') state.profileNote = '';
   document.querySelectorAll('.nav-item').forEach((b) => b.classList.toggle('active', b.dataset.screen === screen));
   render();
   if (screen === 'digests') loadDigest();
   if (screen === 'search') loadSearch();
   if (screen === 'profile') loadProfile();
+  if (screen === 'proposals') loadProposals();
 }
 
 function render() {
-  const view = { chat: renderChat, digests: renderDigests, search: renderSearch, profile: renderProfile }[state.screen];
+  const view = { chat: renderChat, digests: renderDigests, search: renderSearch, profile: renderProfile,
+    proposals: renderProposals }[state.screen];
   $main.innerHTML = view();
   if (state.screen === 'chat') {
     const input = $main.querySelector('.composer input');
@@ -35,6 +43,64 @@ function render() {
     const thread = $main.querySelector('.thread');
     if (thread) window.scrollTo(0, document.body.scrollHeight);
   }
+}
+
+// ---------- Оцінки (новини й відповіді аналітика) ----------
+// key: d:<digest>/<n> | p:<post> | r:<message>; ціль запам'ятовується під час малювання.
+const rateTargets = {};
+
+function rateHtml(key, kind, target) {
+  rateTargets[key] = target;
+  const cur = state.ratings[key];
+  const btn = (r, label) =>
+    `<button class="rate ${cur === r ? 'on' : ''}" data-rate="${esc(key)}" data-reaction="${r}" aria-pressed="${cur === r}">${label}</button>`;
+  const comment = state.commentFor === key
+    ? `<form class="comment" data-comment="${esc(key)}">
+         <label class="sr-only" for="c-${esc(key)}">Чому не корисно</label>
+         <input id="c-${esc(key)}" name="text" maxlength="2000" autocomplete="off" placeholder="Чому? Необов’язково: допоможе підбирати краще">
+         <button class="btn-outline" type="submit">Надіслати</button>
+       </form>` : '';
+  const err = state.rateError[key] ? `<span class="sub">${esc(state.rateError[key])}</span>` : '';
+  return `<div class="rate-row" data-rate-row="${esc(key)}" data-kind="${kind}">${btn('useful', 'Корисно')}${btn('not_useful', 'Не корисно')}${err}${comment}</div>`;
+}
+
+function repaintRate(key) {
+  document.querySelectorAll('[data-rate-row]').forEach((el) => {
+    if (el.dataset.rateRow === key) el.outerHTML = rateHtml(key, el.dataset.kind, rateTargets[key]);
+  });
+  const input = state.commentFor === key && document.querySelector(`form[data-comment] input`);
+  if (input) input.focus();
+}
+
+async function sendRating(key, reaction, text) {
+  const t = rateTargets[key];
+  if (!t) return;
+  if (t.messageId) return api.rateReply(t.chatId, t.messageId, reaction, text);
+  return api.rate(t, text && !reaction ? null : reaction, text);
+}
+
+async function onRate(key, reaction) {
+  const before = state.ratings[key];
+  state.ratings[key] = reaction;
+  state.commentFor = reaction === 'not_useful' ? key : null;
+  delete state.rateError[key];
+  repaintRate(key);
+  try { await sendRating(key, reaction); }
+  catch (e) {
+    state.ratings[key] = before;
+    state.commentFor = null;
+    state.rateError[key] = 'Не збереглося: ' + e.message;
+    repaintRate(key);
+  }
+}
+
+async function onComment(key, text) {
+  state.commentFor = null;
+  repaintRate(key);
+  if (!text.trim()) return;
+  const t = rateTargets[key];
+  try { await (t && t.messageId ? sendRating(key, 'not_useful', text) : sendRating(key, null, text)); }
+  catch (e) { state.rateError[key] = 'Коментар не зберігся: ' + e.message; repaintRate(key); }
 }
 
 // ---------- Нещодавні чати ----------
@@ -129,6 +195,8 @@ function botHtml(m) {
         <div class="bot-text md">${md(m.content)}</div>
         ${status}
         ${m.error ? `<div class="bot-error">${esc(m.error)}</div>` : ''}
+        ${!m.streaming && m.id && m.content && state.chat.id
+          ? rateHtml('r:' + m.id, 'reply', { chatId: state.chat.id, messageId: m.id }) : ''}
       </div>
     </div>`;
 }
@@ -200,6 +268,7 @@ async function ask(text) {
       if (ev.type === 'text') { reply.content += ev.text; reply.status = 'Пишу…'; }
       else if (ev.type === 'tool') reply.status = TOOL_LABEL[ev.name] || 'Працюю з даними…';
       else if (ev.type === 'error') reply.error = ev.detail;
+      else if (ev.type === 'done') reply.id = ev.message_id;
       if (state.chat === chat) paintLast();
     }, chat.controller.signal);
   } catch (e) {
@@ -234,8 +303,11 @@ async function openChat(id) {
   try {
     const res = await api.getChat(id);
     if (state.chat.id !== id) return;
-    state.chat.messages = res.messages.map((m) => ({ role: m.role, content: m.content,
-      error: m.role === 'assistant' && !m.content ? 'Відповідь не завершилась.' : '' }));
+    state.chat.messages = res.messages.map((m) => {
+      if (m.rating) state.ratings['r:' + m.id] = m.rating;
+      return { id: m.id, role: m.role, content: m.content,
+        error: m.role === 'assistant' && !m.content ? 'Відповідь не завершилась.' : '' };
+    });
   } catch (e) {
     if (state.chat.id !== id) return;
     state.chat.messages = [{ role: 'assistant', content: '', error: 'Не вдалося відкрити чат: ' + e.message }];
@@ -264,7 +336,7 @@ function whyHtml(why) {
   return (why || []).slice(0, 2).map((w) => `<span class="tag accent">${esc(noEmoji(w))}</span>`).join('');
 }
 
-function itemHtml(it, side) {
+function itemHtml(it, side, digestId) {
   const ask = 'Розкажи детальніше про #' + it.ref + ': ' + it.text.slice(0, 160);
   return `
     <article class="story">
@@ -278,6 +350,7 @@ function itemHtml(it, side) {
         <div class="row">${sourcesHtml(it.source_urls)}</div>
         <button class="btn-outline" data-ask="${esc(ask)}">Запитати аналітика</button>
       </div>
+      ${digestId ? rateHtml(`d:${digestId}/${it.n}`, 'news', { target_type: 'digest_item', digest_id: digestId, item_n: it.n }) : ''}
     </article>`;
 }
 
@@ -289,11 +362,14 @@ function digestHtml(data) {
       ${SIDE_NOTE[d.side] ? `<span class="sub">${esc(SIDE_NOTE[d.side])}</span>` : ''}
       ${d.sections.map((s) => `
         ${s.title ? `<div class="section-label">${esc(noEmoji(s.title))}</div>` : ''}
-        ${s.items.map((it) => itemHtml(it, d.side)).join('')}`).join('')}
+        ${s.items.map((it) => itemHtml(it, d.side, d.digest_id)).join('')}`).join('')}
     </section>`).join('');
   const notes = [data.note, (data.missing_sides || []).length ? 'Ще немає: ' + data.missing_sides.map((m) => SIDE_LABEL[m] || m).join(', ') : '']
     .filter(Boolean).map((n) => `<p class="sub">${esc(n)}</p>`).join('');
-  return notes + (blocks || '<p class="sub">Дайджесту за цей день немає.</p>');
+  const n = (data.proposals || []).length;
+  const offer = n ? `<button class="notice" data-go="proposals">Система має для вас пропозицій: ${n}. Переглянути</button>` : '';
+  if (data.proposals) setBadge(n);
+  return offer + notes + (blocks || '<p class="sub">Дайджесту за цей день немає.</p>');
 }
 
 function renderDigests() {
@@ -350,6 +426,7 @@ function resultsHtml() {
       </div>
       <p>${esc(r.summary)}</p>
       ${r.post_url ? `<div class="row"><a class="source" href="${esc(r.post_url)}" target="_blank" rel="noopener noreferrer">Відкрити пост</a></div>` : ''}
+      ${r.post_id ? rateHtml('p:' + r.post_id, 'news', { target_type: 'post', post_id: r.post_id }) : ''}
     </div>`).join('');
 }
 
@@ -395,16 +472,145 @@ function onSearchInput(value) {
   searchTimer = setTimeout(loadSearch, 350);
 }
 
+// ---------- Пропозиції ----------
+const KIND_LABEL = { goal: 'Ціль', topic: 'Тема', advice: 'Порада' };
+
+function setBadge(n) {
+  const b = document.getElementById('proposals-badge');
+  if (!b) return;
+  b.hidden = !n;
+  b.textContent = n ? String(n) : '';
+}
+
+function proposalHtml(p) {
+  const pr = state.proposals;
+  const done = pr.answered[p.proposal_id];
+  let actions;
+  if (done) actions = `<p class="sub done">${esc(done)}</p>`;
+  else if (pr.reasonFor === p.proposal_id) {
+    actions = `
+      <form class="reason" data-reason="${esc(p.proposal_id)}">
+        <label class="sr-only" for="r-${esc(p.proposal_id)}">Чому ні</label>
+        <input id="r-${esc(p.proposal_id)}" name="reason" maxlength="500" autocomplete="off" placeholder="Чому ні? Необов’язково: система не пропонуватиме схоже">
+        <div class="row">
+          <button class="btn-outline" type="submit">Відхилити</button>
+          <button class="btn-text" type="button" data-cancel-reason="1">Скасувати</button>
+        </div>
+      </form>`;
+  } else {
+    actions = `
+      <div class="row">
+        <button class="btn-primary" data-yes="${esc(p.proposal_id)}">Так, ${esc(p.yes || 'прийняти')}</button>
+        <button class="btn-outline" data-no="${esc(p.proposal_id)}">Ні</button>
+      </div>`;
+  }
+  return `
+    <article class="story proposal">
+      <div class="row"><span class="tag accent">${esc(KIND_LABEL[p.kind] || p.kind)}</span></div>
+      <p><b>${esc(p.title)}</b></p>
+      ${p.why ? `<p class="sub">${esc(p.why)}</p>` : ''}
+      ${(p.links || []).length ? `<div class="row">${sourcesHtml(p.links)}</div>` : ''}
+      ${actions}
+    </article>`;
+}
+
+function renderProposals() {
+  const pr = state.proposals;
+  const body = pr.loading ? '<p class="sub">Завантаження…</p>'
+    : pr.error ? `<p class="sub">${esc(pr.error)}</p>`
+    : pr.items.length ? pr.items.map(proposalHtml).join('')
+    : '<p class="sub">Нових пропозицій немає. Система пропонує цілі, теми й поради, коли помічає щось для вас.</p>';
+  return `
+    <div class="page"><div class="page-inner narrow">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <h1 class="h1">Пропозиції</h1>
+        <span class="sub">Що система помітила для вас. Нічого не змінюється, доки ви не скажете «так». Скільки й яких пропозицій показувати — у профілі.</span>
+      </div>
+      ${body}
+    </div></div>`;
+}
+
+async function loadProposals() {
+  const pr = state.proposals;
+  pr.loading = !pr.items.length;
+  pr.error = '';
+  if (state.screen === 'proposals') render();
+  try {
+    pr.items = (await api.getProposals()).proposals || [];
+    setBadge(pr.items.filter((p) => !pr.answered[p.proposal_id]).length);
+  } catch (e) { pr.error = 'Не вдалося завантажити пропозиції: ' + e.message; }
+  pr.loading = false;
+  if (state.screen === 'proposals') render();
+}
+
+async function answerProposal(id, answer, reason) {
+  const pr = state.proposals;
+  pr.reasonFor = null;
+  pr.answered[id] = answer === 'accept' ? 'Виконую…' : 'Зберігаю…';
+  render();
+  try {
+    const r = await api.answerProposal(id, answer, reason);
+    pr.answered[id] = r.accepted ? 'Готово: ' + r.done : 'Відхилено. Система врахує це.';
+    setBadge(pr.items.filter((p) => !pr.answered[p.proposal_id]).length);
+    if (r.ask) { newChat(); ask(r.ask); return; }      // порада, чиє «так» — запит до аналітика
+  } catch (e) { delete pr.answered[id]; pr.error = 'Не вдалося: ' + e.message; }
+  if (state.screen === 'proposals') render();
+}
+
 // ---------- Профіль ----------
 const ABOUT_LABEL = {
   summary: 'Коротко про вас', interest: 'Інтереси', intent: 'Над чим ви зараз працюєте', preference: 'Як ви хочете отримувати новини',
   goal: 'Цілі, які ви згадували', tracked: 'Що ви відстежуєте', known: 'Що ви вже знаєте', avoid: 'Чого уникати',
   fact: 'Про вашу роботу', feedback: 'Ваші відгуки'
 };
+const CORRECTABLE = new Set(['interest', 'intent']);   // те, що система вивела сама: можна сказати «це не про мене»
 const TOPIC_STATUS = { active: 'відстежується', explored: 'досліджено', expired: 'завершено', stopped: 'зупинено' };
+const PREF_KINDS = [['goal', 'Цілі'], ['topic', 'Теми'], ['advice', 'Поради']];
 
 function listHtml(items, empty) {
   return items.length ? `<ul class="plain">${items.map((t) => `<li>${esc(t)}</li>`).join('')}</ul>` : `<span class="sub">${esc(empty)}</span>`;
+}
+
+function goalsHtml(goals) {
+  return `
+    ${goals.length ? `<ul class="plain editable">${goals.map((g) => `
+      <li><span>${esc(g)}</span><button class="btn-text" data-goal-remove="${esc(g)}">Прибрати</button></li>`).join('')}</ul>`
+      : '<span class="sub">Цілей ще немає.</span>'}
+    <form class="inline-form" data-form="goal">
+      <label for="goal-new" class="sr-only">Нова ціль</label>
+      <input id="goal-new" name="text" maxlength="300" autocomplete="off" placeholder="Нова ціль, наприклад: стежити за розвитком НРК">
+      <button class="btn-outline" type="submit">Додати</button>
+    </form>`;
+}
+
+function topicsHtml(topics) {
+  if (!topics.length) return '<span class="sub">Ви ще нічого не відстежуєте. Тему можна додати з пропозицій або попросити аналітика.</span>';
+  return `<ul class="plain editable">${topics.map((t) => {
+    const until = t.expires_at && t.status === 'active' ? ' до ' + esc(new Date(t.expires_at).toLocaleDateString('uk-UA')) : '';
+    const btn = t.status === 'active' ? `<button class="btn-text" data-topic="${esc(t.name)}" data-topic-action="stop">Припинити</button>`
+      : t.status === 'expired' ? `<button class="btn-text" data-topic="${esc(t.name)}" data-topic-action="follow">Продовжити на 30 днів</button>` : '';
+    return `<li><span><b>${esc(t.name)}</b> <span class="sub">· ${esc(TOPIC_STATUS[t.status] || t.status)}${until}</span></span>${btn}</li>`;
+  }).join('')}</ul>`;
+}
+
+function aboutHtml(kind, texts) {
+  if (!CORRECTABLE.has(kind)) return listHtml(texts, '');
+  return `<ul class="plain editable">${texts.map((t) => `
+    <li><span>${esc(t)}</span><button class="btn-text" data-not-me="${esc(t.slice(0, 120))}">Це не про мене</button></li>`).join('')}</ul>`;
+}
+
+function prefsHtml(pr) {
+  const cards = [0, 1, 2, 3].map((n) =>
+    `<button class="${pr.cards === n ? 'on' : ''}" data-prefs-cards="${n}">${n === 0 ? 'Жодної' : n}</button>`).join('');
+  const kinds = PREF_KINDS.map(([k, label]) => {
+    const on = !pr.off.includes(k);
+    return `<button class="chip ${on ? 'on' : ''}" data-prefs-kind="${k}" aria-pressed="${on}">${label}</button>`;
+  }).join('');
+  return `
+    <div class="pref"><span class="filter-label">Пропозицій у дайджесті</span><div class="segmented small" role="group" aria-label="Скільки пропозицій">${cards}</div></div>
+    <div class="pref"><span class="filter-label">Що пропонувати</span><div class="row">${kinds}</div></div>
+    <div class="pref"><span class="filter-label">У розмові з аналітиком</span>
+      <button class="chip ${pr.mentions ? 'on' : ''}" data-prefs-mentions="${pr.mentions ? '0' : '1'}" aria-pressed="${pr.mentions}">${pr.mentions ? 'Згадувати пропозиції' : 'Не згадувати'}</button></div>`;
 }
 
 function renderProfile() {
@@ -417,25 +623,31 @@ function renderProfile() {
     <div class="page"><div class="page-inner narrow">
       <div style="display:flex;flex-direction:column;gap:6px">
         <h1 class="h1">Профіль та інтереси</h1>
-        <span class="sub">Від цього залежить, що потрапляє у «Для вас» і як відповідає аналітик. Змінювати тут можна буде на наступному кроці; поки — словами в чаті.</span>
+        <span class="sub">Від цього залежить, що потрапляє у «Для вас» і як відповідає аналітик.</span>
       </div>
+      ${state.profileNote ? `<p class="notice static" role="status">${esc(state.profileNote)}</p>` : ''}
       <section class="card">
         <h2>Цілі</h2>
-        ${listHtml(p.goals || [], 'Цілей ще немає.')}
+        ${goalsHtml(p.goals || [])}
       </section>
       <section class="card">
         <h2>Теми, які ви відстежуєте</h2>
-        ${topics.length ? `<ul class="plain">${topics.map((t) => `<li><b>${esc(t.name)}</b> <span class="sub">· ${esc(TOPIC_STATUS[t.status] || t.status)}${t.expires_at && t.status === 'active' ? ' до ' + esc(new Date(t.expires_at).toLocaleDateString('uk-UA')) : ''}</span></li>`).join('')}</ul>` : '<span class="sub">Ви ще нічого не відстежуєте.</span>'}
+        ${topicsHtml(topics)}
       </section>
       ${about.map(([kind, texts]) => `
         <section class="card">
           <h2>${esc(ABOUT_LABEL[kind] || kind)}</h2>
-          ${listHtml(texts, '')}
+          ${aboutHtml(kind, texts)}
         </section>`).join('')}
       ${(p.top_tags || []).length ? `
       <section class="card">
         <h2>Що ви читаєте найбільше</h2>
         <div class="row">${p.top_tags.slice(0, 12).map((t) => `<span class="tag">${esc(t.tag)}</span>`).join('')}</div>
+      </section>` : ''}
+      ${p.agent_prefs ? `
+      <section class="card">
+        <h2>Пропозиції системи</h2>
+        ${prefsHtml(p.agent_prefs)}
       </section>` : ''}
     </div></div>`;
 }
@@ -444,6 +656,21 @@ async function loadProfile() {
   try { state.profile = await api.getProfile(); }
   catch (e) { state.profile = { error: 'Не вдалося завантажити профіль: ' + e.message }; }
   if (state.screen === 'profile') render();
+}
+
+// Дія в профілі: виконати, показати підтвердження, перечитати профіль.
+async function profileAction(run, note) {
+  state.profileNote = 'Зберігаю…';
+  render();
+  try { const r = await run(); state.profileNote = typeof note === 'function' ? note(r) : note; }
+  catch (e) { state.profileNote = 'Не вдалося: ' + e.message; }
+  await loadProfile();
+}
+
+function correctedNote(r) {
+  const parts = [`Зрозуміло: «${r.not_interested}» вас не цікавить. Такі новини будуть нижче.`];
+  if ((r.followed_matching || []).length) parts.push(`Ви відстежуєте схожі теми (${r.followed_matching.join(', ')}): якщо й вони не потрібні, натисніть «Припинити» біля них.`);
+  return parts.join(' ');
 }
 
 // ---------- Користувач ----------
@@ -467,10 +694,16 @@ document.querySelector('.sidebar').addEventListener('click', (e) => {
 });
 
 $main.addEventListener('submit', (e) => {
-  const form = e.target.closest('[data-form="chat"]');
+  const form = e.target.closest('form');
   if (!form) return;
   e.preventDefault();
-  ask(form.q.value);
+  if (form.dataset.form === 'chat') return ask(form.q.value);
+  if (form.dataset.comment) return onComment(form.dataset.comment, form.text.value);
+  if (form.dataset.reason) return answerProposal(form.dataset.reason, 'dismiss', form.reason.value.trim());
+  if (form.dataset.form === 'goal') {
+    const text = form.text.value.trim();
+    if (text) profileAction(() => api.setGoal('add', text), `Ціль додано: «${text}».`);
+  }
 });
 
 $main.addEventListener('input', (e) => {
@@ -483,7 +716,27 @@ $main.addEventListener('click', async (e) => {
   const d = el.dataset;
 
   if (d.action === 'stop') return stopAnswer();
+  if (d.rate) return onRate(d.rate, d.reaction);
+  if (d.go) return go(d.go);
   if (d.ask) return ask(d.ask);
+
+  // пропозиції
+  if (d.yes) return answerProposal(d.yes, 'accept');
+  if (d.no) { state.proposals.reasonFor = d.no; render(); const i = $main.querySelector('form[data-reason] input'); if (i) i.focus(); return; }
+  if (d.cancelReason) { state.proposals.reasonFor = null; return render(); }
+
+  // профіль
+  if (d.goalRemove) return profileAction(() => api.setGoal('remove', d.goalRemove), `Ціль прибрано: «${d.goalRemove}».`);
+  if (d.topic) return profileAction(() => api.setTopic(d.topic, d.topicAction), (r) => r.confirmation || 'Збережено.');
+  if (d.notMe) return profileAction(() => api.notInterested(d.notMe), correctedNote);
+  if (d.prefsCards) return profileAction(() => api.setPrefs({ cards: +d.prefsCards }), 'Збережено.');
+  if (d.prefsKind) {
+    const off = state.profile?.agent_prefs?.off || [];
+    const change = off.includes(d.prefsKind) ? { turn_on: [d.prefsKind] } : { turn_off: [d.prefsKind] };
+    return profileAction(() => api.setPrefs(change), 'Збережено.');
+  }
+  if (d.prefsMentions) return profileAction(() => api.setPrefs({ mentions: d.prefsMentions === '1' }), 'Збережено.');
+
   if (d.sideDigest) { state.digest.side = d.sideDigest; return loadDigest(); }
   if (d.searchSide) { state.search.side = d.searchSide; render(); return loadSearch(); }
   if (d.days) { state.search.days = +d.days; render(); return loadSearch(); }
@@ -492,4 +745,5 @@ $main.addEventListener('click', async (e) => {
 // ---------- Старт ----------
 loadMe();
 loadRecent();
+api.getProposals().then((r) => setBadge((r.proposals || []).length)).catch(() => {});
 go('chat');

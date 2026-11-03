@@ -30,6 +30,7 @@ from brain.audit.log import AuditLog
 from brain.config import Settings, get_settings
 from brain.db.client import get_db
 from brain.db.repositories import Repos
+from brain.domain import proposals as proposals_domain
 from brain.domain.identity import IdentityError, UserContext, resolve_user
 from brain.integrations.backends import AnthropicBackend
 from brain.tools import catalog
@@ -50,6 +51,55 @@ CLIENT = {"name": "web", "version": VERSION}
 
 class ChatIn(BaseModel):
     content: str = Field(min_length=1, max_length=8000)
+
+
+# The UI's buttons (docs/WEB_PLAN.md step 5.3): each runs one brain tool, as the MCP cards' buttons do.
+Reaction = Literal["useful", "not_useful", "neutral"]
+
+
+class ProposalIn(BaseModel):
+    answer: Literal["accept", "dismiss"]
+    reason: str | None = Field(None, max_length=500)
+
+
+class GoalIn(BaseModel):
+    action: Literal["add", "remove"]
+    text: str = Field(min_length=1, max_length=300)
+
+
+class TopicIn(BaseModel):
+    name: str = Field(min_length=2, max_length=80)
+    action: Literal["follow", "stop"]                 # follow: renew a topic the user already follows
+
+
+class NotInterestedIn(BaseModel):
+    text: str = Field(min_length=1, max_length=120)
+
+
+class PrefsIn(BaseModel):
+    cards: int | None = Field(None, ge=0, le=3)
+    turn_off: list[Literal["goal", "topic", "advice"]] | None = None
+    turn_on: list[Literal["goal", "topic", "advice"]] | None = None
+    mentions: bool | None = None
+
+
+class FeedbackIn(BaseModel):
+    reaction: Reaction | None = None                  # None: a comment added to the earlier rating of the item
+    target_type: Literal["post", "digest_item"]
+    post_id: str | None = None
+    digest_id: str | None = None
+    item_n: int | None = None
+    text: str | None = Field(None, max_length=2000)
+
+
+class RatingIn(BaseModel):
+    reaction: Reaction
+    text: str | None = Field(None, max_length=2000)
+
+
+def short(text: str | None, n: int = 60) -> str:
+    t = " ".join((text or "").split())
+    return t if len(t) <= n else t[:n] + "…"
 
 
 def build_services(settings: Settings) -> Services:
@@ -215,7 +265,48 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
 
     @app.get("/api/profile")
     async def profile(user: WebUser = Depends(web_user)):
-        return await tool(user, "get_profile", {}, "відкрив профіль")
+        result = await tool(user, "get_profile", {}, "відкрив профіль")
+        p = await proposals_domain.prefs_of(svc.repos, (await context(user)).user_id)
+        return {**result, "agent_prefs": {"cards": p.cards, "off": p.off, "mentions": p.mentions}}
+
+    # ---- direct actions: the buttons ------------------------------------------------------------------------
+
+    @app.get("/api/proposals")
+    async def proposals(user: WebUser = Depends(web_user)):
+        return await tool(user, "get_proposals", {}, "відкрив пропозиції")
+
+    @app.post("/api/proposals/{proposal_id}")
+    async def answer_proposal(proposal_id: str, body: ProposalIn, user: WebUser = Depends(web_user)):
+        did = ("так" if body.answer == "accept" else "не цікаво") + f": пропозиція {proposal_id}"
+        return await tool(user, "answer_proposal", {"proposal_id": proposal_id, "answer": body.answer,
+                                                    "reason": body.reason}, did)
+
+    @app.post("/api/goals")
+    async def goal(body: GoalIn, user: WebUser = Depends(web_user)):
+        did = ("додав ціль" if body.action == "add" else "прибрав ціль") + f" «{short(body.text)}»"
+        return await tool(user, "set_goal", body.model_dump(), did)
+
+    @app.post("/api/topics")
+    async def topic(body: TopicIn, user: WebUser = Depends(web_user)):
+        did = ("продовжив тему" if body.action == "follow" else "припинив тему") + f" «{short(body.name)}»"
+        return await tool(user, "track_topic", body.model_dump(), did)
+
+    @app.post("/api/profile/not-interested")
+    async def not_interested(body: NotInterestedIn, user: WebUser = Depends(web_user)):
+        return await tool(user, "correct_profile", {"not_interested": body.text},
+                          f"це не про мене: «{short(body.text)}»")
+
+    @app.post("/api/prefs")
+    async def prefs(body: PrefsIn, user: WebUser = Depends(web_user)):
+        return await tool(user, "set_agent_prefs", body.model_dump(exclude_none=True), "змінив налаштування пропозицій")
+
+    @app.post("/api/feedback")
+    async def feedback(body: FeedbackIn, user: WebUser = Depends(web_user)):
+        post = body.target_type == "post"
+        what = f"пост {body.post_id}" if post else f"пункт {body.digest_id}/{body.item_n}"
+        did = f"оцінив {what}: {body.reaction}" if body.reaction else \
+            f"коментар до {'поста' if post else 'пункту'} {what.split(' ', 1)[1]}"
+        return await tool(user, "record_feedback", body.model_dump(exclude_none=True), did)
 
     # ---- the chat (brain/web/chat.py) ---------------------------------------------------------------------
 
@@ -244,6 +335,27 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
         if not messages:
             raise HTTPException(404, "Немає такого чату")
         return {"id": chat_id, "messages": messages}
+
+    @app.post("/api/chats/{chat_id}/messages/{message_id}/rating")
+    async def rate_reply(chat_id: str, message_id: str, body: RatingIn, user: WebUser = Depends(web_user)):
+        """A rating of one of the analyst's replies: saved as feedback on an answer and on the reply itself."""
+        c, chat_id, ctx = chat_on(), chat_id_ok(chat_id), await context(user)
+        found = await c.reply(ctx, chat_id, message_id)
+        if found is None:
+            raise HTTPException(404, "Немає такої відповіді")
+        question, reply = found
+        prior = reply.get("rating") or {}
+        if body.text and prior.get("feedback_id") and prior.get("reaction") == body.reaction:
+            # a comment after the rating («Не корисно», then why): added to that rating, not a second one
+            result = await tool(user, "record_feedback", {"feedback_id": prior["feedback_id"], "text": body.text},
+                                "коментар до оцінки відповіді аналітика")
+        else:
+            result = await tool(user, "record_feedback", {
+                "reaction": body.reaction, "target_type": "answer", "about": short(question, 190),
+                "text": body.text}, f"оцінив відповідь аналітика: {body.reaction}")
+        await c.rate(ctx, chat_id, message_id, body.reaction, result.get("feedback_id") or prior.get("feedback_id"),
+                     body.text or prior.get("text"))
+        return result
 
     @app.post("/api/chats/{chat_id}/messages")
     async def chat_message(chat_id: str, body: ChatIn, user: WebUser = Depends(web_user)):
