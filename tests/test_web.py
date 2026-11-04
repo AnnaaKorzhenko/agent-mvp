@@ -111,7 +111,8 @@ async def test_login_finds_the_same_user_as_claude_and_reads_go_through_the_tool
         assert "HttpOnly" in cookie and "Secure" in cookie and "samesite=lax" in cookie.lower()
         c.cookies.set(session.SESSION_COOKIE, r.cookies[session.SESSION_COOKIE])
         me = (await c.get("/api/me")).json()
-        assert me == {"name": "Директор", "email": "director@example.com", "picture": None, "dev": False}
+        assert me == {"name": "Директор", "email": "director@example.com", "picture": None, "dev": False,
+                      "admin": False}
         assert (await c.get("/api/profile")).json()["goals"] == ["стежити за НРК"]
         digest = (await c.get("/api/digest")).json()
         assert digest["digests"] and digest["shown_in_widget"]

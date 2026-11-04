@@ -121,6 +121,22 @@ async def test_queued_work_is_debounced_and_runs_when_due(own):
     assert await rt.work_once(datetime.now(timezone.utc) + timedelta(minutes=30)) is None
 
 
+async def test_a_paused_agent_doesnt_run_until_unpaused(own):
+    rt, runs = Runtime(own), AgentRuns(own)
+    done = []
+    rt.register("demo", lambda s, t: asyncio.sleep(0, done.append(t) or Report("ok")))
+    await runs.set_paused("demo", True, by="admin@example.com")
+    await runs.set_paused("demo", True, by="again")                    # pausing twice keeps one marker
+    assert await runs.paused_agents() == {"demo": {"paused_by": "admin@example.com",
+                                                   "since": (await runs.paused_agents())["demo"]["since"]}}
+    assert await rt.run("demo", 1, "now") is None                       # not run directly
+    await rt.submit("demo", 1, "queued")
+    assert await rt.work_once() == "skipped: paused in the console"     # nor from the queue
+    await runs.set_paused("demo", False)
+    assert await rt.run("demo", 1, "later") == "ok" and done == ["later"]
+    assert await own.agent_runs.count_documents({"status": "paused"}) == 0
+
+
 # ---- phase 0: proposals -----------------------------------------------------------------------------------
 
 async def test_a_proposal_is_made_once_shown_a_few_at_a_time_and_goes_stale(own):

@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     # Signs the session cookie; 32+ random bytes, e.g. `python -c "import secrets; print(secrets.token_urlsafe(48))"`
     web_session_secret: SecretStr | None = Field(None, alias="WEB_SESSION_SECRET")
     web_session_days: int = Field(14, ge=1, le=90, alias="WEB_SESSION_DAYS")
+    # Who sees the agents console (brain/web/admin.py): a JSON list of emails, like ALLOWED_EMAILS; empty = nobody
+    admin_emails: list[str] = Field(default_factory=list, alias="ADMIN_EMAILS")
     # The UI's files; default: data-digest-web/frontend in the repo
     web_frontend_dir: str | None = Field(None, alias="WEB_FRONTEND_DIR")
     # The web chat (brain/web/chat.py): Claude through the Anthropic backend (needs ANTHROPIC_API_KEY)
@@ -142,6 +144,7 @@ class Settings(BaseSettings):
         if self.oauth_issuer and not self.resource_url:
             raise ValueError("OAUTH_ISSUER needs PUBLIC_BASE_URL (or OAUTH_AUDIENCE): the MCP URL tokens are for")
         self.allowed_emails = [e.strip().lower() for e in self.allowed_emails if e.strip()]
+        self.admin_emails = [e.strip().lower() for e in self.admin_emails if e.strip()]
         return self
 
 

@@ -33,7 +33,7 @@ def _utc(dt):
 async def runs_part(db, since: datetime) -> None:
     print(f"\n== Runs since {since:%Y-%m-%d %H:%M} UTC")
     rows = await (await db[RUNS].aggregate([
-        {"$match": {"created_at": {"$gte": since}}},
+        {"$match": {"created_at": {"$gte": since}, "status": {"$ne": "paused"}}},     # not the console's markers
         {"$group": {"_id": {"agent": "$agent", "status": "$status"}, "n": {"$sum": 1},
                     "calls": {"$sum": {"$ifNull": ["$model_calls", 0]}},
                     "tin": {"$sum": {"$ifNull": ["$tokens_in", 0]}}, "tout": {"$sum": {"$ifNull": ["$tokens_out", 0]}},

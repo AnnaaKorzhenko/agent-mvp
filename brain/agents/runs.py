@@ -11,6 +11,9 @@
 - Usage per day (runs that called a model, tokens) is summed from here, so budgets hold across restarts and
   workers.
 - Runs expire after KEEP_DAYS (TTL index). Only ids, counts and short outcomes are stored: no user content.
+- An agent paused from the web console (brain/web/admin.py) has one marker {agent, scope: "control", status:
+  "paused", paused_by, created_at}: no ttl_at (it stays until unpaused), outside the queue and the uniqueness
+  indexes (they cover queued and running only). The runtime checks it before every run.
   `output` holds a global agent's result for later runs (the scout's trend snapshot: built from posts, never
   from users' data).
 """
@@ -30,6 +33,8 @@ KEEP_DAYS = 60
 LEASE = timedelta(minutes=15)
 GLOBAL = "global"
 MAX_OUTCOME = 300
+PAUSED = "paused"
+CONTROL = "control"               # the scope of pause markers: not a user, not GLOBAL
 
 
 def _day_start(now: datetime) -> datetime:
@@ -138,6 +143,22 @@ class AgentRuns:
     async def last_created(self, agent: str, scope: Any = GLOBAL) -> datetime | None:
         doc = await self.col.find_one({"agent": agent, "scope": scope}, {"created_at": 1}, sort=[("created_at", -1)])
         return doc["created_at"].replace(tzinfo=timezone.utc) if doc and doc.get("created_at") else None
+
+    async def paused(self, agent: str) -> bool:
+        return await self.col.find_one({"agent": agent, "scope": CONTROL, "status": PAUSED}, {"_id": 1}) is not None
+
+    async def paused_agents(self) -> dict[str, dict]:
+        """{agent: {paused_by, since}} of every paused agent."""
+        return {d["agent"]: {"paused_by": d.get("paused_by"), "since": d.get("created_at")}
+                async for d in self.col.find({"scope": CONTROL, "status": PAUSED})}
+
+    async def set_paused(self, agent: str, paused: bool, by: str | None = None) -> None:
+        key = {"agent": agent, "scope": CONTROL, "status": PAUSED}
+        if paused:
+            await self.col.update_one(key, {"$setOnInsert": {"paused_by": by, "created_at": datetime.now(timezone.utc)}},
+                                      upsert=True)
+        else:
+            await self.col.delete_many(key)
 
     async def running_scopes(self, agent: str, now: datetime | None = None) -> set:
         now = now or datetime.now(timezone.utc)
