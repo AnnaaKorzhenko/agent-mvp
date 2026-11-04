@@ -209,7 +209,6 @@ class AnthropicBackend(_AuditedBackend):
         """One round of a chat with tools (brain/web/chat.py), streamed: yields each text delta (str), then the
         final message. Gated and audited like complete(): refused before anything leaves the process, and one
         model_call per round, also when the caller stops reading (outcome "cancelled")."""
-        import anthropic
         try:
             require_allowed(sensitivity, self.max_label, f"payload for backend '{self.name}'")
         except SensitivityError as e:
@@ -222,19 +221,11 @@ class AnthropicBackend(_AuditedBackend):
                                   "betas": [self.FALLBACK_BETA], "fallbacks": "default"}
         final, outcome, error = None, "cancelled", "the caller stopped reading"
         try:
-            for attempt in (1, 2):
-                try:
-                    async with self.client.beta.messages.stream(**kwargs) as s:
-                        async for event in s:
-                            if event.type == "text":
-                                yield event.text
-                        final = await s.get_final_message()
-                    break
-                except anthropic.BadRequestError as e:    # a model without programmatic tool calling: direct search
-                    search = next((t for t in tools if t.get("type") == self.SEARCH_TOOL), None)
-                    if attempt == 2 or search is None or "allowed_callers" not in str(e):
-                        raise
-                    search["allowed_callers"] = ["direct"]
+            async with self.client.beta.messages.stream(**kwargs) as s:
+                async for event in s:
+                    if event.type == "text":
+                        yield event.text
+                final = await s.get_final_message()
             outcome, error = "ok", None
         except Exception as e:
             outcome, error = "error", f"{type(e).__name__}: {e}"

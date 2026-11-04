@@ -56,10 +56,16 @@ class FakeStream:
 class FakeClaude:
     """Answers each round with the next scripted message; keeps every request."""
 
-    def __init__(self, *rounds):
+    def __init__(self, *rounds, searches=()):
         self.rounds = list(rounds)
+        self.searches = list(searches)            # the research model's answers (messages.create)
         self.requests: list[dict] = []
-        self.beta = SimpleNamespace(messages=SimpleNamespace(stream=self.stream))
+        self.created: list[dict] = []
+        self.beta = SimpleNamespace(messages=SimpleNamespace(stream=self.stream, create=self.create))
+
+    async def create(self, **kwargs):
+        self.created.append(kwargs)
+        return self.searches.pop(0)
 
     def stream(self, **kwargs):
         self.requests.append(copy.deepcopy({k: v for k, v in kwargs.items() if k != "messages"})
@@ -123,10 +129,18 @@ async def test_a_question_runs_a_tool_streams_the_answer_and_is_logged(db):
 
     first = fake.requests[0]
     names = {t["name"] for t in first["tools"]}
-    assert "search_posts" in names and "log_turn" not in names and "web_search" in names
-    assert all("user_message" not in t.get("input_schema", {}).get("properties", {}) for t in first["tools"])
+    assert "search_posts" in names and "log_turn" not in names and "web_research" in names
+    assert not any(t.get("type", "").startswith("web_search") for t in first["tools"])   # searches: web_research
+    schemas = json.dumps([t["input_schema"] for t in first["tools"]])
+    assert '"title": "' not in schemas and '{"type": "null"}' not in schemas and "user_message" not in schemas
+    tools = {t["name"]: t for t in first["tools"]}
+    finding = tools["save_findings"]["input_schema"]["$defs"]["FindingIn"]["properties"]
+    assert {"title", "url", "summary"} <= set(finding)                       # an argument named title stays
+    assert "title" in tools["save_report"]["input_schema"]["properties"]
     assert first["model"] == "claude-sonnet-5-5" and first["thinking"] == {"type": "adaptive"}
-    assert "news brain" in first["system"][0]["text"] and "Today is" in first["system"][0]["text"]
+    static, personal = first["system"]
+    assert static["cache_control"] == {"type": "ephemeral", "ttl": "1h"} and "news brain" in static["text"]
+    assert "Today is" in personal["text"] and "cache_control" not in personal     # per user: after the shared prefix
     second = fake.requests[1]["messages"]
     assert second[-1]["role"] == "user" and second[-1]["content"][0]["tool_use_id"] == "tu_1"
 
@@ -205,3 +219,70 @@ async def test_a_stopped_answer_is_logged_as_cancelled_with_what_was_said(db):
     [said] = [m for m in reply["messages"] if m["role"] == "assistant"]
     assert said["stop_reason"] == "cancelled" and said["content"] == "Шукаю в постах."
     assert len(fake.requests) == 1
+
+
+
+def research_answer():
+    results = [SimpleNamespace(url="https://example.org/a", title="A", page_age="2026-10-30"),
+               SimpleNamespace(url="https://example.org/b", title="B", page_age=None)]
+    usage = SimpleNamespace(input_tokens=900, output_tokens=150, server_tool_use=SimpleNamespace(web_search_requests=2))
+    return SimpleNamespace(stop_reason="end_turn", model="claude-haiku-5-5", usage=usage, content=[
+        block("web_search_tool_result", content=results),
+        block("text", text="Знайдено [A](https://example.org/a) і [вигадане](https://made.up/x).")])
+
+
+async def test_web_research_hands_the_chat_a_brief_and_the_item_ids_reach_the_model(db):
+    fake = FakeClaude(
+        message(block("tool_use", id="tu_1", name="web_research", input={"query": "Спектр-К РЕБ"}), stop="tool_use"),
+        message(block("text", text="Досьє.")), searches=[research_answer()])
+    async with web(app_with(db, fake)) as c:
+        chat_id = (await c.post("/api/chats")).json()["id"]
+        item = {"digest_id": "67b000000000000000000001", "item_n": 2}
+        ev = events((await c.post(f"/api/chats/{chat_id}/messages",
+                                  json={"content": "Глибше про #2: Спектр-К", "item": item})).text)
+        assert ev[-1]["type"] == "done"
+        thread = (await c.get(f"/api/chats/{chat_id}")).json()["messages"]
+    assert fake.requests[0]["messages"][-1]["content"] == \
+        "Глибше про #2: Спектр-К\n\n[item: digest_id 67b000000000000000000001, item_n 2]"
+    assert thread[0]["content"] == "Глибше про #2: Спектр-К"             # the user sees and the log keeps the text
+    search = fake.created[0]
+    assert search["model"] == "claude-haiku-5-5" and search["tools"][0]["max_uses"] == 5
+    result = json.loads(fake.requests[1]["messages"][-1]["content"][0]["content"])
+    assert result["brief"] == "Знайдено [A](https://example.org/a) і вигадане."       # an unknown link is dropped
+    assert [x["url"] for x in result["sources"]] == ["https://example.org/a", "https://example.org/b"]
+    [conv] = await db.conversations.find({"user_id": DEV_UID}).to_list(None)
+    [tool] = [m for m in conv["messages"] if m["role"] == "tool"]
+    assert tool["tool"] == "web_research" and tool["result"]["count"] == 2
+    [reply] = [m for m in conv["messages"] if m["role"] == "assistant"]
+    assert (reply["research_input_tokens"], reply["research_output_tokens"], reply["web_searches"]) == (900, 150, 2)
+    [user] = [m for m in conv["messages"] if m["role"] == "user" and m["via"] == "chat"]
+    assert user["item"] == item
+    assert await db.audit_log.count_documents({"event": "model_call", "details.model": "claude-haiku-5-5"}) == 1
+    # the budget counts the research too: 2 rounds × 120 + 900 + 150 = 1290 tokens used today
+    async with web(app_with(db, FakeClaude(), WEB_CHAT_TOKENS_PER_DAY=1290)) as c:
+        r = await c.post(f"/api/chats/{chat_id}/messages", json={"content": "ще"})
+    assert events(r.text)[0]["type"] == "error" and "ліміт" in events(r.text)[0]["detail"]
+
+
+def test_the_schemas_are_compacted_without_losing_what_the_model_needs():
+    from brain.web.chat import compact
+    schema = {"title": "X", "type": "object", "required": ["a"], "properties": {
+        "title": {"title": "Title", "type": "string"},
+        "a": {"title": "A", "type": "string", "description": "the a"},
+        "b": {"anyOf": [{"type": "integer", "maximum": 3}, {"type": "null"}], "default": None, "title": "B",
+              "description": "the b"},
+        "c": {"anyOf": [{"type": "string"}, {"type": "integer"}], "default": "x"}}}
+    assert compact(schema) == {"type": "object", "required": ["a"], "properties": {
+        "title": {"type": "string"},
+        "a": {"type": "string", "description": "the a"},
+        "b": {"type": "integer", "maximum": 3, "description": "the b"},
+        "c": {"anyOf": [{"type": "string"}, {"type": "integer"}], "default": "x"}}}
+
+
+def test_every_web_description_is_of_a_real_tool():
+    from brain.tools import catalog
+    from brain.web.chat import WEB_DESCRIPTIONS
+    settings = make_settings()
+    specs = catalog.build(Services(settings=settings, repos=SimpleNamespace(db=None), audit=AuditLog(None),
+                                   token=lambda: None))
+    assert set(WEB_DESCRIPTIONS) <= set(specs)

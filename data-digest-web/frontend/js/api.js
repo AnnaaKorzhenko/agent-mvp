@@ -71,15 +71,16 @@ window.api = {
     return http(`/chats/${encodeURIComponent(id)}`);
   },
 
-  // POST /chats/:id/messages { content } -> потік server-sent events, по одному JSON у рядку `data: …`:
+  // POST /chats/:id/messages { content, item? } -> потік server-sent events, по одному JSON у рядку `data: …`:
   //   { type: 'text', text } | { type: 'tool', name } | { type: 'done', message_id, stop_reason } | { type: 'error', detail }
   // onEvent викликається для кожної події; signal (AbortController) зупиняє відповідь.
-  async sendMessage(id, content, onEvent, signal) {
+  // item: { digest_id, item_n } — пункт дайджесту, про який питає кнопка (його id отримує модель).
+  async sendMessage(id, content, onEvent, signal, item) {
     if (USE_MOCK) { await delay(500); onEvent({ type: 'text', text: 'Демо-відповідь.' }); onEvent({ type: 'done' }); return; }
     const res = await fetch(`${API_BASE}/chats/${encodeURIComponent(id)}/messages`, {
       method: 'POST', credentials: 'same-origin', signal,
       headers: { 'Content-Type': 'application/json', 'X-Brain': '1' },
-      body: JSON.stringify({ content })
+      body: JSON.stringify(item ? { content, item } : { content })
     });
     if (res.status === 401) {
       location.href = '/login?next=' + encodeURIComponent(location.pathname + location.hash);

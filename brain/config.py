@@ -63,7 +63,9 @@ class Settings(BaseSettings):
     web_chat_tokens_per_day: int = Field(500_000, ge=0, alias="WEB_CHAT_TOKENS_PER_DAY")     # per user, UTC day
     web_chat_max_rounds: int = Field(8, ge=1, le=20, alias="WEB_CHAT_MAX_ROUNDS")      # model calls per message
     web_chat_history: int = Field(30, ge=2, le=200, alias="WEB_CHAT_HISTORY")          # earlier messages sent
-    web_chat_web_search: bool = Field(True, alias="WEB_CHAT_WEB_SEARCH")               # for deep dives
+    web_chat_web_search: bool = Field(True, alias="WEB_CHAT_WEB_SEARCH")               # web_research, deep dives
+    # web_research runs the searches with this smaller model and hands the chat a short brief
+    web_chat_research_model: str = Field("claude-haiku-5-5", alias="WEB_CHAT_RESEARCH_MODEL")
 
     # --- Model backends (not used by v0 tools) ---
     model_backend: Literal["local", "anthropic"] = Field("local", alias="MODEL_BACKEND")

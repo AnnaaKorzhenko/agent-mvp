@@ -290,15 +290,17 @@ class ConversationLog:
         return r.modified_count == 1
 
     async def assistant_tokens(self, user_id, channel: str, since: datetime) -> int:
-        """Tokens of the replies logged since `since` (input + output), for a daily budget."""
+        """Tokens of the replies logged since `since` (input + output, the web research's too), for a daily
+        budget."""
         if self.col is None:
             return 0
         rows = await (await self.col.aggregate([
             {"$match": {"user_id": user_id, "channel": channel, "updated_at": {"$gte": since}}},
             {"$unwind": "$messages"},
             {"$match": {"messages.role": "assistant", "messages.via": "chat", "messages.created_at": {"$gte": since}}},
-            {"$group": {"_id": None, "n": {"$sum": {"$add": [{"$ifNull": ["$messages.input_tokens", 0]},
-                                                             {"$ifNull": ["$messages.output_tokens", 0]}]}}}},
+            {"$group": {"_id": None, "n": {"$sum": {"$add": [
+                {"$ifNull": [f"$messages.{k}", 0]} for k in ("input_tokens", "output_tokens", "research_input_tokens",
+                                                              "research_output_tokens")]}}}},
         ])).to_list(1)
         return rows[0]["n"] if rows else 0
 

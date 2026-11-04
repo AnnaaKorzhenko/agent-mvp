@@ -49,8 +49,14 @@ CSRF_HEADER = "x-brain"                   # every write sends it: a cross-site f
 CLIENT = {"name": "web", "version": VERSION}
 
 
+class ItemRef(BaseModel):
+    digest_id: str = Field(pattern=r"^[0-9a-f]{24}$")
+    item_n: int = Field(ge=1, le=500)
+
+
 class ChatIn(BaseModel):
     content: str = Field(min_length=1, max_length=8000)
+    item: ItemRef | None = None          # the digest item a button asked about: its ids go to the model
 
 
 # The UI's buttons (docs/WEB_PLAN.md step 5.3): each runs one brain tool, as the MCP cards' buttons do.
@@ -140,7 +146,9 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
     session_age = settings.web_session_days * 86400
     specs = catalog.build(svc)
     backend = backend or chat_backend(settings, svc.audit)
-    chat = Chat(svc, specs, backend, CLIENT) if backend else None
+    research = (AnthropicBackend(svc.audit, settings, client=backend.client, model=settings.web_chat_research_model)
+                if backend and settings.web_chat_web_search else None)
+    chat = Chat(svc, specs, backend, CLIENT, research) if backend else None
     app = FastAPI(title="News brain web", version=VERSION, docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.middleware("http")
@@ -366,7 +374,8 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
             raise HTTPException(422, "Порожнє повідомлення")
 
         async def events():
-            async for event in c.turn(caller(user), ctx, chat_id, text, user.name):
+            async for event in c.turn(caller(user), ctx, chat_id, text, user.name,
+                                      body.item.model_dump() if body.item else None):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
         return StreamingResponse(events(), media_type="text/event-stream",

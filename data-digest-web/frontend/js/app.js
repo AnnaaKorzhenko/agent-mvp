@@ -123,7 +123,7 @@ async function loadRecent() {
 const TOOL_LABEL = {
   search_posts: 'Шукаю в постах…', get_digest: 'Відкриваю дайджест…', get_morning_digest: 'Відкриваю ранковий дайджест…',
   get_post: 'Читаю пост…', get_profile: 'Дивлюсь ваш профіль…', get_insights: 'Згадую, що знаю про вас…',
-  deep_dive: 'Збираю все про це…', save_findings: 'Зберігаю знахідки…', get_analysis: 'Готую аналіз…',
+  deep_dive: 'Збираю все про це…', web_research: 'Шукаю в інтернеті…', save_findings: 'Зберігаю знахідки…', get_analysis: 'Готую аналіз…',
   save_report: 'Зберігаю звіт…', track_topic: 'Додаю тему до відстеження…', set_goal: 'Оновлюю цілі…',
   save_insight: 'Запам’ятовую…', record_feedback: 'Записую відгук…', get_proposals: 'Дивлюсь пропозиції…',
   answer_proposal: 'Виконую…', set_agent_prefs: 'Оновлюю налаштування…', correct_profile: 'Виправляю профіль…'
@@ -250,7 +250,7 @@ function paintLast() {
   window.scrollTo(0, document.body.scrollHeight);
 }
 
-async function ask(text) {
+async function ask(text, item) {
   const t = (text || '').trim();
   if (!t || state.chat.loading) return;
   if (state.screen !== 'chat') go('chat');
@@ -270,7 +270,7 @@ async function ask(text) {
       else if (ev.type === 'error') reply.error = ev.detail;
       else if (ev.type === 'done') reply.id = ev.message_id;
       if (state.chat === chat) paintLast();
-    }, chat.controller.signal);
+    }, chat.controller.signal, item);
   } catch (e) {
     if (e.name === 'AbortError') reply.error = reply.content ? 'Зупинено.' : 'Зупинено до відповіді.';
     else reply.error = 'Не вдалося отримати відповідь: ' + e.message;
@@ -337,7 +337,9 @@ function whyHtml(why) {
 }
 
 function itemHtml(it, side, digestId) {
-  const ask = 'Розкажи детальніше про #' + it.ref + ': ' + it.text.slice(0, 160);
+  // «Пояснити»: з бази новин, без інтернету (дешево); «Глибше»: повне дослідження з пошуком в інтернеті.
+  const about = it.text.slice(0, 160);
+  const item = digestId ? esc(JSON.stringify({ digest_id: digestId, item_n: it.n })) : '';
   return `
     <article class="story">
       <div class="row">
@@ -348,7 +350,10 @@ function itemHtml(it, side, digestId) {
       <p>${esc(it.text)}</p>
       <div class="story-foot">
         <div class="row">${sourcesHtml(it.source_urls)}</div>
-        <button class="btn-outline" data-ask="${esc(ask)}">Запитати аналітика</button>
+        <div class="row">
+          <button class="btn-outline" data-ask="${esc('Поясни #' + it.ref + ' з бази: ' + about)}" data-item="${item}">Пояснити</button>
+          <button class="btn-text" data-ask="${esc('Глибше про #' + it.ref + ': ' + about)}" data-item="${item}">Глибше, з інтернетом</button>
+        </div>
       </div>
       ${digestId ? rateHtml(`d:${digestId}/${it.n}`, 'news', { target_type: 'digest_item', digest_id: digestId, item_n: it.n }) : ''}
     </article>`;
@@ -718,7 +723,12 @@ $main.addEventListener('click', async (e) => {
   if (d.action === 'stop') return stopAnswer();
   if (d.rate) return onRate(d.rate, d.reaction);
   if (d.go) return go(d.go);
-  if (d.ask) return ask(d.ask);
+  if (d.ask) {
+    let item = null;
+    try { item = d.item ? JSON.parse(d.item) : null; } catch (err) { item = null; }
+    if (item && !state.chat.loading) newChat();   // питання про пункт дайджесту — нова тема: без історії іншого чату
+    return ask(d.ask, item);
+  }
 
   // пропозиції
   if (d.yes) return answerProposal(d.yes, 'accept');
