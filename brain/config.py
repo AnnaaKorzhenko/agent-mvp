@@ -108,6 +108,38 @@ class Settings(BaseSettings):
     advisor_every_hours: int = Field(24, ge=6, le=168, alias="ADVISOR_EVERY_HOURS")
     advisor_model: str | None = Field(None, alias="ADVISOR_MODEL")
 
+    # --- Semantic search (brain/domain/semantic.py) on the pipeline's embeddings, collection post_vectors ---
+    # Off without VOYAGE_API_KEY: search_posts then keeps the keyword search.
+    semantic_search: bool = Field(True, alias="SEMANTIC_SEARCH")
+    voyage_api_key: SecretStr | None = Field(None, alias="VOYAGE_API_KEY")
+    # Must match the pipeline (scrapers-3/pipeline/embed.py): the query is embedded with the same model and size
+    embed_model: str = Field("voyage-4-large", alias="EMBED_MODEL")
+    embed_dim: int = Field(1024, alias="EMBED_DIM")
+    # Where post_vectors lives; default MONGO_DB. Local dev on News_dev: VECTORS_DB=News (copy_to_dev skips it)
+    vectors_db: str | None = Field(None, alias="VECTORS_DB")
+    rerank_lite_model: str = Field("rerank-3-lite", alias="RERANK_LITE_MODEL")    # stage 1, many candidates
+    rerank_model: str = Field("rerank-3", alias="RERANK_MODEL")                   # stage 2, top ones with text
+    rerank_candidates: int = Field(100, ge=10, le=300, alias="RERANK_CANDIDATES")
+    rerank_final: int = Field(15, ge=5, le=50, alias="RERANK_FINAL")
+    dedup_sim: float = Field(0.80, ge=0.5, le=1.0, alias="DEDUP_SIM")              # same event from several sources (voyage-4-large)
+    min_rerank: float = Field(0.5, ge=0.0, le=1.0, alias="MIN_RERANK")             # below: not about the query
+    # Voyage limits per model and minute (no payment method: 3 and 10000); waits up to SEMANTIC_MAX_WAIT seconds
+    voyage_rpm: int = Field(3, ge=1, alias="VOYAGE_RPM")
+    voyage_tpm: int = Field(10_000, ge=1000, alias="VOYAGE_TPM")
+    semantic_max_wait: int = Field(30, ge=0, le=300, alias="SEMANTIC_MAX_WAIT")
+    # Share of the per-minute token limit one rerank request (each stage) may use: 0.45 leaves room for a second search in the
+    # same minute (the chat often searches 2-3 times per question). With a payment method: 1.0
+    rerank_lite_share: float = Field(0.45, gt=0.0, le=1.0, alias="RERANK_LITE_SHARE")
+    # When a rerank stage would have to wait for the Voyage limit, skip that stage instead of waiting
+    rerank_skip_when_limited: bool = Field(True, alias="RERANK_SKIP_WHEN_LIMITED")
+    # Diverse results: among posts above MIN_RERANK, pick each next one both relevant and unlike those already
+    # picked (MMR), so one big cluster (e.g. interceptors) doesn't push out other relevant angles (EW, tactics).
+    # SEARCH_DIVERSITY=false: plain order by relevance. Lambda: 1.0 = relevance only, lower = more variety.
+    search_diversity: bool = Field(True, alias="SEARCH_DIVERSITY")
+    diversity_lambda: float = Field(0.7, ge=0.0, le=1.0, alias="DIVERSITY_LAMBDA")
+    # This many best keyword hits always reach the reranker (exact names, wider matches aren't crowded out); 0 = off
+    keyword_quota: int = Field(8, ge=0, le=50, alias="KEYWORD_QUOTA")
+
     # --- Audit and conversation log ---
     audit_ttl_days: int = Field(180, alias="AUDIT_TTL_DAYS")
     # A new conversations document after this much inactivity, or once one holds this many messages
