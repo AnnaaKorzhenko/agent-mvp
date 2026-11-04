@@ -8,6 +8,7 @@ const state = {
   proposals: { items: [], loading: false, error: '', answered: {}, reasonFor: null },
   profile: null,
   profileNote: '',
+  agents: { days: 7, data: null, error: '', note: '' },
   ratings: {},         // що оцінено -> useful | not_useful
   rateError: {},
   commentFor: null     // після «Не корисно»: де показати поле «Чому?»
@@ -31,11 +32,12 @@ function go(screen) {
   if (screen === 'search') loadSearch();
   if (screen === 'profile') loadProfile();
   if (screen === 'proposals') loadProposals();
+  if (screen === 'agents') loadAgents();
 }
 
 function render() {
   const view = { chat: renderChat, digests: renderDigests, search: renderSearch, profile: renderProfile,
-    proposals: renderProposals }[state.screen];
+    proposals: renderProposals, agents: renderAgents }[state.screen];
   $main.innerHTML = view();
   if (state.screen === 'chat') {
     const input = $main.querySelector('.composer input');
@@ -678,6 +680,90 @@ function correctedNote(r) {
   return parts.join(' ');
 }
 
+// ---------- Агенти (лише для адміністраторів) ----------
+const RUN_STATUS = { done: 'готово', failed: 'помилка', skipped: 'пропущено', expired: 'обірвано', running: 'працює', queued: 'у черзі' };
+const KIND_NAME = { goal: 'цілі', topic: 'теми', advice: 'поради' };
+const num = (n) => Number(n || 0).toLocaleString('uk-UA');
+
+function agentHtml(a) {
+  const runs = Object.entries(a.runs || {}).map(([k, n]) => `${RUN_STATUS[k] || k} ${n}`).join(' · ') || 'запусків не було';
+  const idle = !Object.keys(a.runs || {}).length;
+  const last = a.last ? `<p class="sub">Останній: ${esc(RUN_STATUS[a.last.status] || a.last.status)}, ${esc(when(a.last.at))}${a.last.outcome ? ' — ' + esc(a.last.outcome) : ''}</p>` : '';
+  const fails = (a.failures || []).map((f) => `<li><span class="sub">${esc(when(f.at))}</span> ${esc(f.error)}</li>`).join('');
+  return `
+    <article class="story agent ${a.paused ? 'paused' : ''}">
+      <div class="head-row">
+        <div>
+          <h2>${esc(a.label)}</h2>
+          <span class="sub">${esc(a.name)} · ${a.per_user ? 'для кожного користувача' : 'один на всіх'}${a.paused ? ' · <b>на паузі</b>' : ''}</span>
+        </div>
+        <div class="row">
+          <button class="btn-outline" data-agent-run="${esc(a.name)}">${a.per_user ? 'Запустити для мене' : 'Запустити зараз'}</button>
+          <button class="btn-text" data-agent-pause="${esc(a.name)}" data-paused="${a.paused ? '0' : '1'}">${a.paused ? 'Зняти з паузи' : 'Пауза'}</button>
+        </div>
+      </div>
+      <p>${esc(runs)}; викликів моделі ${num(a.model_calls)}, токенів ${num(a.tokens_in)} + ${num(a.tokens_out)}${a.web_searches ? `, пошуків ${num(a.web_searches)}` : ''}</p>
+      <p class="sub">Сьогодні: ${num(a.today.runs)} запусків, ${num(a.today.tokens)} токенів${a.today.web_searches ? `, ${num(a.today.web_searches)} пошуків` : ''}</p>
+      ${last}
+      ${fails ? `<details><summary class="sub">Помилки (${(a.failures || []).length})</summary><ul class="plain">${fails}</ul></details>` : ''}
+      ${idle ? `<p class="sub">Немає запусків за період: можливо, на MCP-сервісі вимкнено ${esc(a.enabled_by)}.</p>` : ''}
+    </article>`;
+}
+
+function renderAgents() {
+  const g = state.agents;
+  const days = chipsHtml([[1, 'Доба'], [7, 'Тиждень'], [30, 'Місяць']], g.days, 'agent-days');
+  let body = '<p class="sub">Завантаження…</p>';
+  if (g.error) body = `<p class="sub">${esc(g.error)}</p>`;
+  else if (g.data) {
+    const d = g.data;
+    const props = (d.proposals || []).length ? `<ul class="plain">${d.proposals.map((p) =>
+      `<li><b>${esc(p.agent)}</b> · ${esc(KIND_NAME[p.kind] || p.kind)}: зроблено ${p.made}; прийнято ${p.accepted}, відхилено ${p.dismissed}, застаріло ${p.stale}, відкрито ${p.open}${p.accept_rate != null ? ` — <b>${Math.round(p.accept_rate * 100)}%</b> прийнято` : ''}</li>`).join('')}</ul>`
+      : '<span class="sub">За період пропозицій не було.</span>';
+    const c = d.chat || {};
+    const queue = (d.queue || []).length ? `<ul class="plain">${d.queue.map((q) =>
+      `<li>${esc(q.agent)} <span class="sub">· ${esc(q.scope)} · ${esc(q.trigger || '')} · ${esc(when(q.not_before))}</span></li>`).join('')}</ul>`
+      : '<span class="sub">Черга порожня.</span>';
+    body = `
+      ${g.note ? `<p class="notice static" role="status">${esc(g.note)}</p>` : ''}
+      <section class="card">
+        <h2>Чат аналітика</h2>
+        <p>${num(c.replies)} відповідей, ${num(c.users)} користувачів; токенів Sonnet ${num(c.input_tokens)} + ${num(c.output_tokens)} (з кешу ${num(c.cache_read_tokens)}), веб-дослідження ${num(c.research_input_tokens)} + ${num(c.research_output_tokens)}, пошуків ${num(c.web_searches)}</p>
+      </section>
+      <section class="card"><h2>Пропозиції агентів</h2>${props}</section>
+      <section class="card"><h2>Черга</h2><p class="sub">Зараз працює: ${num(d.running)}. Запуск із консолі починається протягом хвилини, якщо агент увімкнений на MCP-сервісі.</p>${queue}</section>
+      ${(d.agents || []).map(agentHtml).join('')}`;
+  }
+  return `
+    <div class="page"><div class="page-inner">
+      <div class="head-row">
+        <div>
+          <h1 class="h1">Агенти</h1>
+          <span class="sub">Що агенти зробили, як відповідали на їхні пропозиції, скільки це коштувало. Бачать лише адміністратори.</span>
+        </div>
+      </div>
+      <div class="row"><span class="filter-label">Період</span>${days}</div>
+      ${body}
+    </div></div>`;
+}
+
+let agentsLoad = 0;   // лише найновіша відповідь: повільніша давніша не перезапише свіжу (після паузи чи запуску)
+
+async function loadAgents() {
+  const g = state.agents;
+  const mine = ++agentsLoad;
+  g.error = '';
+  try { const data = await api.getAgents(g.days); if (mine === agentsLoad) g.data = data; }
+  catch (e) { if (mine === agentsLoad) g.error = 'Не вдалося завантажити: ' + e.message; }
+  if (mine === agentsLoad && state.screen === 'agents') render();
+}
+
+async function agentAction(run, note) {
+  try { const r = await run(); state.agents.note = typeof note === 'function' ? note(r) : note; }
+  catch (e) { state.agents.note = 'Не вдалося: ' + e.message; }
+  await loadAgents();
+}
+
 // ---------- Користувач ----------
 async function loadMe() {
   try {
@@ -686,6 +772,7 @@ async function loadMe() {
     document.querySelector('.user-name').textContent = name;
     document.querySelector('.user-role').textContent = me.dev ? 'локальний режим' : (me.email || '');
     document.querySelector('.avatar').textContent = name.trim().charAt(0).toUpperCase();
+    document.getElementById('nav-agents').hidden = !me.admin;
   } catch (e) { console.error(e); }
 }
 
@@ -721,6 +808,12 @@ $main.addEventListener('click', async (e) => {
   const d = el.dataset;
 
   if (d.action === 'stop') return stopAnswer();
+  if (d.agentDays) { state.agents.days = +d.agentDays; state.agents.note = ''; render(); return loadAgents(); }
+  if (d.agentRun) return agentAction(() => api.runAgent(d.agentRun), (r) => `Запуск ${d.agentRun} у черзі (для: ${r.for}).`);
+  if (d.agentPause) {
+    const on = d.paused === '1';
+    return agentAction(() => api.pauseAgent(d.agentPause, on), `${d.agentPause}: ${on ? 'на паузі' : 'знято з паузи'}.`);
+  }
   if (d.rate) return onRate(d.rate, d.reaction);
   if (d.go) return go(d.go);
   if (d.ask) {

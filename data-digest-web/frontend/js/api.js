@@ -155,6 +155,25 @@ window.api = {
     return http('/feedback', { method: 'POST', body: JSON.stringify({ ...target, reaction: reaction || null, text: text || null }) });
   },
 
+  // ---- Консоль агентів (лише ADMIN_EMAILS; brain/web/admin.py) ----
+
+  // GET /admin/agents?days=7 -> { agents: [{ name, label, per_user, enabled_by, runs: {status: n}, model_calls,
+  //   tokens_in, tokens_out, web_searches, last: { status, outcome, at }, failures: [{ at, error }],
+  //   today: { runs, tokens, web_searches }, paused: { by, since } | null }], queue: [...], running,
+  //   proposals: [{ agent, kind, made, accepted, dismissed, stale, open, accept_rate }], chat: { replies, users, ... } }
+  async getAgents(days) {
+    return http(`/admin/agents?days=${encodeURIComponent(days)}`);
+  },
+
+  async pauseAgent(name, paused) {
+    return http(`/admin/agents/${encodeURIComponent(name)}/pause`, { method: 'POST', body: JSON.stringify({ paused }) });
+  },
+
+  // -> { queued: true, for: 'усі' | 'вас' }
+  async runAgent(name) {
+    return http(`/admin/agents/${encodeURIComponent(name)}/run`, { method: 'POST' });
+  },
+
   // POST /chats/:id/messages/:mid/rating { reaction, text? } — оцінка відповіді аналітика
   async rateReply(chatId, messageId, reaction, text) {
     return http(`/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/rating`,

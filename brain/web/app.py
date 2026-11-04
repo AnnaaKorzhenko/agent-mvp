@@ -29,13 +29,13 @@ from brain.audit.conversations import WIDGET_PREFIX
 from brain.audit.log import AuditLog
 from brain.config import Settings, get_settings
 from brain.db.client import get_db
-from brain.db.repositories import Repos
+from brain.db.repositories import Repos, user_key
 from brain.domain import proposals as proposals_domain
 from brain.domain.identity import IdentityError, UserContext, resolve_user
 from brain.integrations.backends import AnthropicBackend
 from brain.tools import catalog
 from brain.tools.base import Origin, Services
-from brain.web import session
+from brain.web import admin, session
 from brain.web.chat import Chat, new_chat_id, valid_chat_id
 from brain.web.auth import Auth0Login, LoginError, WebUser
 
@@ -96,6 +96,10 @@ class FeedbackIn(BaseModel):
     digest_id: str | None = None
     item_n: int | None = None
     text: str | None = Field(None, max_length=2000)
+
+
+class PauseIn(BaseModel):
+    paused: bool
 
 
 class RatingIn(BaseModel):
@@ -249,9 +253,19 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
     async def health():                 # never authenticated: returns no data
         return {"ok": True}
 
+    def is_admin(user: WebUser) -> bool:
+        """The agents console: ADMIN_EMAILS (from the verified Auth0 email), or anyone in local dev mode."""
+        return login is None or bool(user.email and user.email.lower() in settings.admin_emails)
+
+    async def admin_user(user: WebUser = Depends(web_user)) -> WebUser:
+        if not is_admin(user):
+            raise HTTPException(403, "Лише для адміністраторів")
+        return user
+
     @app.get("/api/me")
     async def me(user: WebUser = Depends(web_user)):
-        return {"name": user.name, "email": user.email, "picture": user.picture, "dev": login is None}
+        return {"name": user.name, "email": user.email, "picture": user.picture, "dev": login is None,
+                "admin": is_admin(user)}
 
     @app.get("/api/digest")
     async def digest(side: Literal["ua", "ru", "topics", "both"] = "both", date: str | None = None,
@@ -315,6 +329,32 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
         did = f"оцінив {what}: {body.reaction}" if body.reaction else \
             f"коментар до {'поста' if post else 'пункту'} {what.split(' ', 1)[1]}"
         return await tool(user, "record_feedback", body.model_dump(exclude_none=True), did)
+
+    # ---- the agents console (brain/web/admin.py): ADMIN_EMAILS only ------------------------------------------
+
+    def agent_ok(name: str) -> str:
+        if name not in admin.BY_NAME:
+            raise HTTPException(404, "Немає такого агента")
+        return name
+
+    @app.get("/api/admin/agents")
+    async def agents(days: int = Query(7, ge=1, le=60), user: WebUser = Depends(admin_user)):
+        return await admin.overview(svc.repos.db, days)
+
+    @app.post("/api/admin/agents/{name}/pause")
+    async def pause_agent(name: str, body: PauseIn, user: WebUser = Depends(admin_user)):
+        ctx = await context(user)
+        await admin.set_paused(svc.repos.db, agent_ok(name), body.paused, user.email)
+        await svc.audit.event("admin_action", user_id=ctx.user_id, channel="web",
+                              action="pause" if body.paused else "unpause", agent=name)
+        return {"name": name, "paused": body.paused}
+
+    @app.post("/api/admin/agents/{name}/run")
+    async def run_agent(name: str, user: WebUser = Depends(admin_user)):
+        ctx = await context(user)
+        for_whom = await admin.run_now(svc.repos.db, agent_ok(name), user_key(ctx.user_id))
+        await svc.audit.event("admin_action", user_id=ctx.user_id, channel="web", action="run_now", agent=name)
+        return {"name": name, "queued": True, "for": for_whom}
 
     # ---- the chat (brain/web/chat.py) ---------------------------------------------------------------------
 

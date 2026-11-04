@@ -91,7 +91,9 @@ class Runtime:
         self.agents[name] = _Agent(handler, budget or Budget())
 
     async def over_budget(self, name: str, scope: Any, now: datetime) -> str | None:
-        """Why this run may not start today, or None."""
+        """Why this run may not start now (paused, or over today's budget), or None."""
+        if await self.runs.paused(name):
+            return "paused in the console"
         b = self.agents[name].budget
         if b.runs_per_day is not None or b.tokens_per_day is not None or b.web_searches_per_day is not None:
             used = await self.runs.usage(now, agent=name)

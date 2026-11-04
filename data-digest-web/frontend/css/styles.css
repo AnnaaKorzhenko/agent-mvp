@@ -195,3 +195,9 @@ ul.plain.editable li { display: flex; align-items: baseline; justify-content: sp
 .pref { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 6px 0; }
 .segmented.small button { min-height: 30px; padding: 0 12px; }
 .nav-item .badge[hidden] { display: none; }
+
+/* Консоль агентів (крок 5.4) */
+.nav-item[hidden] { display: none; }
+.agent .head-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.agent.paused { border-color: var(--warn); background: var(--warn-soft); }
+.agent details summary { cursor: pointer; }

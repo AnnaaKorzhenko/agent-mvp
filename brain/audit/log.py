@@ -1,7 +1,7 @@
 """Security log: the audit_log collection keeps security events only, with no content.
 
 Events (docs/CONVERSATIONS_PLAN.md §2): auth_token_accepted, auth_failed, access_denied, sensitivity_filtered,
-model_call, conversation_log_error. Tool activity goes to `conversations` (brain/audit/conversations.py).
+model_call, conversation_log_error, web_login, admin_action (the agents console: pause, run now). Tool activity goes to `conversations` (brain/audit/conversations.py).
 audit_log stays separate because it must survive if a user's conversations are summarized or deleted, it is
 the evidence that nothing sensitive left the system, and it is small.
 
@@ -21,7 +21,7 @@ logger = logging.getLogger("brain.audit")
 
 COLLECTION = "audit_log"
 EVENTS = ("auth_token_accepted", "auth_failed", "access_denied", "sensitivity_filtered", "model_call",
-          "conversation_log_error", "web_login")
+          "conversation_log_error", "web_login", "admin_action")
 # Keys that hold secrets: a token itself (token, access_token, id_token…) but not counts like input_tokens.
 _SECRET_KEYS = re.compile(r"(^|[_-])token$|^bearer|secret|password|api[_-]?key|authorization|cookie", re.I)
 MAX_DETAIL_CHARS = 300
