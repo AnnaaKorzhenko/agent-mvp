@@ -2,11 +2,15 @@
 
 const state = {
   screen: 'chat',
-  chat: { title: 'Новий чат', messages: [], loading: false },
-  digest: { period: 'day', category: 'all', items: [], loading: false },
-  search: { q: '', platform: 'all', lang: 'all', items: [], loading: false },
+  chat: { id: null, title: 'Новий чат', messages: [], loading: false },
+  digest: { side: 'both', data: null, loading: false, error: '' },
+  search: { q: '', side: 'all', days: 7, items: [], note: '', error: '', loading: false },
+  proposals: { items: [], loading: false, error: '', answered: {}, reasonFor: null },
   profile: null,
-  profileSaved: false
+  profileNote: '',
+  ratings: {},         // що оцінено -> useful | not_useful
+  rateError: {},
+  commentFor: null     // після «Не корисно»: де показати поле «Чому?»
 };
 
 const $main = document.getElementById('main');
@@ -16,21 +20,22 @@ const ICON_SEND = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" s
 const ICON_BOT = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h16"/></svg>';
 const ICON_SEARCH = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>';
 
-const CAT_LABEL = { tech: 'Оборонні технології', front: 'Інновації на фронті', invest: 'Оборонні інвестиції' };
-const REL = { high: ['висока', 'high'], medium: ['середня', ''], low: ['низька', 'low'] };
 
 // ---------- Навігація ----------
 function go(screen) {
   state.screen = screen;
+  if (screen === 'profile') state.profileNote = '';
   document.querySelectorAll('.nav-item').forEach((b) => b.classList.toggle('active', b.dataset.screen === screen));
   render();
   if (screen === 'digests') loadDigest();
   if (screen === 'search') loadSearch();
-  if (screen === 'profile' && !state.profile) loadProfile();
+  if (screen === 'profile') loadProfile();
+  if (screen === 'proposals') loadProposals();
 }
 
 function render() {
-  const view = { chat: renderChat, digests: renderDigests, search: renderSearch, profile: renderProfile }[state.screen];
+  const view = { chat: renderChat, digests: renderDigests, search: renderSearch, profile: renderProfile,
+    proposals: renderProposals }[state.screen];
   $main.innerHTML = view();
   if (state.screen === 'chat') {
     const input = $main.querySelector('.composer input');
@@ -40,23 +45,135 @@ function render() {
   }
 }
 
+// ---------- Оцінки (новини й відповіді аналітика) ----------
+// key: d:<digest>/<n> | p:<post> | r:<message>; ціль запам'ятовується під час малювання.
+const rateTargets = {};
+
+function rateHtml(key, kind, target) {
+  rateTargets[key] = target;
+  const cur = state.ratings[key];
+  const btn = (r, label) =>
+    `<button class="rate ${cur === r ? 'on' : ''}" data-rate="${esc(key)}" data-reaction="${r}" aria-pressed="${cur === r}">${label}</button>`;
+  const comment = state.commentFor === key
+    ? `<form class="comment" data-comment="${esc(key)}">
+         <label class="sr-only" for="c-${esc(key)}">Чому не корисно</label>
+         <input id="c-${esc(key)}" name="text" maxlength="2000" autocomplete="off" placeholder="Чому? Необов’язково: допоможе підбирати краще">
+         <button class="btn-outline" type="submit">Надіслати</button>
+       </form>` : '';
+  const err = state.rateError[key] ? `<span class="sub">${esc(state.rateError[key])}</span>` : '';
+  return `<div class="rate-row" data-rate-row="${esc(key)}" data-kind="${kind}">${btn('useful', 'Корисно')}${btn('not_useful', 'Не корисно')}${err}${comment}</div>`;
+}
+
+function repaintRate(key) {
+  document.querySelectorAll('[data-rate-row]').forEach((el) => {
+    if (el.dataset.rateRow === key) el.outerHTML = rateHtml(key, el.dataset.kind, rateTargets[key]);
+  });
+  const input = state.commentFor === key && document.querySelector(`form[data-comment] input`);
+  if (input) input.focus();
+}
+
+async function sendRating(key, reaction, text) {
+  const t = rateTargets[key];
+  if (!t) return;
+  if (t.messageId) return api.rateReply(t.chatId, t.messageId, reaction, text);
+  return api.rate(t, text && !reaction ? null : reaction, text);
+}
+
+async function onRate(key, reaction) {
+  const before = state.ratings[key];
+  state.ratings[key] = reaction;
+  state.commentFor = reaction === 'not_useful' ? key : null;
+  delete state.rateError[key];
+  repaintRate(key);
+  try { await sendRating(key, reaction); }
+  catch (e) {
+    state.ratings[key] = before;
+    state.commentFor = null;
+    state.rateError[key] = 'Не збереглося: ' + e.message;
+    repaintRate(key);
+  }
+}
+
+async function onComment(key, text) {
+  state.commentFor = null;
+  repaintRate(key);
+  if (!text.trim()) return;
+  const t = rateTargets[key];
+  try { await (t && t.messageId ? sendRating(key, 'not_useful', text) : sendRating(key, null, text)); }
+  catch (e) { state.rateError[key] = 'Коментар не зберігся: ' + e.message; repaintRate(key); }
+}
+
+// ---------- Нещодавні чати ----------
+let recentChats = [];
+
 function renderRecent() {
-  document.getElementById('recent-list').innerHTML = DEMO.recentChats
-    .map((t, i) => `<button class="recent-item" data-recent="${i}" title="${esc(t)}">${esc(t)}</button>`)
-    .join('');
+  const box = document.getElementById('recent-list');
+  box.innerHTML = recentChats.length
+    ? recentChats.map((c) =>
+      `<button class="recent-item ${c.id === state.chat.id ? 'on' : ''}" data-recent="${esc(c.id)}" title="${esc(c.title)}">${esc(c.title)}</button>`).join('')
+    : '<span class="sub recent-empty">Тут з’являться ваші чати.</span>';
+}
+
+async function loadRecent() {
+  try { recentChats = (await api.listChats()).chats || []; } catch (e) { recentChats = []; }
+  renderRecent();
 }
 
 // ---------- Чат ----------
+const TOOL_LABEL = {
+  search_posts: 'Шукаю в постах…', get_digest: 'Відкриваю дайджест…', get_morning_digest: 'Відкриваю ранковий дайджест…',
+  get_post: 'Читаю пост…', get_profile: 'Дивлюсь ваш профіль…', get_insights: 'Згадую, що знаю про вас…',
+  deep_dive: 'Збираю все про це…', web_research: 'Шукаю в інтернеті…', save_findings: 'Зберігаю знахідки…', get_analysis: 'Готую аналіз…',
+  save_report: 'Зберігаю звіт…', track_topic: 'Додаю тему до відстеження…', set_goal: 'Оновлюю цілі…',
+  save_insight: 'Запам’ятовую…', record_feedback: 'Записую відгук…', get_proposals: 'Дивлюсь пропозиції…',
+  answer_proposal: 'Виконую…', set_agent_prefs: 'Оновлюю налаштування…', correct_profile: 'Виправляю профіль…'
+};
+const ICON_STOP = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+
+// Невеликий безпечний markdown: спершу екрануємо все, потім — посилання (лише http/https), жирний, курсив, списки, заголовки.
+function inline(s) {
+  return s
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+    .replace(/(^|[\s(])_([^_\n]+)_(?=$|[\s.,;:!?)])/g, '$1<i>$2</i>');
+}
+
+function md(src) {
+  const out = [];
+  let list = null;
+  const close = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  for (const raw of esc(src).split('\n')) {
+    const line = raw.trimEnd();
+    let m;
+    if ((m = line.match(/^\s*[-*•]\s+(.*)$/)) || (m = line.match(/^\s*\d+[.)]\s+(.*)$/))) {
+      const kind = /^\s*\d/.test(line) ? 'ol' : 'ul';
+      if (list !== kind) { close(); out.push(`<${kind}>`); list = kind; }
+      out.push(`<li>${inline(m[1])}</li>`);
+    } else if ((m = line.match(/^#{1,4}\s+(.*)$/))) {
+      close(); out.push(`<h3>${inline(m[1])}</h3>`);
+    } else if (!line.trim()) {
+      close();
+    } else {
+      close(); out.push(`<p>${inline(line)}</p>`);
+    }
+  }
+  close();
+  return out.join('');
+}
+
 function composer(big) {
-  const dis = state.chat.loading ? 'disabled' : '';
+  const busy = state.chat.loading;
+  const button = busy
+    ? `<button class="send stop" type="button" data-action="stop" aria-label="Зупинити">${ICON_STOP}</button>`
+    : `<button class="send" type="submit" aria-label="Надіслати">${ICON_SEND}</button>`;
   if (big) {
     return `
       <form class="composer big" data-form="chat">
         <label for="composer" class="sr-only">Повідомлення аналітику</label>
         <input id="composer" name="q" autocomplete="off" placeholder="Запитайте про новини, сюжети чи тренди…">
         <div class="composer-bar">
-          <div class="row"><span class="mini-pill">Період: 7 днів</span><span class="mini-pill">UA + RU</span></div>
-          <button class="send" type="submit" aria-label="Надіслати" ${dis}>${ICON_SEND}</button>
+          <div class="row"><span class="mini-pill">Пости UA + RU · ваші цілі</span></div>
+          ${button}
         </div>
       </form>`;
   }
@@ -64,18 +181,35 @@ function composer(big) {
     <form class="composer small" data-form="chat">
       <label for="composer" class="sr-only">Повідомлення аналітику</label>
       <input id="composer" name="q" autocomplete="off" placeholder="Уточніть або поставте нове питання…">
-      <button class="send" type="submit" aria-label="Надіслати" ${dis}>${ICON_SEND}</button>
+      ${button}
     </form>`;
 }
 
+function botHtml(m) {
+  const status = m.streaming
+    ? `<div class="bot-status typing">${esc(m.status || 'Думаю…')}</div>` : '';
+  return `
+    <div class="msg-bot">
+      <div class="bot-avatar" aria-hidden="true">${ICON_BOT}</div>
+      <div class="bot-body">
+        <div class="bot-text md">${md(m.content)}</div>
+        ${status}
+        ${m.error ? `<div class="bot-error">${esc(m.error)}</div>` : ''}
+        ${!m.streaming && m.id && m.content && state.chat.id
+          ? rateHtml('r:' + m.id, 'reply', { chatId: state.chat.id, messageId: m.id }) : ''}
+      </div>
+    </div>`;
+}
+
 function renderChat() {
-  const { messages, title, loading } = state.chat;
+  const { messages, title } = state.chat;
   const header = `
     <header class="chat-header">
       <span class="chat-title">${esc(title)}</span>
       <span class="pill">База: News · оновлюється щодня</span>
     </header>`;
 
+  if (state.chat.opening) return `<div class="chat">${header}<div class="empty"><p class="sub">Відкриваю чат…</p></div></div>`;
   if (!messages.length) {
     return `
       <div class="chat">${header}
@@ -93,23 +227,12 @@ function renderChat() {
 
   const items = messages.map((m) => m.role === 'user'
     ? `<div class="msg-user"><div>${esc(m.content)}</div></div>`
-    : `<div class="msg-bot">
-         <div class="bot-avatar" aria-hidden="true">${ICON_BOT}</div>
-         <div class="bot-body">
-           <div class="bot-text">${esc(m.content)}</div>
-           ${m.sources?.length ? `<div class="row">${m.sources.map((s) =>
-             `<a class="source" href="${esc(s.url || '#')}" target="_blank" rel="noopener"><b>${esc(s.platform)}</b>${esc(s.name)}</a>`).join('')}</div>` : ''}
-         </div>
-       </div>`).join('');
-
-  const typing = loading
-    ? `<div class="msg-bot"><div class="bot-avatar" aria-hidden="true">${ICON_BOT}</div><div class="bot-text typing">Аналізую джерела…</div></div>`
-    : '';
+    : botHtml(m)).join('');
 
   return `
     <div class="chat">${header}
       <div class="thread-wrap">
-        <div class="thread" aria-live="polite">${items}${typing}</div>
+        <div class="thread" aria-live="polite">${items}</div>
         <div class="composer-dock">
           ${composer(false)}
           <p class="disclaimer">Відповіді базуються на зібраних постах — перевіряйте джерела.</p>
@@ -118,78 +241,165 @@ function renderChat() {
     </div>`;
 }
 
-async function ask(text) {
+// Під час відповіді оновлюємо лише останнє повідомлення, щоб не перемальовувати весь екран на кожен шматок тексту.
+function paintLast() {
+  const last = state.chat.messages[state.chat.messages.length - 1];
+  const el = $main.querySelector('.thread .msg-bot:last-child');
+  if (state.screen !== 'chat' || !el || !last || last.role !== 'assistant') return;
+  el.outerHTML = botHtml(last);
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
+async function ask(text, item) {
   const t = (text || '').trim();
   if (!t || state.chat.loading) return;
-  if (state.screen !== 'chat') { state.screen = 'chat'; go('chat'); }
-  if (!state.chat.messages.length) state.chat.title = t.length > 48 ? t.slice(0, 48) + '…' : t;
-  state.chat.messages.push({ role: 'user', content: t });
-  state.chat.loading = true;
+  if (state.screen !== 'chat') go('chat');
+  const chat = state.chat;
+  if (!chat.messages.length) chat.title = t.length > 48 ? t.slice(0, 48) + '…' : t;
+  chat.messages.push({ role: 'user', content: t });
+  const reply = { role: 'assistant', content: '', streaming: true, status: 'Думаю…' };
+  chat.messages.push(reply);
+  chat.loading = true;
+  chat.controller = new AbortController();
   render();
   try {
-    const history = state.chat.messages.map(({ role, content }) => ({ role, content }));
-    const res = await api.askAnalyst(history);
-    state.chat.messages.push({ role: 'assistant', content: res.content, sources: res.sources || [] });
+    if (!chat.id) chat.id = (await api.newChat()).id;
+    await api.sendMessage(chat.id, t, (ev) => {
+      if (ev.type === 'text') { reply.content += ev.text; reply.status = 'Пишу…'; }
+      else if (ev.type === 'tool') reply.status = TOOL_LABEL[ev.name] || 'Працюю з даними…';
+      else if (ev.type === 'error') reply.error = ev.detail;
+      else if (ev.type === 'done') reply.id = ev.message_id;
+      if (state.chat === chat) paintLast();
+    }, chat.controller.signal, item);
   } catch (e) {
-    state.chat.messages.push({ role: 'assistant', content: 'Не вдалося отримати відповідь: ' + e.message });
+    if (e.name === 'AbortError') reply.error = reply.content ? 'Зупинено.' : 'Зупинено до відповіді.';
+    else reply.error = 'Не вдалося отримати відповідь: ' + e.message;
   } finally {
-    state.chat.loading = false;
-    if (state.screen === 'chat') render();
+    reply.streaming = false;
+    chat.loading = false;
+    chat.controller = null;
+    if (state.chat === chat && state.screen === 'chat') render();
+    loadRecent();
   }
 }
 
+function stopAnswer() {
+  if (state.chat.controller) state.chat.controller.abort();
+}
+
 function newChat() {
-  state.chat = { title: 'Новий чат', messages: [], loading: false };
+  stopAnswer();
+  state.chat = { id: null, title: 'Новий чат', messages: [], loading: false };
   go('chat');
+  renderRecent();
+}
+
+async function openChat(id) {
+  stopAnswer();
+  const known = recentChats.find((c) => c.id === id);
+  state.chat = { id, title: known ? known.title : 'Чат', messages: [], loading: false, opening: true };
+  go('chat');
+  renderRecent();
+  try {
+    const res = await api.getChat(id);
+    if (state.chat.id !== id) return;
+    state.chat.messages = res.messages.map((m) => {
+      if (m.rating) state.ratings['r:' + m.id] = m.rating;
+      return { id: m.id, role: m.role, content: m.content,
+        error: m.role === 'assistant' && !m.content ? 'Відповідь не завершилась.' : '' };
+    });
+  } catch (e) {
+    if (state.chat.id !== id) return;
+    state.chat.messages = [{ role: 'assistant', content: '', error: 'Не вдалося відкрити чат: ' + e.message }];
+  }
+  state.chat.opening = false;
+  if (state.screen === 'chat') render();
 }
 
 // ---------- Дайджести ----------
+const SIDES = [['both', 'Усе'], ['ua', 'Українські джерела'], ['ru', 'Російські джерела'], ['topics', 'Ваші теми й інтереси']];
+const SIDE_LABEL = { ua: 'Українські джерела', ru: 'Російські джерела', topics: 'Ваші теми й інтереси' };
+const SIDE_NOTE = { ru: 'Заяви російських каналів, а не перевірені факти.' };
+// Емодзі з назв розділів пайплайна: на ноутбуці директора вони сірі квадрати
+const noEmoji = (s) => String(s || '').replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, '').trim();
+
+function host(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ''); } catch (e) { return 'джерело'; }
+}
+
+function sourcesHtml(urls) {
+  return (urls || []).slice(0, 6).map((u) =>
+    `<a class="source" href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(host(u))}</a>`).join('');
+}
+
+function whyHtml(why) {
+  return (why || []).slice(0, 2).map((w) => `<span class="tag accent">${esc(noEmoji(w))}</span>`).join('');
+}
+
+function itemHtml(it, side, digestId) {
+  // «Пояснити»: з бази новин, без інтернету (дешево); «Глибше»: повне дослідження з пошуком в інтернеті.
+  const about = it.text.slice(0, 160);
+  const item = digestId ? esc(JSON.stringify({ digest_id: digestId, item_n: it.n })) : '';
+  return `
+    <article class="story">
+      <div class="row">
+        <span class="tag">#${esc(it.ref)}</span>
+        ${it.is_russian_source_claim ? '<span class="tag high">Заява російських каналів</span>' : ''}
+        ${whyHtml(it.why)}
+      </div>
+      <p>${esc(it.text)}</p>
+      <div class="story-foot">
+        <div class="row">${sourcesHtml(it.source_urls)}</div>
+        <div class="row">
+          <button class="btn-outline" data-ask="${esc('Поясни #' + it.ref + ' з бази: ' + about)}" data-item="${item}">Пояснити</button>
+          <button class="btn-text" data-ask="${esc('Глибше про #' + it.ref + ': ' + about)}" data-item="${item}">Глибше, з інтернетом</button>
+        </div>
+      </div>
+      ${digestId ? rateHtml(`d:${digestId}/${it.n}`, 'news', { target_type: 'digest_item', digest_id: digestId, item_n: it.n }) : ''}
+    </article>`;
+}
+
+function digestHtml(data) {
+  if (!data) return '';
+  const blocks = (data.digests || []).map((d) => `
+    <section class="stories">
+      <h2 class="h2">${esc(SIDE_LABEL[d.side] || d.side)}</h2>
+      ${SIDE_NOTE[d.side] ? `<span class="sub">${esc(SIDE_NOTE[d.side])}</span>` : ''}
+      ${d.sections.map((s) => `
+        ${s.title ? `<div class="section-label">${esc(noEmoji(s.title))}</div>` : ''}
+        ${s.items.map((it) => itemHtml(it, d.side, d.digest_id)).join('')}`).join('')}
+    </section>`).join('');
+  const notes = [data.note, (data.missing_sides || []).length ? 'Ще немає: ' + data.missing_sides.map((m) => SIDE_LABEL[m] || m).join(', ') : '']
+    .filter(Boolean).map((n) => `<p class="sub">${esc(n)}</p>`).join('');
+  const n = (data.proposals || []).length;
+  const offer = n ? `<button class="notice" data-go="proposals">Система має для вас пропозицій: ${n}. Переглянути</button>` : '';
+  if (data.proposals) setBadge(n);
+  return offer + notes + (blocks || '<p class="sub">Дайджесту за цей день немає.</p>');
+}
+
 function renderDigests() {
   const d = state.digest;
-  const cats = DEMO.categories.map((c) =>
-    `<button class="chip ${d.category === c.id ? 'on' : ''}" data-cat="${c.id}">${esc(c.label)}</button>`).join('');
-  const list = d.loading ? '<p class="sub">Завантаження…</p>'
-    : d.items.length ? d.items.map((s) => {
-        const [relText, relCls] = REL[s.relevance] || [s.relevance, ''];
-        return `
-        <article class="story">
-          <div class="row">
-            <span class="tag accent">${esc(CAT_LABEL[s.category] || s.category)}</span>
-            <span class="tag">${esc(s.side)}</span>
-            <span class="tag ${relCls}">Актуальність: ${esc(relText)}</span>
-          </div>
-          <h2>${esc(s.title)}</h2>
-          <p>${esc(s.summary)}</p>
-          <div class="story-foot">
-            <span>${esc(s.posts_count)} постів у сюжеті</span>
-            <button class="btn-outline" data-ask="${esc('Розкажи детальніше про сюжет: ' + s.title)}">Запитати аналітика</button>
-          </div>
-        </article>`;
-      }).join('')
-    : '<p class="sub">За цей період сюжетів немає.</p>';
-
+  const seg = SIDES.map(([id, label]) =>
+    `<button class="${d.side === id ? 'on' : ''}" data-side-digest="${id}">${esc(label)}</button>`).join('');
   return `
     <div class="page"><div class="page-inner">
       <div class="head-row">
         <div>
           <h1 class="h1">Дайджест</h1>
-          <span class="sub">${d.period === 'day' ? 'Сьогодні' : 'Останні 7 днів'} · сюжети згруповано з постів Telegram, X та сайтів</span>
-        </div>
-        <div class="segmented" role="group" aria-label="Період">
-          <button class="${d.period === 'day' ? 'on' : ''}" data-period="day">Сьогодні</button>
-          <button class="${d.period === 'week' ? 'on' : ''}" data-period="week">Тиждень</button>
+          <span class="sub">${d.data?.date ? esc(d.data.date) + ' · ' : ''}упорядковано за вашими цілями та інтересами</span>
         </div>
       </div>
-      <div class="row">${cats}</div>
-      <div class="stories">${list}</div>
+      <div class="segmented" role="group" aria-label="Джерела">${seg}</div>
+      ${d.loading ? '<p class="sub">Завантаження…</p>' : d.error ? `<p class="sub">${esc(d.error)}</p>` : digestHtml(d.data)}
     </div></div>`;
 }
 
 async function loadDigest() {
   state.digest.loading = true;
+  state.digest.error = '';
   if (state.screen === 'digests') render();
-  try { state.digest.items = await api.getDigest(state.digest.period, state.digest.category); }
-  catch (e) { state.digest.items = []; console.error(e); }
+  try { state.digest.data = await api.getDigest(state.digest.side); }
+  catch (e) { state.digest.data = null; state.digest.error = 'Не вдалося завантажити дайджест: ' + e.message; }
   state.digest.loading = false;
   if (state.screen === 'digests') render();
 }
@@ -197,22 +407,31 @@ async function loadDigest() {
 // ---------- Пошук ----------
 function chipsHtml(list, current, attr) {
   return list.map(([id, label]) =>
-    `<button class="chip ${current === id ? 'on' : ''}" data-${attr}="${id}">${esc(label)}</button>`).join('');
+    `<button class="chip ${String(current) === String(id) ? 'on' : ''}" data-${attr}="${id}">${esc(label)}</button>`).join('');
+}
+
+function when(iso) {
+  const d = new Date(iso);
+  return isNaN(d) ? '' : d.toLocaleString('uk-UA', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 }
 
 function resultsHtml() {
   const s = state.search;
   if (s.loading) return '<div class="no-results">Пошук…</div>';
-  if (!s.items.length) return '<div class="no-results">Нічого не знайдено. Спробуйте інші слова або зніміть фільтри.</div>';
+  if (s.error) return `<div class="no-results">${esc(s.error)}</div>`;
+  if (!s.items.length) return `<div class="no-results">${esc(s.note || 'Нічого не знайдено. Спробуйте інші слова або більше днів.')}</div>`;
   return s.items.map((r) => `
     <div class="result">
       <div class="result-meta">
-        <span class="platform">${esc(r.platform)}</span>
-        <span class="src">${esc(r.source)}</span>
-        <span class="when">${esc(r.lang)} · ${esc(r.date)}</span>
-        <span class="tag">${esc(CAT_LABEL[r.category] || r.category)}</span>
+        <span class="platform">#${esc(r.ref)}</span>
+        <span class="src">${r.channel?.username ? '@' + esc(r.channel.username) : 'Telegram'}</span>
+        <span class="when">${r.source_side === 'ru' ? 'RU' : 'UA'} · ${esc(when(r.published_at))}</span>
+        ${r.is_russian_source_claim ? '<span class="tag high">Заява російських каналів</span>' : ''}
+        ${whyHtml(r.why)}
       </div>
       <p>${esc(r.summary)}</p>
+      ${r.post_url ? `<div class="row"><a class="source" href="${esc(r.post_url)}" target="_blank" rel="noopener noreferrer">Відкрити пост</a></div>` : ''}
+      ${r.post_id ? rateHtml('p:' + r.post_id, 'news', { target_type: 'post', post_id: r.post_id }) : ''}
     </div>`).join('');
 }
 
@@ -224,26 +443,30 @@ function renderSearch() {
       <div class="searchbox">
         ${ICON_SEARCH}
         <label for="post-search" class="sr-only">Пошук</label>
-        <input id="post-search" value="${esc(s.q)}" autocomplete="off" placeholder="Ключові слова, назва каналу, технологія…">
+        <input id="post-search" value="${esc(s.q)}" autocomplete="off" placeholder="Ключові слова: назва, технологія, компанія…">
       </div>
       <div class="filters">
-        <div class="row"><span class="filter-label">Платформа</span>${chipsHtml([['all', 'Усі'], ['Telegram', 'Telegram'], ['X', 'X'], ['Web', 'Сайти']], s.platform, 'platform')}</div>
-        <div class="row"><span class="filter-label">Мова</span>${chipsHtml([['all', 'Усі'], ['UA', 'UA'], ['RU', 'RU'], ['EN', 'EN']], s.lang, 'lang')}</div>
+        <div class="row"><span class="filter-label">Джерела</span>${chipsHtml([['all', 'Усі'], ['ua', 'UA'], ['ru', 'RU']], s.side, 'search-side')}</div>
+        <div class="row"><span class="filter-label">Період</span>${chipsHtml([[1, 'Доба'], [7, 'Тиждень'], [30, 'Місяць']], s.days, 'days')}</div>
       </div>
-      <span class="sub" id="results-count">Знайдено постів: ${s.items.length}</span>
+      <span class="sub" id="results-count">${s.q.trim().length >= 2 ? 'Знайдено постів: ' + s.items.length : ''}</span>
       <div class="results" id="results">${resultsHtml()}</div>
     </div></div>`;
 }
 
 async function loadSearch() {
   const s = state.search;
-  try { s.items = await api.searchPosts(s.q, s.platform, s.lang); }
-  catch (e) { s.items = []; console.error(e); }
+  s.error = '';
+  if (s.q.trim().length < 2) { s.items = []; s.note = 'Введіть, що шукати.'; }
+  else {
+    try { const r = await api.searchPosts(s.q, s.side, s.days); s.items = r.results || []; s.note = r.note || ''; }
+    catch (e) { s.items = []; s.error = 'Пошук не вдався: ' + e.message; }
+  }
   // оновлюємо лише результати, щоб не збивати фокус у полі пошуку
   const box = document.getElementById('results');
   if (box) {
     box.innerHTML = resultsHtml();
-    document.getElementById('results-count').textContent = 'Знайдено постів: ' + s.items.length;
+    document.getElementById('results-count').textContent = s.q.trim().length >= 2 ? 'Знайдено постів: ' + s.items.length : '';
   }
 }
 
@@ -251,59 +474,220 @@ let searchTimer;
 function onSearchInput(value) {
   state.search.q = value;
   clearTimeout(searchTimer);
-  searchTimer = setTimeout(loadSearch, 250);
+  searchTimer = setTimeout(loadSearch, 350);
+}
+
+// ---------- Пропозиції ----------
+const KIND_LABEL = { goal: 'Ціль', topic: 'Тема', advice: 'Порада' };
+
+function setBadge(n) {
+  const b = document.getElementById('proposals-badge');
+  if (!b) return;
+  b.hidden = !n;
+  b.textContent = n ? String(n) : '';
+}
+
+function proposalHtml(p) {
+  const pr = state.proposals;
+  const done = pr.answered[p.proposal_id];
+  let actions;
+  if (done) actions = `<p class="sub done">${esc(done)}</p>`;
+  else if (pr.reasonFor === p.proposal_id) {
+    actions = `
+      <form class="reason" data-reason="${esc(p.proposal_id)}">
+        <label class="sr-only" for="r-${esc(p.proposal_id)}">Чому ні</label>
+        <input id="r-${esc(p.proposal_id)}" name="reason" maxlength="500" autocomplete="off" placeholder="Чому ні? Необов’язково: система не пропонуватиме схоже">
+        <div class="row">
+          <button class="btn-outline" type="submit">Відхилити</button>
+          <button class="btn-text" type="button" data-cancel-reason="1">Скасувати</button>
+        </div>
+      </form>`;
+  } else {
+    actions = `
+      <div class="row">
+        <button class="btn-primary" data-yes="${esc(p.proposal_id)}">Так, ${esc(p.yes || 'прийняти')}</button>
+        <button class="btn-outline" data-no="${esc(p.proposal_id)}">Ні</button>
+      </div>`;
+  }
+  return `
+    <article class="story proposal">
+      <div class="row"><span class="tag accent">${esc(KIND_LABEL[p.kind] || p.kind)}</span></div>
+      <p><b>${esc(p.title)}</b></p>
+      ${p.why ? `<p class="sub">${esc(p.why)}</p>` : ''}
+      ${(p.links || []).length ? `<div class="row">${sourcesHtml(p.links)}</div>` : ''}
+      ${actions}
+    </article>`;
+}
+
+function renderProposals() {
+  const pr = state.proposals;
+  const body = pr.loading ? '<p class="sub">Завантаження…</p>'
+    : pr.error ? `<p class="sub">${esc(pr.error)}</p>`
+    : pr.items.length ? pr.items.map(proposalHtml).join('')
+    : '<p class="sub">Нових пропозицій немає. Система пропонує цілі, теми й поради, коли помічає щось для вас.</p>';
+  return `
+    <div class="page"><div class="page-inner narrow">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <h1 class="h1">Пропозиції</h1>
+        <span class="sub">Що система помітила для вас. Нічого не змінюється, доки ви не скажете «так». Скільки й яких пропозицій показувати — у профілі.</span>
+      </div>
+      ${body}
+    </div></div>`;
+}
+
+async function loadProposals() {
+  const pr = state.proposals;
+  pr.loading = !pr.items.length;
+  pr.error = '';
+  if (state.screen === 'proposals') render();
+  try {
+    pr.items = (await api.getProposals()).proposals || [];
+    setBadge(pr.items.filter((p) => !pr.answered[p.proposal_id]).length);
+  } catch (e) { pr.error = 'Не вдалося завантажити пропозиції: ' + e.message; }
+  pr.loading = false;
+  if (state.screen === 'proposals') render();
+}
+
+async function answerProposal(id, answer, reason) {
+  const pr = state.proposals;
+  pr.reasonFor = null;
+  pr.answered[id] = answer === 'accept' ? 'Виконую…' : 'Зберігаю…';
+  render();
+  try {
+    const r = await api.answerProposal(id, answer, reason);
+    pr.answered[id] = r.accepted ? 'Готово: ' + r.done : 'Відхилено. Система врахує це.';
+    setBadge(pr.items.filter((p) => !pr.answered[p.proposal_id]).length);
+    if (r.ask) { newChat(); ask(r.ask); return; }      // порада, чиє «так» — запит до аналітика
+  } catch (e) { delete pr.answered[id]; pr.error = 'Не вдалося: ' + e.message; }
+  if (state.screen === 'proposals') render();
 }
 
 // ---------- Профіль ----------
+const ABOUT_LABEL = {
+  summary: 'Коротко про вас', interest: 'Інтереси', intent: 'Над чим ви зараз працюєте', preference: 'Як ви хочете отримувати новини',
+  goal: 'Цілі, які ви згадували', tracked: 'Що ви відстежуєте', known: 'Що ви вже знаєте', avoid: 'Чого уникати',
+  fact: 'Про вашу роботу', feedback: 'Ваші відгуки'
+};
+const CORRECTABLE = new Set(['interest', 'intent']);   // те, що система вивела сама: можна сказати «це не про мене»
+const TOPIC_STATUS = { active: 'відстежується', explored: 'досліджено', expired: 'завершено', stopped: 'зупинено' };
+const PREF_KINDS = [['goal', 'Цілі'], ['topic', 'Теми'], ['advice', 'Поради']];
+
+function listHtml(items, empty) {
+  return items.length ? `<ul class="plain">${items.map((t) => `<li>${esc(t)}</li>`).join('')}</ul>` : `<span class="sub">${esc(empty)}</span>`;
+}
+
+function goalsHtml(goals) {
+  return `
+    ${goals.length ? `<ul class="plain editable">${goals.map((g) => `
+      <li><span>${esc(g)}</span><button class="btn-text" data-goal-remove="${esc(g)}">Прибрати</button></li>`).join('')}</ul>`
+      : '<span class="sub">Цілей ще немає.</span>'}
+    <form class="inline-form" data-form="goal">
+      <label for="goal-new" class="sr-only">Нова ціль</label>
+      <input id="goal-new" name="text" maxlength="300" autocomplete="off" placeholder="Нова ціль, наприклад: стежити за розвитком НРК">
+      <button class="btn-outline" type="submit">Додати</button>
+    </form>`;
+}
+
+function topicsHtml(topics) {
+  if (!topics.length) return '<span class="sub">Ви ще нічого не відстежуєте. Тему можна додати з пропозицій або попросити аналітика.</span>';
+  return `<ul class="plain editable">${topics.map((t) => {
+    const until = t.expires_at && t.status === 'active' ? ' до ' + esc(new Date(t.expires_at).toLocaleDateString('uk-UA')) : '';
+    const btn = t.status === 'active' ? `<button class="btn-text" data-topic="${esc(t.name)}" data-topic-action="stop">Припинити</button>`
+      : t.status === 'expired' ? `<button class="btn-text" data-topic="${esc(t.name)}" data-topic-action="follow">Продовжити на 30 днів</button>` : '';
+    return `<li><span><b>${esc(t.name)}</b> <span class="sub">· ${esc(TOPIC_STATUS[t.status] || t.status)}${until}</span></span>${btn}</li>`;
+  }).join('')}</ul>`;
+}
+
+function aboutHtml(kind, texts) {
+  if (!CORRECTABLE.has(kind)) return listHtml(texts, '');
+  return `<ul class="plain editable">${texts.map((t) => `
+    <li><span>${esc(t)}</span><button class="btn-text" data-not-me="${esc(t.slice(0, 120))}">Це не про мене</button></li>`).join('')}</ul>`;
+}
+
+function prefsHtml(pr) {
+  const cards = [0, 1, 2, 3].map((n) =>
+    `<button class="${pr.cards === n ? 'on' : ''}" data-prefs-cards="${n}">${n === 0 ? 'Жодної' : n}</button>`).join('');
+  const kinds = PREF_KINDS.map(([k, label]) => {
+    const on = !pr.off.includes(k);
+    return `<button class="chip ${on ? 'on' : ''}" data-prefs-kind="${k}" aria-pressed="${on}">${label}</button>`;
+  }).join('');
+  return `
+    <div class="pref"><span class="filter-label">Пропозицій у дайджесті</span><div class="segmented small" role="group" aria-label="Скільки пропозицій">${cards}</div></div>
+    <div class="pref"><span class="filter-label">Що пропонувати</span><div class="row">${kinds}</div></div>
+    <div class="pref"><span class="filter-label">У розмові з аналітиком</span>
+      <button class="chip ${pr.mentions ? 'on' : ''}" data-prefs-mentions="${pr.mentions ? '0' : '1'}" aria-pressed="${pr.mentions}">${pr.mentions ? 'Згадувати пропозиції' : 'Не згадувати'}</button></div>`;
+}
+
 function renderProfile() {
   const p = state.profile;
   if (!p) return '<div class="page"><div class="page-inner narrow"><p class="sub">Завантаження…</p></div></div>';
-  const interests = DEMO.interests.map((i) => {
-    const on = p.interests.includes(i.id);
-    return `<button class="chip ${on ? 'on' : ''}" aria-pressed="${on}" data-interest="${i.id}">${esc(i.label)}</button>`;
-  }).join('');
-  const schedules = [['daily', 'Щодня о 08:00'], ['weekly', 'Щотижня, понеділок'], ['off', 'Лише на запит']]
-    .map(([id, l]) => `<button class="chip ${p.schedule === id ? 'on' : ''}" data-schedule="${id}">${l}</button>`).join('');
-  const sides = [['UA', 'Українські джерела'], ['RU', 'Російські джерела'], ['Світ', 'Міжнародні джерела']]
-    .map(([id, l]) => {
-      const on = p.sides.includes(id);
-      return `<button class="chip ${on ? 'on' : ''}" aria-pressed="${on}" data-side="${id}">${l}</button>`;
-    }).join('');
-
+  if (p.error) return `<div class="page"><div class="page-inner narrow"><p class="sub">${esc(p.error)}</p></div></div>`;
+  const topics = (p.topics || []).filter((t) => t.status !== 'stopped');
+  const about = Object.entries(p.about_user || {}).filter(([k]) => k !== 'tracked' && k !== 'goal');
   return `
     <div class="page"><div class="page-inner narrow">
       <div style="display:flex;flex-direction:column;gap:6px">
         <h1 class="h1">Профіль та інтереси</h1>
-        <span class="sub">Від цього залежить, що потрапляє у ваш персональний дайджест і як відповідає аналітик.</span>
+        <span class="sub">Від цього залежить, що потрапляє у «Для вас» і як відповідає аналітик.</span>
       </div>
+      ${state.profileNote ? `<p class="notice static" role="status">${esc(state.profileNote)}</p>` : ''}
       <section class="card">
-        <h2>Теми інтересу</h2>
-        <div class="row">${interests}</div>
-        <span class="sub">Вибрано: ${p.interests.length}</span>
+        <h2>Цілі</h2>
+        ${goalsHtml(p.goals || [])}
       </section>
       <section class="card">
-        <h2>Розсилка дайджесту</h2>
-        <div class="row">${schedules}</div>
-        <span class="sub">Дайджест приходить у Telegram-бот і з'являється тут, у розділі «Дайджести».</span>
+        <h2>Теми, які ви відстежуєте</h2>
+        ${topicsHtml(topics)}
       </section>
+      ${about.map(([kind, texts]) => `
+        <section class="card">
+          <h2>${esc(ABOUT_LABEL[kind] || kind)}</h2>
+          ${aboutHtml(kind, texts)}
+        </section>`).join('')}
+      ${(p.top_tags || []).length ? `
       <section class="card">
-        <h2>Джерела в дайджесті</h2>
-        <div class="row">${sides}</div>
-      </section>
-      <div class="row">
-        <button class="btn-primary" data-action="save-profile">Зберегти</button>
-        ${state.profileSaved ? '<span class="saved" role="status">Налаштування збережено</span>' : ''}
-      </div>
+        <h2>Що ви читаєте найбільше</h2>
+        <div class="row">${p.top_tags.slice(0, 12).map((t) => `<span class="tag">${esc(t.tag)}</span>`).join('')}</div>
+      </section>` : ''}
+      ${p.agent_prefs ? `
+      <section class="card">
+        <h2>Пропозиції системи</h2>
+        ${prefsHtml(p.agent_prefs)}
+      </section>` : ''}
     </div></div>`;
 }
 
 async function loadProfile() {
   try { state.profile = await api.getProfile(); }
-  catch (e) { console.error(e); state.profile = { interests: [], schedule: 'daily', sides: [] }; }
+  catch (e) { state.profile = { error: 'Не вдалося завантажити профіль: ' + e.message }; }
   if (state.screen === 'profile') render();
 }
 
-const toggle = (arr, v) => (arr.includes(v) ? arr.filter((x) => x !== v) : arr.concat([v]));
+// Дія в профілі: виконати, показати підтвердження, перечитати профіль.
+async function profileAction(run, note) {
+  state.profileNote = 'Зберігаю…';
+  render();
+  try { const r = await run(); state.profileNote = typeof note === 'function' ? note(r) : note; }
+  catch (e) { state.profileNote = 'Не вдалося: ' + e.message; }
+  await loadProfile();
+}
+
+function correctedNote(r) {
+  const parts = [`Зрозуміло: «${r.not_interested}» вас не цікавить. Такі новини будуть нижче.`];
+  if ((r.followed_matching || []).length) parts.push(`Ви відстежуєте схожі теми (${r.followed_matching.join(', ')}): якщо й вони не потрібні, натисніть «Припинити» біля них.`);
+  return parts.join(' ');
+}
+
+// ---------- Користувач ----------
+async function loadMe() {
+  try {
+    const me = await api.me();
+    const name = me.name || me.email || 'Ви';
+    document.querySelector('.user-name').textContent = name;
+    document.querySelector('.user-role').textContent = me.dev ? 'локальний режим' : (me.email || '');
+    document.querySelector('.avatar').textContent = name.trim().charAt(0).toUpperCase();
+  } catch (e) { console.error(e); }
+}
 
 // ---------- Події ----------
 document.querySelector('.sidebar').addEventListener('click', (e) => {
@@ -311,18 +695,20 @@ document.querySelector('.sidebar').addEventListener('click', (e) => {
   if (nav) return go(nav.dataset.screen);
   if (e.target.closest('[data-action="new-chat"]')) return newChat();
   const recent = e.target.closest('[data-recent]');
-  if (recent) {
-    state.chat = { title: DEMO.recentChats[+recent.dataset.recent], messages: [], loading: false };
-    go('chat');
-    ask(state.chat.title);
-  }
+  if (recent) return openChat(recent.dataset.recent);
 });
 
 $main.addEventListener('submit', (e) => {
-  const form = e.target.closest('[data-form="chat"]');
+  const form = e.target.closest('form');
   if (!form) return;
   e.preventDefault();
-  ask(form.q.value);
+  if (form.dataset.form === 'chat') return ask(form.q.value);
+  if (form.dataset.comment) return onComment(form.dataset.comment, form.text.value);
+  if (form.dataset.reason) return answerProposal(form.dataset.reason, 'dismiss', form.reason.value.trim());
+  if (form.dataset.form === 'goal') {
+    const text = form.text.value.trim();
+    if (text) profileAction(() => api.setGoal('add', text), `Ціль додано: «${text}».`);
+  }
 });
 
 $main.addEventListener('input', (e) => {
@@ -334,21 +720,40 @@ $main.addEventListener('click', async (e) => {
   if (!el) return;
   const d = el.dataset;
 
-  if (d.ask) return ask(d.ask);
-  if (d.period) { state.digest.period = d.period; return loadDigest(); }
-  if (d.cat) { state.digest.category = d.cat; return loadDigest(); }
-  if (d.platform) { state.search.platform = d.platform; render(); return loadSearch(); }
-  if (d.lang) { state.search.lang = d.lang; render(); return loadSearch(); }
-  if (d.interest) { state.profile.interests = toggle(state.profile.interests, d.interest); state.profileSaved = false; return render(); }
-  if (d.side) { state.profile.sides = toggle(state.profile.sides, d.side); state.profileSaved = false; return render(); }
-  if (d.schedule) { state.profile.schedule = d.schedule; state.profileSaved = false; return render(); }
-  if (d.action === 'save-profile') {
-    await api.saveProfile(state.profile);
-    state.profileSaved = true;
-    render();
+  if (d.action === 'stop') return stopAnswer();
+  if (d.rate) return onRate(d.rate, d.reaction);
+  if (d.go) return go(d.go);
+  if (d.ask) {
+    let item = null;
+    try { item = d.item ? JSON.parse(d.item) : null; } catch (err) { item = null; }
+    if (item && !state.chat.loading) newChat();   // питання про пункт дайджесту — нова тема: без історії іншого чату
+    return ask(d.ask, item);
   }
+
+  // пропозиції
+  if (d.yes) return answerProposal(d.yes, 'accept');
+  if (d.no) { state.proposals.reasonFor = d.no; render(); const i = $main.querySelector('form[data-reason] input'); if (i) i.focus(); return; }
+  if (d.cancelReason) { state.proposals.reasonFor = null; return render(); }
+
+  // профіль
+  if (d.goalRemove) return profileAction(() => api.setGoal('remove', d.goalRemove), `Ціль прибрано: «${d.goalRemove}».`);
+  if (d.topic) return profileAction(() => api.setTopic(d.topic, d.topicAction), (r) => r.confirmation || 'Збережено.');
+  if (d.notMe) return profileAction(() => api.notInterested(d.notMe), correctedNote);
+  if (d.prefsCards) return profileAction(() => api.setPrefs({ cards: +d.prefsCards }), 'Збережено.');
+  if (d.prefsKind) {
+    const off = state.profile?.agent_prefs?.off || [];
+    const change = off.includes(d.prefsKind) ? { turn_on: [d.prefsKind] } : { turn_off: [d.prefsKind] };
+    return profileAction(() => api.setPrefs(change), 'Збережено.');
+  }
+  if (d.prefsMentions) return profileAction(() => api.setPrefs({ mentions: d.prefsMentions === '1' }), 'Збережено.');
+
+  if (d.sideDigest) { state.digest.side = d.sideDigest; return loadDigest(); }
+  if (d.searchSide) { state.search.side = d.searchSide; render(); return loadSearch(); }
+  if (d.days) { state.search.days = +d.days; render(); return loadSearch(); }
 });
 
 // ---------- Старт ----------
-renderRecent();
+loadMe();
+loadRecent();
+api.getProposals().then((r) => setBadge((r.proposals || []).length)).catch(() => {});
 go('chat');

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -133,6 +134,33 @@ class CallRecord:
         return [tool_msg, *replies, *words]
 
 
+@dataclass
+class Said:
+    """A message of our own chat (brain/web/chat.py), logged as it is: the user's words, or the model's whole
+    reply with its model, tokens and timing (`meta`). The chat sees the messages itself, so nothing is guessed."""
+    role: str                         # "user" | "assistant"
+    content: str
+    meta: dict = field(default_factory=dict)
+    tool: str | None = None           # for log()'s error report: not a tool call
+    new_message: bool = True          # a user message is always a new one, even with the same words as the last
+    message_id: ObjectId = field(default_factory=ObjectId)
+    word_ids: dict[str, ObjectId] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.role == "user":       # the tools of this turn carry the same text: they link to this message
+            self.word_ids["chat"] = self.message_id
+
+    def chat(self) -> str | None:
+        return self.content if self.role == "user" else None
+
+    def messages(self, now: datetime, skip_chat: bool = False) -> list[dict]:
+        msg = {"id": self.message_id, "role": self.role, "created_at": now,
+               "content": self.content[:MAX_MESSAGE_CHARS * 4], "via": "chat", **self.meta}
+        if self.role == "assistant":
+            msg["written_by"] = "model"
+        return [msg]
+
+
 class ConversationLog:
     def __init__(self, db: AsyncDatabase | None, audit: AuditLog, idle_minutes: int = 30,
                  max_messages: int = 500):
@@ -142,7 +170,7 @@ class ConversationLog:
         self.max_messages = max_messages
 
     async def log(self, *, user_id: int | str | ObjectId, channel: str, mcp_session_id: str | None,
-                  client: dict | None, record: CallRecord) -> ObjectId | None:
+                  client: dict | None, record: CallRecord | Said) -> ObjectId | None:
         """Appends the call to the user's session document. Returns the document id, or None on failure."""
         if self.col is None:
             return None
@@ -177,7 +205,8 @@ class ConversationLog:
         chat = record.chat()
         h = chat_hash(chat) if chat else None
         last = (current or {}).get("last_chat") or {}
-        repeat = bool(h and last.get("hash") == h and current and current["updated_at"] >= now - self.idle)
+        repeat = bool(h and not getattr(record, "new_message", False) and last.get("hash") == h and current
+                      and current["updated_at"] >= now - self.idle)
         if repeat:                          # another tool for the same message: link to the stored one
             record.word_ids["chat"] = last["id"]
         msgs = record.messages(now, skip_chat=repeat)
@@ -217,6 +246,63 @@ class ConversationLog:
                 if attempt == 2:
                     raise
         raise RuntimeError("unreachable")
+
+
+    # ---- reading our own chat back (brain/web/chat.py): only its user and assistant messages ----
+
+    async def thread(self, user_id, channel: str, mcp_session_id: str) -> list[dict]:
+        """The session's chat messages, oldest first, across its parts."""
+        if self.col is None:
+            return []
+        out = []
+        async for doc in self.col.find({"user_id": user_id, "channel": channel, "mcp_session_id": mcp_session_id,
+                                        "session_key": {"$exists": True}}, {"messages": 1}).sort("part", 1):
+            out += [m for m in doc.get("messages", []) if m.get("role") in ("user", "assistant")
+                    and m.get("via") == "chat"]
+        return out
+
+    async def sessions(self, user_id, channel: str, prefix: str, limit: int = 30) -> list[dict]:
+        """The user's sessions whose id starts with `prefix`, newest first: {session, started_at, updated_at,
+        first} (the first user message)."""
+        if self.col is None:
+            return []
+        found: dict[str, dict] = {}
+        cursor = self.col.find(
+            {"user_id": user_id, "channel": channel, "mcp_session_id": {"$regex": f"^{re.escape(prefix)}"}},
+            {"mcp_session_id": 1, "part": 1, "started_at": 1, "updated_at": 1,
+             "messages": {"$elemMatch": {"role": "user", "via": "chat"}}}).sort("updated_at", -1).limit(limit * 4)
+        async for doc in cursor:
+            first = (doc.get("messages") or [{}])[0].get("content")
+            s = found.setdefault(doc["mcp_session_id"], {"session": doc["mcp_session_id"],
+                                                        "updated_at": doc["updated_at"], "part": doc.get("part", 1)})
+            if doc.get("part", 1) <= s["part"]:
+                s.update(part=doc.get("part", 1), started_at=doc.get("started_at"), first=first or s.get("first"))
+        return list(found.values())[:limit]
+
+    async def rate(self, user_id, channel: str, mcp_session_id: str, message_id: ObjectId, rating: dict) -> bool:
+        """Puts the user's rating on one of the session's replies (the latest rating replaces an earlier one)."""
+        if self.col is None:
+            return False
+        r = await self.col.update_one(
+            {"user_id": user_id, "channel": channel, "mcp_session_id": mcp_session_id,
+             "messages": {"$elemMatch": {"id": message_id, "role": "assistant"}}},
+            {"$set": {"messages.$.rating": rating}})
+        return r.modified_count == 1
+
+    async def assistant_tokens(self, user_id, channel: str, since: datetime) -> int:
+        """Tokens of the replies logged since `since` (input + output, the web research's too), for a daily
+        budget."""
+        if self.col is None:
+            return 0
+        rows = await (await self.col.aggregate([
+            {"$match": {"user_id": user_id, "channel": channel, "updated_at": {"$gte": since}}},
+            {"$unwind": "$messages"},
+            {"$match": {"messages.role": "assistant", "messages.via": "chat", "messages.created_at": {"$gte": since}}},
+            {"$group": {"_id": None, "n": {"$sum": {"$add": [
+                {"$ifNull": [f"$messages.{k}", 0]} for k in ("input_tokens", "output_tokens", "research_input_tokens",
+                                                              "research_output_tokens")]}}}},
+        ])).to_list(1)
+        return rows[0]["n"] if rows else 0
 
 
 def _public(user_id):

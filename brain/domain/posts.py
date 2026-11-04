@@ -2,7 +2,8 @@
 
 Search is plain pattern matching on summary and tags (no text index on the pipeline's collection),
 ranked here by word-match share, recency and importance.
-TODO(next): semantic search through brain.integrations.embeddings + a VectorIndex (phase 5).
+TODO(next): semantic search on the pipeline's embeddings (the teammate's setup, not committed yet): embed the
+query with the same model, then an Atlas vector index on posts (ask before creating it).
 """
 from __future__ import annotations
 
