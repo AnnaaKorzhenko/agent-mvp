@@ -21,11 +21,7 @@ from brain.db.client import get_db
 from brain.db.repositories import Repos
 from brain.mcp_server.auth import auth_settings, token_provider, token_verifier
 from brain.mcp_server.widgets import apps_extension
-from brain.agents.advisor import advisor
-from brain.agents.runtime import Runtime
-from brain.agents.scout import scout
-from brain.agents.scout_web import web_scout
-from brain.agents.learner import learner
+from brain.agents.setup import build_agents
 from brain.mcp_server.tools import Services, register_tools
 
 INSTRUCTIONS = """\
@@ -115,17 +111,9 @@ def build_services(settings: Settings) -> Services:
         raise SystemExit("Refusing to start: set OAUTH_ISSUER + PUBLIC_BASE_URL (Auth0), "
                          "or DEV_USER_ID for local development on 127.0.0.1.")
     db = get_db(settings)
-    agents_on = settings.scout_auto or settings.scout_web or settings.advisor_auto
-    runtime = Runtime(db) if settings.learning_auto or agents_on else None
-    if settings.scout_auto or settings.scout_web:
-        scout(db, settings, runtime)            # scout_match proposes the web finds too
-    if settings.scout_web:
-        web_scout(db, settings, runtime)
-    if settings.advisor_auto:
-        advisor(db, settings, runtime)
+    agents = build_agents(db, settings)
     return Services(settings=settings, repos=Repos(db), audit=AuditLog(db), token=token_provider(settings),
-                    learner=learner(db, settings, runtime) if settings.learning_auto else None,
-                    agents=runtime)
+                    learner=agents.learner, agents=agents.runtime)
 
 
 def transport_security(settings: Settings) -> TransportSecuritySettings | None:
