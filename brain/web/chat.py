@@ -288,12 +288,33 @@ class Reply:
                 "latency_ms": int((time.monotonic() - self.started) * 1000)}
 
 
+# search_posts with semantic search on (brain/domain/semantic.py); WEB_DESCRIPTIONS keeps the keyword text,
+# used again with SEMANTIC_SEARCH=false.
+WEB_SEARCH_SEMANTIC = (
+    "Search the news base (summaries of Telegram, web and X posts from Ukrainian and Russian sources) by meaning and "
+    "by words at once, reranked by relevance. Write the query as a full phrase in your own words: expand "
+    "abbreviations (РЕБ → «засоби радіоелектронної боротьби (РЕБ)»), add names of systems, companies, units. A "
+    "question with several parts or about both sides: one search per part (e.g. side ua and side ru). An overview or "
+    "comparison question («що нового», «порівняй», «чим…»): limit 15. Answer only "
+    "from the results and cite each fact's post_url; if nothing fits, say so. Search again (once, other words or more "
+    "days) only if the list is empty. is_russian_source_claim=true: claims of Russian sources. Show ref numbers "
+    "(#1, #2, …).")
+
+
+def web_description(spec: ToolSpec) -> str:
+    if spec.name == "search_posts":
+        from brain.domain import semantic
+        if semantic.enabled():
+            return WEB_SEARCH_SEMANTIC
+    return WEB_DESCRIPTIONS.get(spec.name, spec.description)
+
+
 class Chat:
     def __init__(self, svc: Services, specs: dict[str, ToolSpec], backend: AnthropicBackend, client: dict,
                  research: AnthropicBackend | None = None):
         """research: the backend web_research searches with (none: the chat can't search the web)."""
         self.svc, self.specs, self.backend, self.client, self.research = svc, specs, backend, client, research
-        self.tools: list[dict] = [{"name": spec.name, "description": WEB_DESCRIPTIONS.get(spec.name, spec.description),
+        self.tools: list[dict] = [{"name": spec.name, "description": web_description(spec),
                                    "input_schema": compact(spec.input_schema), "eager_input_streaming": True}
                                   for spec in specs.values() if spec.name not in NOT_OFFERED]
         if research is not None:
