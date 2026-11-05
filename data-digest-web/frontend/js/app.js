@@ -724,8 +724,14 @@ function renderAgents() {
     const queue = (d.queue || []).length ? `<ul class="plain">${d.queue.map((q) =>
       `<li>${esc(q.agent)} <span class="sub">· ${esc(q.scope)} · ${esc(q.trigger || '')} · ${esc(when(q.not_before))}</span></li>`).join('')}</ul>`
       : '<span class="sub">Черга порожня.</span>';
+    const w = d.worker || { stale: true };
+    const beat = w.at ? `Воркер: останній сигнал ${esc(when(w.at))}${w.host ? ` <span class="sub">· ${esc(w.host)}</span>` : ''}` : 'Воркер: сигналу ще не було';
+    const worker = `<section class="card worker"><h2>${beat}</h2>${w.stale
+      ? `<p class="notice static" role="status">${w.at ? 'Понад 3 хвилини без сигналу: воркер, імовірно, зупинився.' : 'Окремий воркер не запущений: агенти працюють лише там, де їх увімкнено на MCP-сервісі.'}</p>`
+      : '<p class="sub">Працює: сигнал щохвилини.</p>'}</section>`;
     body = `
       ${g.note ? `<p class="notice static" role="status">${esc(g.note)}</p>` : ''}
+      ${worker}
       <section class="card">
         <h2>Чат аналітика</h2>
         <p>${num(c.replies)} відповідей, ${num(c.users)} користувачів; токенів Sonnet ${num(c.input_tokens)} + ${num(c.output_tokens)} (з кешу ${num(c.cache_read_tokens)}), веб-дослідження ${num(c.research_input_tokens)} + ${num(c.research_output_tokens)}, пошуків ${num(c.web_searches)}</p>
