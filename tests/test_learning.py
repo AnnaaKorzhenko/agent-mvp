@@ -226,3 +226,16 @@ async def test_a_comment_added_later_makes_an_old_rating_new(test_db, user):
     assert abs(act.until - (now - timedelta(minutes=5))) < timedelta(seconds=1)       # the comment's time
     again = await profile.collect(test_db, user, "internal", since=now - timedelta(days=1))   # --since: reprocess
     assert len(again.feedback) == 2
+
+
+async def test_a_web_chat_question_declined_as_off_topic_is_not_learned_from(test_db, user):
+    from brain.audit.conversations import Said
+    log = ConversationLog(test_db, AuditLog(test_db))
+    for question, off_topic in (("Дай рецепт вареників", True), ("Що нового про НРК?", False)):
+        asked = Said("user", question)
+        await log.log(user_id=user, channel="web", mcp_session_id="web:chat:1", client=None, record=asked)
+        meta = {"reply_to": asked.message_id} | ({"off_topic": True} if off_topic else {})
+        await log.log(user_id=user, channel="web", mcp_session_id="web:chat:1", client=None,
+                      record=Said("assistant", "…", meta=meta))
+    act = await profile.collect(test_db, user, "internal")
+    assert [m["text"] for m in act.chat] == ["Що нового про НРК?"]

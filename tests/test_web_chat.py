@@ -286,3 +286,30 @@ def test_every_web_description_is_of_a_real_tool():
     specs = catalog.build(Services(settings=settings, repos=SimpleNamespace(db=None), audit=AuditLog(None),
                                    token=lambda: None))
     assert set(WEB_DESCRIPTIONS) <= set(specs)
+
+
+async def test_a_question_outside_the_field_is_declined_in_one_line_and_marked(db):
+    from brain.web.chat import OFF_TOPIC_REPLY
+    fake = FakeClaude(message(block("text", text=OFF_TOPIC_REPLY)), search_then_answer()[1])
+    async with web(app_with(db, fake)) as c:
+        chat_id = (await c.post("/api/chats")).json()["id"]
+        ev = events((await c.post(f"/api/chats/{chat_id}/messages",
+                                  json={"content": "Дай рецепт вареників"})).text)
+        assert [e["type"] for e in ev] == ["text", "done"]                    # one round, no tool
+        ev = events((await c.post(f"/api/chats/{chat_id}/messages", json={"content": "Що нового про НРК?"})).text)
+        assert ev[-1]["type"] == "done"
+
+    rule = fake.requests[0]["system"][0]["text"]
+    assert "recipes" in rule and OFF_TOPIC_REPLY in rule and "{OFF_TOPIC}" not in rule
+    [conv] = await db.conversations.find({"user_id": DEV_UID}).to_list(None)
+    asked = {m["content"]: m["id"] for m in conv["messages"] if m["role"] == "user"}
+    declined, answered = [m for m in conv["messages"] if m["role"] == "assistant"]
+    assert declined["off_topic"] is True and declined["reply_to"] == asked["Дай рецепт вареників"]
+    assert "off_topic" not in answered and answered["reply_to"] == asked["Що нового про НРК?"]
+
+
+def test_only_the_bare_decline_line_counts_as_off_topic():
+    from brain.web.chat import OFF_TOPIC_REPLY, is_off_topic
+    assert is_off_topic(OFF_TOPIC_REPLY, []) and is_off_topic(f"«{OFF_TOPIC_REPLY}»\n", [])
+    assert not is_off_topic(OFF_TOPIC_REPLY, ["search_posts"])
+    assert not is_off_topic(OFF_TOPIC_REPLY + " Але ось що є про дрони…", [])

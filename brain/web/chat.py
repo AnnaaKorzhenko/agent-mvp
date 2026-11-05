@@ -130,12 +130,22 @@ def keep_known_links(text: str, known: set[str]) -> str:
     """A markdown link whose URL isn't among the search results loses its URL (its words stay)."""
     return _LINK.sub(lambda m: m.group(0) if m.group(2) in known else m.group(1), text)
 
+# The one line for a request outside the chat's field: no tools, a few tokens, and the learner skips the message.
+OFF_TOPIC_REPLY = ("Я аналітик новин про війну та оборонний сектор, тож з цим не допоможу. "
+                   "Запитайте про новини, дайджести або ваші цілі.")
+
 SYSTEM = """\
 You are the analyst of the user's private news brain: daily digests and summaries of Telegram posts from \
 Ukrainian and Russian channels about the war and the defense sector, plus the user's own goals and interests. \
 You talk with the user in a web app; the tools are the brain's.
 
 Rules:
+- Your field: the war in Ukraine, Russia, the defense and security sector (military technology, industry, \
+procurement, sanctions, geopolitics and the economy as far as they touch it), the user's news, digests, goals, \
+interests and profile, and this app itself. A request outside it (recipes, coding, homework, shopping, travel, \
+health, general trivia, small talk beyond a greeting, writing unrelated texts): call no tool and reply with \
+exactly this one line, nothing else: «{OFF_TOPIC}» A greeting, thanks or a question about what you can do is in \
+your field.
 - For anything about the news or the user's data, answer only from the tools' results. Cite every fact with a \
 markdown link to its post_url or source_urls: [канал або джерело](url). Never invent links or ids.
 - If the tools return nothing relevant, say you don't have that in the data instead of guessing. Do not fill gaps \
@@ -171,7 +181,12 @@ the user says something the system assumed about them is wrong, correct_profile.
 - Digests and search results are already ordered by the user's goals and interests; each item's `why` says why it \
 matters to them. Lead with items whose `why` names a goal, connect findings to their goals, and leave out what \
 they already know or avoid. If nothing matches their goals, say so briefly instead of padding.
-- When a result has about_user, adapt to it for the whole conversation."""
+- When a result has about_user, adapt to it for the whole conversation.""".replace("{OFF_TOPIC}", OFF_TOPIC_REPLY)
+
+
+def is_off_topic(text: str, tools: list[str]) -> bool:
+    """Whether a reply is the decline line (and nothing ran): the turn was outside the chat's field."""
+    return not tools and text.strip().strip("«»\"") == OFF_TOPIC_REPLY
 
 
 def session_of(chat_id: str) -> str:
@@ -404,7 +419,8 @@ class Chat:
         earlier = as_turns(await self.svc.conversations.thread(user_key(ctx.user_id), ctx.channel,
                                                                session_of(chat_id)), s.web_chat_history)
         system = await self._system(ctx, name)
-        await self._log(ctx, chat_id, Said("user", text, meta={"item": item} if item else {}))
+        asked = Said("user", text, meta={"item": item} if item else {})
+        await self._log(ctx, chat_id, asked)
         # The item a digest button asked about: its ids for the model (the user sees and the log keeps the text).
         prompt = text + (f"\n\n[item: digest_id {item['digest_id']}, item_n {item['item_n']}]" if item else "")
         messages: list[dict] = earlier + [{"role": "user", "content": prompt}]
@@ -463,7 +479,10 @@ class Chat:
         finally:
             if not finished and reply.stop_reason != "error":
                 reply.stop_reason = "cancelled"            # the user stopped it, or the connection dropped
-            said = Said("assistant", reply.text, meta=reply.meta())
+            meta = reply.meta() | {"reply_to": asked.message_id}
+            if is_off_topic(reply.text, reply.tools):
+                meta["off_topic"] = True             # the learner leaves the question out (brain/agents/learner_profile.py)
+            said = Said("assistant", reply.text, meta=meta)
             with anyio.CancelScope(shield=True):
                 await self._log(ctx, chat_id, said)
         if reply.stop_reason != "error":
