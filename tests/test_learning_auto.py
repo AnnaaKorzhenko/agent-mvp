@@ -154,7 +154,8 @@ async def test_set_goal_in_claude_starts_the_run(db):
         for text in ("стежити за НРК", "друга ціль", "третя ціль"):            # three in a row: one run
             r = await c.call_tool("set_goal", {"action": "add", "text": text, "user_message": text})
             assert not r.is_error
-        learner.settings = s.model_copy(update={"learning_goal_delay_minutes": 0})
+        await asyncio.gather(*learner.pending.values())   # set_goal's own nudges first: one landing later would
+        learner.settings = s.model_copy(update={"learning_goal_delay_minutes": 0})       # put the 2 minutes back
         learner.nudge(uid, delay_seconds=0)                                    # (skip the 2-minute wait)
         await asyncio.gather(*learner.pending.values())                        # the nudges are queued
     assert await db.agent_runs.count_documents({"agent": "learner", "status": "queued"}) == 1   # one, not four
