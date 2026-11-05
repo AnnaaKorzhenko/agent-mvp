@@ -21,7 +21,7 @@ from brain.db.client import get_db
 from brain.db.repositories import Repos
 from brain.mcp_server.auth import auth_settings, token_provider, token_verifier
 from brain.mcp_server.widgets import apps_extension
-from brain.agents.setup import build_agents
+from brain.agents.setup import Agents, build_agents
 from brain.mcp_server.tools import Services, register_tools
 
 INSTRUCTIONS = """\
@@ -111,7 +111,8 @@ def build_services(settings: Settings) -> Services:
         raise SystemExit("Refusing to start: set OAUTH_ISSUER + PUBLIC_BASE_URL (Auth0), "
                          "or DEV_USER_ID for local development on 127.0.0.1.")
     db = get_db(settings)
-    agents = build_agents(db, settings)
+    # AGENTS_IN_MCP=false: the agents' worker runs them; this service builds none, so it starts no background task
+    agents = build_agents(db, settings) if settings.agents_in_mcp else Agents(runtime=None, learner=None)
     return Services(settings=settings, repos=Repos(db), audit=AuditLog(db), token=token_provider(settings),
                     learner=agents.learner, agents=agents.runtime)
 
@@ -130,7 +131,8 @@ def create_app():
     mcp = create_server(svc)
     logger.info(f"MCP server: db={settings.mongo_db} trust={settings.trust_level} "
                 + (f"dev user {settings.dev_user_id}" if settings.dev_mode
-                   else f"OAuth issuer {settings.oauth_issuer}, resource {settings.resource_url}"))
+                   else f"OAuth issuer {settings.oauth_issuer}, resource {settings.resource_url}")
+                + ("" if settings.agents_in_mcp else "; agents: left to the agents' worker (AGENTS_IN_MCP=false)"))
     app = mcp.streamable_http_app(transport_security=transport_security(settings))
     if svc.learner is not None:
         _start_with(app, svc.learner.watch)

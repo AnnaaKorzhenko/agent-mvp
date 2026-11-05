@@ -78,7 +78,13 @@ class Settings(BaseSettings):
     agent_backend: Literal["local", "anthropic"] | None = Field(None, alias="AGENT_BACKEND")
     agent_model: str | None = Field(None, alias="AGENT_MODEL")
 
-    # --- Automatic learning (brain/agents/learner.py): runs inside the MCP service ---
+    # --- Where the agents run (brain/agents/setup.py): the MCP service, or the agents' worker of their own
+    # (`python -m brain.agents`, a Render Background Worker). false on the MCP service once the worker runs them:
+    # the MCP service then starts no background task, and the worker's change stream sees the goals, ratings and
+    # insights the MCP tools write. The LEARNING_*, SCOUT_*, ADVISOR_* settings below go to whichever runs them.
+    agents_in_mcp: bool = Field(True, alias="AGENTS_IN_MCP")
+
+    # --- Automatic learning (brain/agents/learner.py) ---
     learning_auto: bool = Field(False, alias="LEARNING_AUTO")
     learning_feedback_threshold: int = Field(20, ge=1, alias="LEARNING_FEEDBACK_THRESHOLD")
     learning_goal_delay_minutes: int = Field(2, ge=0, alias="LEARNING_GOAL_DELAY_MINUTES")
