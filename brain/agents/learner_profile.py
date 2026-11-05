@@ -304,10 +304,13 @@ async def collect(db: AsyncDatabase, user_id, max_label: str, since: datetime | 
     chat_allowed = sensitivity.is_allowed(CHAT_LABEL, max_label)
     if chat_allowed:
         async for doc in db.conversations.find({"user_id": key}, {"messages": 1}):
+            # Web chat questions the analyst declined as outside its field (brain/web/chat.py) say nothing about
+            # the user's interests.
+            declined = {m.get("reply_to") for m in doc.get("messages") or [] if m.get("off_topic")}
             for m in doc.get("messages") or []:
                 if m.get("role") == "user" and m.get("via") in (None, "chat", "search_query", "feedback_text",
                                                                  "goal", "insight") \
-                        and _newer(m.get("created_at"), since):
+                        and m.get("id") not in declined and _newer(m.get("created_at"), since):
                     act.chat.append({"at": m["created_at"], "via": m.get("via") or "telegram",
                                      "text": _cut(m.get("content"))})
         act.chat.sort(key=lambda m: m["at"])

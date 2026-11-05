@@ -687,7 +687,7 @@ const num = (n) => Number(n || 0).toLocaleString('uk-UA');
 
 function agentHtml(a) {
   const runs = Object.entries(a.runs || {}).map(([k, n]) => `${RUN_STATUS[k] || k} ${n}`).join(' · ') || 'запусків не було';
-  const idle = !Object.keys(a.runs || {}).length;
+  const idle = !Object.keys(a.runs || {}).length && !a.last;    // ніколи не запускався: імовірно, вимкнений
   const last = a.last ? `<p class="sub">Останній: ${esc(RUN_STATUS[a.last.status] || a.last.status)}, ${esc(when(a.last.at))}${a.last.outcome ? ' — ' + esc(a.last.outcome) : ''}</p>` : '';
   const fails = (a.failures || []).map((f) => `<li><span class="sub">${esc(when(f.at))}</span> ${esc(f.error)}</li>`).join('');
   return `

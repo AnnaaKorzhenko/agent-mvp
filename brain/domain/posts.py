@@ -1,12 +1,7 @@
-"""Post search and lookup. Returns only summaries and links, never raw text.
 
-Search is plain pattern matching on summary and tags (no text index on the pipeline's collection),
-ranked here by word-match share, recency and importance.
-TODO(next): semantic search on the pipeline's embeddings (the teammate's setup, not committed yet): embed the
-query with the same model, then an Atlas vector index on posts (ask before creating it).
-"""
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -16,6 +11,8 @@ from brain.db.repositories import Repos
 from brain.domain import sensitivity
 from brain.domain.errors import NotFound
 from brain.domain.identity import UserContext
+
+logger = logging.getLogger("brain.posts")
 
 MAX_DAYS, MAX_LIMIT, MAX_WORDS, CANDIDATES = 30, 25, 8, 200
 W_MATCH, W_RECENCY, W_IMPORTANCE = 0.6, 0.25, 0.15
@@ -116,6 +113,9 @@ async def search(repos: Repos, ctx: UserContext, query: str, side: str = "all", 
     days = max(1, min(int(days), MAX_DAYS))
     limit = max(1, min(int(limit), MAX_LIMIT))
     stems = query_words(query)
+    found = await _semantic(repos, ctx, query, side, category, days, limit)
+    if found:
+        return found, stems or [query.strip()]
     if not stems:
         return [], []
     now = datetime.now(timezone.utc)
@@ -140,6 +140,48 @@ async def search(repos: Repos, ctx: UserContext, query: str, side: str = "all", 
     ranked = sorted(candidates, key=score, reverse=True)[:limit]
     channels = await repos.sources.get_many([p.channel_id for p in ranked if p.channel_id])
     return [PostView(p, channels.get(p.channel_id or ""), score(p), personal[id(p)].why) for p in ranked], stems
+
+
+async def _semantic(repos: Repos, ctx: UserContext, query: str, side: str, category: str | None,
+                    days: int, limit: int) -> list[PostView]:
+    """Hybrid semantic search (brain.domain.semantic), then the same checks as the keyword path: the posts are
+    loaded through repos with the caller's sensitivity labels, and personal relevance is blended in.
+    [] when it is off, unavailable or finds nothing: the caller falls back to the keyword search."""
+    from brain.domain import semantic
+    if not semantic.enabled() or len((query or "").strip()) < 2:
+        return []
+    try:
+        found = await semantic.search(query, side=side, category=category or None, days=days, limit=limit)
+    except semantic.SemanticUnavailable as e:
+        logger.warning(f"semantic search unavailable, keyword fallback: {e}")
+        return []
+    except Exception:
+        logger.exception("semantic search failed, keyword fallback")
+        return []
+    if not found:
+        logger.info(f"semantic search «{query[:60]}»: nothing found (days={days}, side={side}) → keyword fallback")
+        return []
+    posts = await repos.posts.get_many([h.post_id for h in found], ctx.allowed)
+    pairs = [(posts[h.post_id], h) for h in found if h.post_id in posts]
+    pairs = [(p, h) for p, h in pairs if sensitivity.is_allowed(p.sensitivity, ctx.max_sensitivity)]
+    if not pairs:
+        logger.info(f"semantic search «{query[:60]}»: {len(found)} found, but none of them in {repos.posts.col.database.name}"
+                    f".posts for this user → keyword fallback")
+        return []
+    from brain.domain import relevance                       # (relevance imports this module)
+    prefs = await relevance.load(repos, ctx)
+    personal = {p.id: prefs.score(side=p.source_side, category=p.category, text=p.summary, tags=p.tags)
+                for p, _ in pairs}
+
+    def score(p: PostDoc, h) -> float:
+        rel = max(-1.0, min(2.0, personal[p.id].score)) / 2
+        return round(h.score + W_PERSONAL * rel, 4)
+
+    ranked = sorted(pairs, key=lambda ph: score(*ph), reverse=True)[:limit]
+    logger.info(f"semantic search «{query[:60]}»: {len(found)} found, {len(ranked)} returned "
+                f"(top relevance {found[0].score:.2f})")
+    channels = await repos.sources.get_many([p.channel_id for p, _ in ranked if p.channel_id])
+    return [PostView(p, channels.get(p.channel_id or ""), score(p, h), personal[p.id].why) for p, h in ranked]
 
 
 async def get_post(repos: Repos, ctx: UserContext, post_id: str) -> PostView:

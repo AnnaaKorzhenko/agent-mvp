@@ -59,6 +59,27 @@ Signals = Annotated[list[out.Signal] | None, Field(max_length=10, description=(
     "empty for plain requests, and when you already passed them for this message in another call"))]
 
 
+# search_posts texts for the two search modes (brain/domain/posts.py). The keyword ones are the original texts;
+# SEMANTIC_SEARCH=false (or no VOYAGE_API_KEY) brings them back, so both modes can be tested.
+QUERY_KEYWORDS = "Key words, e.g. 'Brave1 гранти РЕБ' (Ukrainian or Russian)"
+SEARCH_QUERY_DESC = QUERY_KEYWORDS                          # set by register_tools for the current mode
+QUERY_SEMANTIC = ("What to find, as a full phrase in your own words (any language): expand abbreviations "
+                  "(РЕБ → «засоби радіоелектронної боротьби (РЕБ)»), add names of systems, companies, units. "
+                  "The search goes by meaning and by words, e.g. 'нові російські засоби радіоелектронної боротьби "
+                  "(РЕБ), комплекси придушення'")
+SEARCH_DOC_SEMANTIC = """Search the news base (summaries of Telegram, web and X posts from Ukrainian and Russian sources) \
+by meaning and by words at once, the results reranked by relevance.
+
+Write the query as a full phrase in your own words, not a list of key words: expand abbreviations, add the names of \
+systems, companies and units. A question with several parts or about both sides: one search per part (e.g. side ua \
+and side ru). An overview or comparison question ("що нового", "порівняй", "чим…"): limit 15. Answer only from the results and cite each fact's post_url. If the results don't answer the question, \
+say "I don't have that in the data"; search again (once, other words or more days) only if the result list is \
+empty, because every search shows the user another set of result cards. Results with is_russian_source_claim=true \
+are claims of Russian sources, not facts. When you list results, show their ref numbers (#1, #2, …). If the result \
+says shown_in_widget, the user already sees the results as cards with links: answer in your own words citing #N, \
+without listing the posts again."""
+
+
 def register_tools(mcp: MCPServer, svc: Services) -> dict[str, ToolSpec]:
     """Registers every tool on `mcp`; returns their specs (brain/tools/catalog.py) for other callers."""
     specs: dict[str, ToolSpec] = {}
@@ -111,12 +132,17 @@ def register_tools(mcp: MCPServer, svc: Services) -> dict[str, ToolSpec]:
         else text with #numbers, links, Russian items as claims)."""
         return await _run(svc, "get_morning_digest", mcp_ctx, locals())
 
-    @tool(title="Search news posts", annotations=READ_ONLY, meta=widgets.tool_meta(widgets.SEARCH_UI))
+    from brain.domain import semantic as _semantic          # which search mode: the texts follow it
+    global SEARCH_QUERY_DESC                                # module-level: annotations are resolved from globals
+    semantic_on = _semantic.enabled()
+    SEARCH_QUERY_DESC = QUERY_SEMANTIC if semantic_on else QUERY_KEYWORDS
+
+    @tool(title="Search news posts", annotations=READ_ONLY, meta=widgets.tool_meta(widgets.SEARCH_UI),
+          **({"description": SEARCH_DOC_SEMANTIC} if semantic_on else {}))   # else: the docstring below (keywords)
     async def search_posts(
         mcp_ctx: Context,
         user_message: UserMessage,
-        query: Annotated[str, Field(min_length=2, max_length=300,
-                                    description="Key words, e.g. 'Brave1 гранти РЕБ' (Ukrainian or Russian)")],
+        query: Annotated[str, Field(min_length=2, max_length=300, description=SEARCH_QUERY_DESC)],
         side: Annotated[Literal["ua", "ru", "all"], Field(description="Source side")] = "all",
         category: Annotated[str | None, Field(
             description="Optional category key, e.g. front, defense_tech, investments, ru_front")] = None,
