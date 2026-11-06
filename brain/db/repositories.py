@@ -316,11 +316,25 @@ class UsersRepo:
     async def claim_morning_digest(self, user_id: UserId, key: str, day: str, channel: str) -> bool:
         """Marks today's digest (`key`: its digest ids) as delivered to the user by the morning delivery.
         Atomic: True only for the one call that delivers it; False if it was delivered before."""
+        # Field by field: morning_digest.web_push (the worker's push, claim_morning_push) stays as it is.
         result = await self.col.update_one(
             {"_id": user_key(user_id), "morning_digest.key": {"$ne": key}},
-            {"$set": {"morning_digest": {"key": key, "date": day, "channel": channel,
-                                         "at": datetime.now(timezone.utc)}}})
+            {"$set": {"morning_digest.key": key, "morning_digest.date": day, "morning_digest.channel": channel,
+                      "morning_digest.at": datetime.now(timezone.utc)}})
         return result.modified_count == 1
+
+    async def claim_morning_push(self, user_id: UserId, key: str, day: str) -> bool:
+        """Marks today's digest as pushed to the user's browsers (morning_digest.web_push), apart from the
+        delivery to Claude. Atomic: True only for the one call that pushes it."""
+        result = await self.col.update_one(
+            {"_id": user_key(user_id), "morning_digest.web_push.key": {"$ne": key}},
+            {"$set": {"morning_digest.web_push": {"key": key, "date": day, "at": datetime.now(timezone.utc)}}})
+        return result.modified_count == 1
+
+    async def with_push_subscriptions(self) -> list[tuple[UserId, list[dict]]]:
+        """Every user with a Web Push subscription, with their subscriptions."""
+        cursor = self.col.find({"push_subscriptions.0": {"$exists": True}}, {"push_subscriptions": 1})
+        return [(_public_id(d["_id"]), d["push_subscriptions"]) async for d in cursor]
 
     async def save_push_subscription(self, user_id: UserId, sub: dict, keep: int) -> bool:
         """Saves a Web Push subscription: one per endpoint (a new one replaces it), the newest `keep` kept.

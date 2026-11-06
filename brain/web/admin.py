@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 
 from pymongo.asynchronous.database import AsyncDatabase
 
-from brain.agents import advisor, learner, scout, scout_web
+from brain.agents import advisor, learner, morning_push, scout, scout_web
 from brain.agents.runs import COLLECTION as RUNS, CONTROL, GLOBAL, AgentRuns
 
 ENDED = ("accepted", "dismissed", "stale")
@@ -43,6 +43,7 @@ AGENTS = [
     AgentInfo(scout_web.AGENT, "Веб-скаут", False, "SCOUT_WEB"),
     AgentInfo(advisor.DAILY, "Порадник: щоденний запуск", False, "ADVISOR_AUTO"),
     AgentInfo(advisor.AGENT, "Порадник: поради користувачу", True, "ADVISOR_AUTO"),
+    AgentInfo(morning_push.AGENT, "Ранковий push у браузер", False, "MORNING_PUSH"),
 ]
 BY_NAME = {a.name: a for a in AGENTS}
 
