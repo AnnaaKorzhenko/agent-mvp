@@ -1,0 +1,14 @@
+{
+  "name": "Data Digest",
+  "short_name": "Data Digest",
+  "description": "Ранковий дайджест новин і аналітик",
+  "lang": "uk",
+  "start_url": "/#digests",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#F5F4F0",
+  "theme_color": "#2F5D50",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

@@ -138,3 +138,16 @@ async def test_a_user_id_in_the_body_is_ignored_and_long_endpoints_refused(db):
         assert (await c.post("/api/push/subscribe", json=long)).status_code == 422
     assert [s["endpoint"] for s in await subs(db)] == [sub(1)["endpoint"]]
     assert len(await subs(db, OTHER_UID)) == 1
+
+
+async def test_service_worker_and_manifest_are_served_with_their_types(db):
+    async with web(app_with(db), csrf=False) as c:
+        sw = await c.get("/sw.js")
+        assert sw.status_code == 200 and sw.headers["content-type"].startswith("text/javascript")
+        assert sw.headers["cache-control"] == "no-cache"
+        assert "notificationclick" in sw.text and "#digests" in sw.text
+        m = await c.get("/manifest.webmanifest")
+        assert m.status_code == 200 and m.headers["content-type"].startswith("application/manifest+json")
+        assert m.json()["start_url"] == "/#digests"
+        assert (await c.get("/icon.svg")).headers["content-type"].startswith("image/svg+xml")
+        assert 'rel="manifest" href="/manifest.webmanifest"' in (await c.get("/")).text

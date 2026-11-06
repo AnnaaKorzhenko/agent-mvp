@@ -8,6 +8,7 @@ const state = {
   proposals: { items: [], loading: false, error: '', answered: {}, reasonFor: null },
   profile: null,
   profileNote: '',
+  push: { checked: false, key: null, on: false, busy: false, note: '' },   // сповіщення в цьому браузері
   agents: { days: 7, data: null, error: '', note: '' },
   ratings: {},         // що оцінено -> useful | not_useful
   rateError: {},
@@ -30,7 +31,7 @@ function go(screen) {
   render();
   if (screen === 'digests') loadDigest();
   if (screen === 'search') loadSearch();
-  if (screen === 'profile') loadProfile();
+  if (screen === 'profile') { state.push.note = ''; loadProfile(); loadPush(); }
   if (screen === 'proposals') loadProposals();
   if (screen === 'agents') loadAgents();
 }
@@ -656,7 +657,79 @@ function renderProfile() {
         <h2>Пропозиції системи</h2>
         ${prefsHtml(p.agent_prefs)}
       </section>` : ''}
+      ${pushHtml()}
     </div></div>`;
+}
+
+// ---------- Сповіщення про ранковий дайджест (Web Push) ----------
+// Підписка належить браузеру: у кожному браузері її вмикають окремо, сервер лише зберігає адресу.
+const PUSH_SUPPORTED = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+
+function pushHtml() {
+  const s = state.push;
+  let body;
+  if (!PUSH_SUPPORTED) body = '<p class="sub">Цей браузер не підтримує сповіщення. На iPhone додайте сайт на початковий екран («Поділитися» → «На початковий екран») і відкрийте його звідти.</p>';
+  else if (!s.checked) body = '<p class="sub">Перевіряю…</p>';
+  else if (!s.key) body = '<p class="sub">Сповіщення поки не налаштовані на сервері.</p>';
+  else {
+    body = `
+      <div class="pref"><span class="filter-label">Сповіщення про ранковий дайджест</span>
+        <button class="chip ${s.on ? 'on' : ''}" role="switch" aria-checked="${s.on}" data-push="${s.on ? '0' : '1'}" ${s.busy ? 'disabled' : ''}>${s.on ? 'Увімкнено' : 'Вимкнено'}</button></div>
+      <p class="sub">Коли дайджест готовий, браузер покаже сповіщення; натисніть його, щоб відкрити «Дайджести».</p>`;
+  }
+  return `
+      <section class="card">
+        <h2>Сповіщення</h2>
+        ${body}
+        ${s.note ? `<p class="notice static" role="status">${esc(s.note)}</p>` : ''}
+      </section>`;
+}
+
+function vapidBytes(key) {          // base64url -> Uint8Array, як хоче pushManager.subscribe
+  const b64 = (key + '='.repeat((4 - key.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/');
+  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+}
+
+async function loadPush() {
+  if (!PUSH_SUPPORTED) return;
+  try {
+    const [{ key }, reg] = await Promise.all([api.pushKey(), navigator.serviceWorker.register('/sw.js')]);
+    const sub = await reg.pushManager.getSubscription();
+    Object.assign(state.push, { key, on: !!sub && Notification.permission === 'granted' });
+  } catch (e) { state.push.note = 'Не вдалося перевірити сповіщення: ' + e.message; }
+  state.push.checked = true;
+  if (state.screen === 'profile') render();
+}
+
+async function setPush(on) {
+  const s = state.push;
+  s.busy = true; s.note = ''; render();
+  try {
+    const reg = await navigator.serviceWorker.register('/sw.js');
+    let sub = await reg.pushManager.getSubscription();
+    if (on) {
+      if (await Notification.requestPermission() !== 'granted') {
+        throw new Error('браузер не дав дозволу. Дозвольте сповіщення для цього сайту в налаштуваннях браузера.');
+      }
+      // ключ сервера змінився — стара підписка вже не прийме push
+      if (sub && sub.options.applicationServerKey) {
+        const old = new Uint8Array(sub.options.applicationServerKey).join();
+        if (old !== vapidBytes(s.key).join()) { await sub.unsubscribe(); sub = null; }
+      }
+      sub = sub || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: vapidBytes(s.key) });
+      await api.pushSubscribe(sub.toJSON());
+      s.note = 'Сповіщення увімкнено в цьому браузері.';
+    } else {
+      if (sub) {
+        await api.pushUnsubscribe(sub.endpoint);
+        await sub.unsubscribe();
+      }
+      s.note = 'Сповіщення вимкнено.';
+    }
+    s.on = on;
+  } catch (e) { s.note = 'Не вдалося: ' + e.message; }
+  s.busy = false;
+  if (state.screen === 'profile') render();
 }
 
 async function loadProfile() {
@@ -845,6 +918,7 @@ $main.addEventListener('click', async (e) => {
     return profileAction(() => api.setPrefs(change), 'Збережено.');
   }
   if (d.prefsMentions) return profileAction(() => api.setPrefs({ mentions: d.prefsMentions === '1' }), 'Збережено.');
+  if (d.push) return setPush(d.push === '1');
 
   if (d.sideDigest) { state.digest.side = d.sideDigest; return loadDigest(); }
   if (d.searchSide) { state.search.side = d.searchSide; render(); return loadSearch(); }
@@ -855,4 +929,8 @@ $main.addEventListener('click', async (e) => {
 loadMe();
 loadRecent();
 api.getProposals().then((r) => setBadge((r.proposals || []).length)).catch(() => {});
-go('chat');
+// клік по сповіщенню: нова вкладка приходить з #digests, відкрита отримує повідомлення від sw.js
+if (PUSH_SUPPORTED) {
+  navigator.serviceWorker.addEventListener('message', (e) => { if (e.data?.open === 'digests') go('digests'); });
+}
+go(location.hash === '#digests' ? 'digests' : 'chat');

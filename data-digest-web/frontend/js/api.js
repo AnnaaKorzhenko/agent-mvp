@@ -155,6 +155,24 @@ window.api = {
     return http('/feedback', { method: 'POST', body: JSON.stringify({ ...target, reaction: reaction || null, text: text || null }) });
   },
 
+  // ---- Web Push ранкового дайджесту (users.push_subscriptions) ----
+
+  // GET /push/key -> { key }  (VAPID-ключ сервера; null — сповіщення на сервері не налаштовано)
+  async pushKey() {
+    if (USE_MOCK) return { key: null };
+    return http('/push/key');
+  },
+
+  // POST /push/subscribe { endpoint, keys: { p256dh, auth } } (PushSubscription.toJSON()) -> { subscribed }
+  async pushSubscribe(sub) {
+    return http('/push/subscribe', { method: 'POST', body: JSON.stringify({ endpoint: sub.endpoint, keys: sub.keys }) });
+  },
+
+  // POST /push/unsubscribe { endpoint } -> { subscribed: false, removed }
+  async pushUnsubscribe(endpoint) {
+    return http('/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint }) });
+  },
+
   // ---- Консоль агентів (лише ADMIN_EMAILS; brain/web/admin.py) ----
 
   // GET /admin/agents?days=7 -> { agents: [{ name, label, per_user, enabled_by, runs: {status: n}, model_calls,

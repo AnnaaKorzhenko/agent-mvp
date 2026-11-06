@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult
@@ -465,6 +465,18 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
 
     frontend = Path(settings.web_frontend_dir) if settings.web_frontend_dir else FRONTEND
     if frontend.is_dir():
+        # The service worker and the manifest get explicit types (`.webmanifest` isn't in every mimetypes table)
+        # and no-cache: a browser must see a new sw.js at once, not after its HTTP cache expires.
+        @app.get("/sw.js", include_in_schema=False)
+        async def service_worker():
+            return FileResponse(frontend / "sw.js", media_type="text/javascript",
+                                headers={"Cache-Control": "no-cache"})
+
+        @app.get("/manifest.webmanifest", include_in_schema=False)
+        async def manifest():
+            return FileResponse(frontend / "manifest.webmanifest", media_type="application/manifest+json",
+                                headers={"Cache-Control": "no-cache"})
+
         app.mount("/", StaticFiles(directory=frontend, html=True), name="frontend")
     else:
         logger.warning(f"no UI files at {frontend}: serving the API only")
