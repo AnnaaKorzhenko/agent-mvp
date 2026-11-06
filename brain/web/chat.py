@@ -353,6 +353,9 @@ class Chat:
         return await self.svc.conversations.rate(user_key(ctx.user_id), ctx.channel, session_of(chat_id),
                                                  ObjectId(message_id), rating)
 
+    async def delete(self, ctx: UserContext, chat_id: str) -> bool:
+        return await self.svc.conversations.delete(user_key(ctx.user_id), ctx.channel, session_of(chat_id))
+
     async def used_today(self, ctx: UserContext) -> int:
         return await self.svc.conversations.assistant_tokens(user_key(ctx.user_id), ctx.channel,
                                                              _start_of_day(datetime.now(timezone.utc)))
@@ -433,6 +436,9 @@ class Chat:
         """Events for the UI: {"type": "text", "text"} deltas, {"type": "tool", "name"} when a tool starts,
         {"type": "done", "message_id", "stop_reason"} or {"type": "error", "detail"}."""
         s = self.svc.settings
+        if await self.svc.conversations.deleted(user_key(ctx.user_id), ctx.channel, session_of(chat_id)):
+            yield {"type": "error", "detail": "Цей чат видалено. Почніть новий."}
+            return
         used = await self.used_today(ctx)
         if used >= s.web_chat_tokens_per_day:
             yield {"type": "error", "detail": "Денний ліміт чату вичерпано. Спробуйте завтра."}

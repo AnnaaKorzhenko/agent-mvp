@@ -34,7 +34,8 @@ window.api = {
 
   // GET /digest?side=both|ua|ru|topics[&date=YYYY-MM-DD]
   // -> { date, digests: [{ side, side_note, digest_id, sections: [{ category, title, items: [
-  //        { ref, n, text, source_urls, source_post_ids, is_russian_source_claim, why: [..], relevance }] }] }],
+  //        { ref, n, text, source_urls, source_post_ids, is_russian_source_claim, why: [..], relevance,
+  //        my_reaction: useful | not_useful | neutral | null }] }] }],
   //      missing_sides, note, proposals: [...], topics_to_renew: [...] }
   async getDigest(side, date) {
     if (USE_MOCK) { await delay(150); return { date: null, digests: [], missing_sides: [], note: 'Демо-режим' }; }
@@ -45,7 +46,7 @@ window.api = {
 
   // GET /posts?q=...&side=all|ua|ru&days=1..30
   // -> { query, results: [{ ref, post_id, summary, tags, category, source_side, is_russian_source_claim,
-  //        channel: { username, country }, post_url, published_at, importance, why }], note }
+  //        channel: { username, country }, post_url, published_at, importance, why, my_reaction }], note }
   async searchPosts(q, side, days) {
     if (USE_MOCK) { await delay(150); return { query: q, results: [] }; }
     return http(`/posts?${new URLSearchParams({ q, side, days })}`);
@@ -69,6 +70,12 @@ window.api = {
   async getChat(id) {
     if (USE_MOCK) return { id, messages: [] };
     return http(`/chats/${encodeURIComponent(id)}`);
+  },
+
+  // DELETE /chats/:id -> { deleted }  (м’яке видалення: чат зникає з «Нещодавні», журнал лишається)
+  async deleteChat(id) {
+    if (USE_MOCK) return { deleted: id };
+    return http(`/chats/${encodeURIComponent(id)}`, { method: 'DELETE' });
   },
 
   // POST /chats/:id/messages { content, item? } -> потік server-sent events, по одному JSON у рядку `data: …`:
@@ -153,6 +160,24 @@ window.api = {
   // POST /feedback { reaction?, target_type: post|digest_item, post_id | digest_id + item_n, text? } -> { confirmation }
   async rate(target, reaction, text) {
     return http('/feedback', { method: 'POST', body: JSON.stringify({ ...target, reaction: reaction || null, text: text || null }) });
+  },
+
+  // ---- Web Push ранкового дайджесту (users.push_subscriptions) ----
+
+  // GET /push/key -> { key }  (VAPID-ключ сервера; null — сповіщення на сервері не налаштовано)
+  async pushKey() {
+    if (USE_MOCK) return { key: null };
+    return http('/push/key');
+  },
+
+  // POST /push/subscribe { endpoint, keys: { p256dh, auth } } (PushSubscription.toJSON()) -> { subscribed }
+  async pushSubscribe(sub) {
+    return http('/push/subscribe', { method: 'POST', body: JSON.stringify({ endpoint: sub.endpoint, keys: sub.keys }) });
+  },
+
+  // POST /push/unsubscribe { endpoint } -> { subscribed: false, removed }
+  async pushUnsubscribe(endpoint) {
+    return http('/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint }) });
   },
 
   // ---- Консоль агентів (лише ADMIN_EMAILS; brain/web/admin.py) ----

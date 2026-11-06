@@ -117,3 +117,34 @@ async def test_the_console_counts_runs_suggestions_and_chat_and_controls_the_age
     assert await runs.count_documents({"agent": "learner", "scope": BOSS, "status": "queued", "trigger": "console"}) == 1
     actions = [a["details"]["action"] async for a in db.audit_log.find({"event": "admin_action"})]
     assert actions == ["pause", "unpause", "run_now", "run_now"]
+
+
+async def test_the_console_shows_the_workers_heartbeat_and_never_counts_it(db):
+    from brain.agents.runs import CONTROL, HEARTBEAT, WORKER
+    from brain.web import admin
+    now = datetime.now(timezone.utc)
+    assert (await admin.overview(db, now=now))["worker"] == {"at": None, "host": None, "pid": None, "stale": True}
+
+    await AgentRuns(db).beat("srv-1", 42, now=now - timedelta(minutes=1))
+    await db.agent_runs.update_one({"agent": WORKER, "scope": CONTROL, "status": HEARTBEAT},   # as if it had
+                                   {"$set": {"created_at": now, "finished_at": now, "model_calls": 1,  # counts
+                                             "started_at": now, "tokens_in": 9}})
+    o = await admin.overview(db, now=now)
+    assert o["worker"]["host"] == "srv-1" and o["worker"]["pid"] == 42 and o["worker"]["stale"] is False
+    assert o["running"] == 0 and o["queue"] == []
+    assert all(a["runs"] == {} and a["today"]["tokens"] == 0 for a in o["agents"])
+    assert (await AgentRuns(db).usage(now)).runs == 0
+
+    o = await admin.overview(db, now=now + timedelta(minutes=3))
+    assert o["worker"]["stale"] is True
+
+
+async def test_the_report_prints_the_heartbeat_and_leaves_it_out_of_the_runs(db, capsys):
+    from brain.scripts import agents_report
+    await agents_report.runs_part(db, datetime.now(timezone.utc) - timedelta(days=1))
+    assert "worker heartbeat: none" in capsys.readouterr().out
+    await AgentRuns(db).beat("srv-1", 42)
+    await db.agent_runs.update_one({"agent": "worker"}, {"$set": {"created_at": datetime.now(timezone.utc)}})
+    await agents_report.runs_part(db, datetime.now(timezone.utc) - timedelta(days=1))
+    out = capsys.readouterr().out
+    assert "on srv-1 (pid 42)" in out and "no runs" in out and "worker " not in out.split("heartbeat")[-1]

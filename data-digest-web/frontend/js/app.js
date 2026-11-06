@@ -8,6 +8,7 @@ const state = {
   proposals: { items: [], loading: false, error: '', answered: {}, reasonFor: null },
   profile: null,
   profileNote: '',
+  push: { checked: false, key: null, on: false, busy: false, note: '' },   // сповіщення в цьому браузері
   agents: { days: 7, data: null, error: '', note: '' },
   ratings: {},         // що оцінено -> useful | not_useful
   rateError: {},
@@ -30,7 +31,7 @@ function go(screen) {
   render();
   if (screen === 'digests') loadDigest();
   if (screen === 'search') loadSearch();
-  if (screen === 'profile') loadProfile();
+  if (screen === 'profile') { state.push.note = ''; loadProfile(); loadPush(); }
   if (screen === 'proposals') loadProposals();
   if (screen === 'agents') loadAgents();
 }
@@ -205,10 +206,18 @@ function botHtml(m) {
 
 function renderChat() {
   const { messages, title } = state.chat;
+  const canDelete = state.chat.id && messages.length && !state.chat.loading && !state.chat.opening;
+  const del = !canDelete ? ''
+    : state.chat.confirmDelete
+      ? `<span class="row chat-delete"><span class="sub">Видалити цей чат?</span>
+           <button class="btn-text" data-chat-delete="yes">Так, видалити</button>
+           <button class="btn-text" data-chat-delete="no">Скасувати</button></span>`
+      : '<button class="btn-text" data-chat-delete="ask">Видалити чат</button>';
   const header = `
     <header class="chat-header">
       <span class="chat-title">${esc(title)}</span>
-      <span class="pill">База: News · оновлюється щодня</span>
+      <span class="row chat-actions">${del}<span class="pill">База: News · оновлюється щодня</span></span>
+      ${state.chat.deleteError ? `<span class="sub">${esc(state.chat.deleteError)}</span>` : ''}
     </header>`;
 
   if (state.chat.opening) return `<div class="chat">${header}<div class="empty"><p class="sub">Відкриваю чат…</p></div></div>`;
@@ -294,6 +303,19 @@ function newChat() {
   state.chat = { id: null, title: 'Новий чат', messages: [], loading: false };
   go('chat');
   renderRecent();
+}
+
+async function deleteChat() {
+  const chat = state.chat;
+  try {
+    await api.deleteChat(chat.id);
+  } catch (e) {
+    chat.confirmDelete = false;
+    chat.deleteError = 'Не вдалося видалити чат: ' + e.message;
+    return render();
+  }
+  recentChats = recentChats.filter((c) => c.id !== chat.id);
+  if (state.chat === chat) newChat(); else renderRecent();
 }
 
 async function openChat(id) {
@@ -400,7 +422,12 @@ async function loadDigest() {
   state.digest.loading = true;
   state.digest.error = '';
   if (state.screen === 'digests') render();
-  try { state.digest.data = await api.getDigest(state.digest.side); }
+  try {
+    state.digest.data = await api.getDigest(state.digest.side);
+    (state.digest.data.digests || []).forEach((d) => (d.sections || []).forEach((sec) => (sec.items || []).forEach((it) => {
+      if (it.my_reaction) state.ratings[`d:${d.digest_id}/${it.n}`] = it.my_reaction;
+    })));
+  }
   catch (e) { state.digest.data = null; state.digest.error = 'Не вдалося завантажити дайджест: ' + e.message; }
   state.digest.loading = false;
   if (state.screen === 'digests') render();
@@ -461,7 +488,11 @@ async function loadSearch() {
   s.error = '';
   if (s.q.trim().length < 2) { s.items = []; s.note = 'Введіть, що шукати.'; }
   else {
-    try { const r = await api.searchPosts(s.q, s.side, s.days); s.items = r.results || []; s.note = r.note || ''; }
+    try {
+      const r = await api.searchPosts(s.q, s.side, s.days);
+      s.items = r.results || []; s.note = r.note || '';
+      s.items.forEach((p) => { if (p.my_reaction) state.ratings['p:' + p.post_id] = p.my_reaction; });
+    }
     catch (e) { s.items = []; s.error = 'Пошук не вдався: ' + e.message; }
   }
   // оновлюємо лише результати, щоб не збивати фокус у полі пошуку
@@ -656,7 +687,79 @@ function renderProfile() {
         <h2>Пропозиції системи</h2>
         ${prefsHtml(p.agent_prefs)}
       </section>` : ''}
+      ${pushHtml()}
     </div></div>`;
+}
+
+// ---------- Сповіщення про ранковий дайджест (Web Push) ----------
+// Підписка належить браузеру: у кожному браузері її вмикають окремо, сервер лише зберігає адресу.
+const PUSH_SUPPORTED = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+
+function pushHtml() {
+  const s = state.push;
+  let body;
+  if (!PUSH_SUPPORTED) body = '<p class="sub">Цей браузер не підтримує сповіщення. На iPhone додайте сайт на початковий екран («Поділитися» → «На початковий екран») і відкрийте його звідти.</p>';
+  else if (!s.checked) body = '<p class="sub">Перевіряю…</p>';
+  else if (!s.key) body = '<p class="sub">Сповіщення поки не налаштовані на сервері.</p>';
+  else {
+    body = `
+      <div class="pref"><span class="filter-label">Сповіщення про ранковий дайджест</span>
+        <button class="chip ${s.on ? 'on' : ''}" role="switch" aria-checked="${s.on}" data-push="${s.on ? '0' : '1'}" ${s.busy ? 'disabled' : ''}>${s.on ? 'Увімкнено' : 'Вимкнено'}</button></div>
+      <p class="sub">Коли дайджест готовий, браузер покаже сповіщення; натисніть його, щоб відкрити «Дайджести».</p>`;
+  }
+  return `
+      <section class="card">
+        <h2>Сповіщення</h2>
+        ${body}
+        ${s.note ? `<p class="notice static" role="status">${esc(s.note)}</p>` : ''}
+      </section>`;
+}
+
+function vapidBytes(key) {          // base64url -> Uint8Array, як хоче pushManager.subscribe
+  const b64 = (key + '='.repeat((4 - key.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/');
+  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+}
+
+async function loadPush() {
+  if (!PUSH_SUPPORTED) return;
+  try {
+    const [{ key }, reg] = await Promise.all([api.pushKey(), navigator.serviceWorker.register('/sw.js')]);
+    const sub = await reg.pushManager.getSubscription();
+    Object.assign(state.push, { key, on: !!sub && Notification.permission === 'granted' });
+  } catch (e) { state.push.note = 'Не вдалося перевірити сповіщення: ' + e.message; }
+  state.push.checked = true;
+  if (state.screen === 'profile') render();
+}
+
+async function setPush(on) {
+  const s = state.push;
+  s.busy = true; s.note = ''; render();
+  try {
+    const reg = await navigator.serviceWorker.register('/sw.js');
+    let sub = await reg.pushManager.getSubscription();
+    if (on) {
+      if (await Notification.requestPermission() !== 'granted') {
+        throw new Error('браузер не дав дозволу. Дозвольте сповіщення для цього сайту в налаштуваннях браузера.');
+      }
+      // ключ сервера змінився — стара підписка вже не прийме push
+      if (sub && sub.options.applicationServerKey) {
+        const old = new Uint8Array(sub.options.applicationServerKey).join();
+        if (old !== vapidBytes(s.key).join()) { await sub.unsubscribe(); sub = null; }
+      }
+      sub = sub || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: vapidBytes(s.key) });
+      await api.pushSubscribe(sub.toJSON());
+      s.note = 'Сповіщення увімкнено в цьому браузері.';
+    } else {
+      if (sub) {
+        await api.pushUnsubscribe(sub.endpoint);
+        await sub.unsubscribe();
+      }
+      s.note = 'Сповіщення вимкнено.';
+    }
+    s.on = on;
+  } catch (e) { s.note = 'Не вдалося: ' + e.message; }
+  s.busy = false;
+  if (state.screen === 'profile') render();
 }
 
 async function loadProfile() {
@@ -724,8 +827,14 @@ function renderAgents() {
     const queue = (d.queue || []).length ? `<ul class="plain">${d.queue.map((q) =>
       `<li>${esc(q.agent)} <span class="sub">· ${esc(q.scope)} · ${esc(q.trigger || '')} · ${esc(when(q.not_before))}</span></li>`).join('')}</ul>`
       : '<span class="sub">Черга порожня.</span>';
+    const w = d.worker || { stale: true };
+    const beat = w.at ? `Воркер: останній сигнал ${esc(when(w.at))}${w.host ? ` <span class="sub">· ${esc(w.host)}</span>` : ''}` : 'Воркер: сигналу ще не було';
+    const worker = `<section class="card worker"><h2>${beat}</h2>${w.stale
+      ? `<p class="notice static" role="status">${w.at ? 'Понад 3 хвилини без сигналу: воркер, імовірно, зупинився.' : 'Окремий воркер не запущений: агенти працюють лише там, де їх увімкнено на MCP-сервісі.'}</p>`
+      : '<p class="sub">Працює: сигнал щохвилини.</p>'}</section>`;
     body = `
       ${g.note ? `<p class="notice static" role="status">${esc(g.note)}</p>` : ''}
+      ${worker}
       <section class="card">
         <h2>Чат аналітика</h2>
         <p>${num(c.replies)} відповідей, ${num(c.users)} користувачів; токенів Sonnet ${num(c.input_tokens)} + ${num(c.output_tokens)} (з кешу ${num(c.cache_read_tokens)}), веб-дослідження ${num(c.research_input_tokens)} + ${num(c.research_output_tokens)}, пошуків ${num(c.web_searches)}</p>
@@ -808,6 +917,12 @@ $main.addEventListener('click', async (e) => {
   const d = el.dataset;
 
   if (d.action === 'stop') return stopAnswer();
+  if (d.chatDelete) {
+    if (d.chatDelete === 'yes') return deleteChat();
+    state.chat.confirmDelete = d.chatDelete === 'ask';
+    state.chat.deleteError = '';
+    return render();
+  }
   if (d.agentDays) { state.agents.days = +d.agentDays; state.agents.note = ''; render(); return loadAgents(); }
   if (d.agentRun) return agentAction(() => api.runAgent(d.agentRun), (r) => `Запуск ${d.agentRun} у черзі (для: ${r.for}).`);
   if (d.agentPause) {
@@ -839,6 +954,7 @@ $main.addEventListener('click', async (e) => {
     return profileAction(() => api.setPrefs(change), 'Збережено.');
   }
   if (d.prefsMentions) return profileAction(() => api.setPrefs({ mentions: d.prefsMentions === '1' }), 'Збережено.');
+  if (d.push) return setPush(d.push === '1');
 
   if (d.sideDigest) { state.digest.side = d.sideDigest; return loadDigest(); }
   if (d.searchSide) { state.search.side = d.searchSide; render(); return loadSearch(); }
@@ -849,4 +965,8 @@ $main.addEventListener('click', async (e) => {
 loadMe();
 loadRecent();
 api.getProposals().then((r) => setBadge((r.proposals || []).length)).catch(() => {});
-go('chat');
+// клік по сповіщенню: нова вкладка приходить з #digests, відкрита отримує повідомлення від sw.js
+if (PUSH_SUPPORTED) {
+  navigator.serviceWorker.addEventListener('message', (e) => { if (e.data?.open === 'digests') go('digests'); });
+}
+go(location.hash === '#digests' ? 'digests' : 'chat');

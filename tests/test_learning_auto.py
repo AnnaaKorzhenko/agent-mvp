@@ -154,7 +154,8 @@ async def test_set_goal_in_claude_starts_the_run(db):
         for text in ("стежити за НРК", "друга ціль", "третя ціль"):            # three in a row: one run
             r = await c.call_tool("set_goal", {"action": "add", "text": text, "user_message": text})
             assert not r.is_error
-        learner.settings = s.model_copy(update={"learning_goal_delay_minutes": 0})
+        await asyncio.gather(*learner.pending.values())   # set_goal's own nudges first: one landing later would
+        learner.settings = s.model_copy(update={"learning_goal_delay_minutes": 0})       # put the 2 minutes back
         learner.nudge(uid, delay_seconds=0)                                    # (skip the 2-minute wait)
         await asyncio.gather(*learner.pending.values())                        # the nudges are queued
     assert await db.agent_runs.count_documents({"agent": "learner", "status": "queued"}) == 1   # one, not four
@@ -261,3 +262,47 @@ async def test_a_delayed_run_survives_a_restart(db):
     later = datetime.now(timezone.utc) + timedelta(minutes=3)
     assert (await after.runtime.work_once(later)).startswith("saved")
     assert (await db.users.find_one({"_id": uid}))["learned"]["goal_keywords"]
+
+
+def chat(n, minutes_ago=10):
+    return [{"id": ObjectId(), "role": "user", "via": "chat", "content": f"питання {i}",
+             "created_at": NOW - timedelta(minutes=minutes_ago)} for i in range(n)]
+
+
+async def test_ten_new_chat_messages_are_due(db):
+    many, few, old, declined = [await add_user(db, learned=mapped()) for _ in range(4)]
+    await db.conversations.insert_many([
+        {"user_id": many, "session_key": "a", "messages": chat(6)},
+        {"user_id": many, "session_key": "b", "messages": chat(4)},                  # counted across chats
+        {"user_id": few, "session_key": "a", "messages": chat(9)},
+        {"user_id": old, "session_key": "a", "messages": chat(12, minutes_ago=300)},  # already processed
+    ])
+    off = chat(10)                                    # declined as off topic: says nothing about the user
+    replies = [{"id": ObjectId(), "role": "assistant", "via": "chat", "reply_to": m["id"], "off_topic": True,
+                "created_at": m["created_at"]} for m in off]
+    await db.conversations.insert_one({"user_id": declined, "session_key": "a", "messages": off + replies})
+    d = await due(db)
+    assert d[many] == "chat" and few not in d and old not in d and declined not in d
+    assert (await due(db, LEARNING_CHAT_THRESHOLD=9))[few] == "chat"
+
+
+async def test_a_chat_nudge_is_queued_at_the_threshold_and_runs_on_the_worker(db):
+    from brain.agents.runs import AgentRuns
+    uid = await add_user(db, learned=mapped())
+    await db.conversations.insert_one({"user_id": uid, "session_key": "a", "messages": chat(9)})
+    s = settings()
+    assert not await auto.nudge_after_chat(db, s, uid)
+    await db.conversations.update_one({"user_id": uid}, {"$push": {"messages": {"$each": chat(1)}}})
+    assert not await auto.nudge_after_chat(db, make_settings(), uid)              # LEARNING_AUTO off
+    assert await auto.nudge_after_chat(db, s, uid)
+    assert await auto.nudge_after_chat(db, s, uid)                                # debounced: still one run
+    [queued] = await db.agent_runs.find({"status": "queued"}).to_list(None)
+    assert (queued["agent"], queued["scope"], queued["trigger"]) == (auto.AGENT, uid, auto.NUDGE)
+
+    answer = json.dumps(ANSWER, ensure_ascii=False)
+    learner = auto.Learner(db, s, FakeBackend(AuditLog(db), [answer]))
+    assert await learner.runtime.work_once() is None                              # waits the goal delay
+    later = datetime.now(timezone.utc) + timedelta(minutes=3)
+    assert (await learner.runtime.work_once(later)).startswith("saved")
+    assert not await auto.nudge_after_chat(db, s, uid)                             # processed: not due any more
+    assert await AgentRuns(db).next_due([auto.AGENT]) is None

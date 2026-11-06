@@ -14,7 +14,9 @@ with an OAuth login):
   дрони») starts a run after the same delay, so its web searches reach the pipeline's keyword record the same day
   (detected ones wait for the other triggers);
 - a rating counts toward LEARNING_FEEDBACK_THRESHOLD ratings since the last run; at the threshold, and at least
-  LEARNING_COOLDOWN_MINUTES after the last run, it starts a run.
+  LEARNING_COOLDOWN_MINUTES after the last run, it starts a run;
+- LEARNING_CHAT_THRESHOLD chat messages since the last run make a user due too: the web service queues a nudge
+  after a chat turn (nudge_after_chat), and the startup scan finds them.
 The job's own writes (learned, proposals, last_seen) don't trigger anything. Runs go in the background, so the
 stream keeps reading; after a dropped connection the stream resumes from the last event. One scan at startup
 (catch_up) runs whoever became due while the service was down. Every run goes through the agents' runtime
@@ -44,7 +46,8 @@ from brain.integrations.backends import ModelBackend
 logger = logging.getLogger("brain.agents.learner")
 
 AGENT = "learner"
-NUDGE = "nudge"               # a queued run after a goal, a comment or a stated interest: runs only if still due
+NUDGE = "nudge"               # a queued run after a goal, a comment, a stated interest or chat: runs only if still due
+NUDGED = ("goal", "comment", "interest", "chat")         # the reasons a nudge runs for
 STATED_KINDS = ("interest", "goal", "preference")      # explicit insights that start a run by themselves
 # Only changes that can make a user due reach the server: updates touching goals or feedback, and new records.
 STREAM = [{"$match": {"$or": [
@@ -58,7 +61,7 @@ STREAM = [{"$match": {"$or": [
 @dataclass
 class Due:
     user_id: object
-    reason: str           # "goal" | "comment" | "interest" | "feedback"
+    reason: str           # "goal" | "comment" | "interest" | "feedback" | "chat"
 
 
 def _utc(dt: datetime | None) -> datetime | None:
@@ -110,7 +113,41 @@ async def due_users(db: AsyncDatabase, settings: Settings, now: datetime | None 
         cooled = last is None or last <= now - timedelta(minutes=settings.learning_cooldown_minutes)
         if new >= settings.learning_feedback_threshold and cooled:
             out.append(Due(u["_id"], "feedback"))
+            continue
+        if await new_chat_messages(db, u["_id"], since) >= settings.learning_chat_threshold:
+            out.append(Due(u["_id"], "chat"))
     return out
+
+
+async def new_chat_messages(db: AsyncDatabase, user_id, since: datetime | None) -> int:
+    """The user's own chat messages after `since`, as the learning job reads them (questions the web analyst
+    declined as off topic left out)."""
+    n = 0
+    async for doc in db.conversations.find({"user_id": user_id}, {"messages.id": 1, "messages.role": 1,
+                                                                  "messages.via": 1, "messages.created_at": 1,
+                                                                  "messages.off_topic": 1, "messages.reply_to": 1}):
+        msgs = doc.get("messages") or []
+        declined = {m.get("reply_to") for m in msgs if m.get("off_topic")}
+        n += sum(1 for m in msgs if m.get("role") == "user" and m.get("via") in (None, "chat")
+                 and m.get("id") not in declined and profile._newer(m.get("created_at"), since))
+    return n
+
+
+async def nudge_after_chat(db: AsyncDatabase, settings: Settings, user_id) -> bool:
+    """After a web chat turn: once enough new chat messages arrived, queues a learner nudge in agent_runs after the
+    goal delay (a further message within it pushes it back), for the worker. True if queued. Never raises."""
+    if not settings.learning_auto:
+        return False
+    try:
+        due = await due_users(db, settings, user_id=user_id, goal_delay=False)
+        if not any(d.reason in NUDGED for d in due):        # a goal without keywords: its run reads the chat too
+            return False
+        delay = timedelta(minutes=settings.learning_goal_delay_minutes)
+        await AgentRuns(db).submit(AGENT, user_id, NUDGE, datetime.now(timezone.utc) + delay)
+        return True
+    except Exception as e:                     # noqa: BLE001 - a nudge must never break the chat
+        logger.error(f"learning chat nudge failed: {type(e).__name__}: {e}")
+        return False
 
 
 @dataclass
@@ -132,9 +169,9 @@ class Learner:
         return await self.runtime.capped(AGENT, now=now)
 
     async def _learn(self, user_id, reason: str) -> Report:
-        if reason == NUDGE:                       # queued after the delay: is a goal, comment or interest still new?
+        if reason == NUDGE:                       # queued after the delay: is a goal, comment, interest or chat still new?
             due = await due_users(self.db, self.settings, user_id=user_id, goal_delay=False, from_run=True)
-            if not any(d.reason in ("goal", "comment", "interest") for d in due):
+            if not any(d.reason in NUDGED for d in due):
                 return Report("nothing due any more")
         act = await profile.collect(self.db, user_id, self.backend.max_label)
         if act.empty:
