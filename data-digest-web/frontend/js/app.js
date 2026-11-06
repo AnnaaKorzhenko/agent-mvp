@@ -206,10 +206,18 @@ function botHtml(m) {
 
 function renderChat() {
   const { messages, title } = state.chat;
+  const canDelete = state.chat.id && messages.length && !state.chat.loading && !state.chat.opening;
+  const del = !canDelete ? ''
+    : state.chat.confirmDelete
+      ? `<span class="row chat-delete"><span class="sub">Видалити цей чат?</span>
+           <button class="btn-text" data-chat-delete="yes">Так, видалити</button>
+           <button class="btn-text" data-chat-delete="no">Скасувати</button></span>`
+      : '<button class="btn-text" data-chat-delete="ask">Видалити чат</button>';
   const header = `
     <header class="chat-header">
       <span class="chat-title">${esc(title)}</span>
-      <span class="pill">База: News · оновлюється щодня</span>
+      <span class="row chat-actions">${del}<span class="pill">База: News · оновлюється щодня</span></span>
+      ${state.chat.deleteError ? `<span class="sub">${esc(state.chat.deleteError)}</span>` : ''}
     </header>`;
 
   if (state.chat.opening) return `<div class="chat">${header}<div class="empty"><p class="sub">Відкриваю чат…</p></div></div>`;
@@ -295,6 +303,19 @@ function newChat() {
   state.chat = { id: null, title: 'Новий чат', messages: [], loading: false };
   go('chat');
   renderRecent();
+}
+
+async function deleteChat() {
+  const chat = state.chat;
+  try {
+    await api.deleteChat(chat.id);
+  } catch (e) {
+    chat.confirmDelete = false;
+    chat.deleteError = 'Не вдалося видалити чат: ' + e.message;
+    return render();
+  }
+  recentChats = recentChats.filter((c) => c.id !== chat.id);
+  if (state.chat === chat) newChat(); else renderRecent();
 }
 
 async function openChat(id) {
@@ -887,6 +908,12 @@ $main.addEventListener('click', async (e) => {
   const d = el.dataset;
 
   if (d.action === 'stop') return stopAnswer();
+  if (d.chatDelete) {
+    if (d.chatDelete === 'yes') return deleteChat();
+    state.chat.confirmDelete = d.chatDelete === 'ask';
+    state.chat.deleteError = '';
+    return render();
+  }
   if (d.agentDays) { state.agents.days = +d.agentDays; state.agents.note = ''; render(); return loadAgents(); }
   if (d.agentRun) return agentAction(() => api.runAgent(d.agentRun), (r) => `Запуск ${d.agentRun} у черзі (для: ${r.for}).`);
   if (d.agentPause) {

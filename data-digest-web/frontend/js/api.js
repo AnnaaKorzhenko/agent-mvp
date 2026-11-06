@@ -71,6 +71,12 @@ window.api = {
     return http(`/chats/${encodeURIComponent(id)}`);
   },
 
+  // DELETE /chats/:id -> { deleted }  (м’яке видалення: чат зникає з «Нещодавні», журнал лишається)
+  async deleteChat(id) {
+    if (USE_MOCK) return { deleted: id };
+    return http(`/chats/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  },
+
   // POST /chats/:id/messages { content, item? } -> потік server-sent events, по одному JSON у рядку `data: …`:
   //   { type: 'text', text } | { type: 'tool', name } | { type: 'done', message_id, stop_reason } | { type: 'error', detail }
   // onEvent викликається для кожної події; signal (AbortController) зупиняє відповідь.

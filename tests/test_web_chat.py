@@ -172,6 +172,33 @@ async def test_the_next_message_carries_the_thread_and_the_budget_stops_it(db):
     assert len(fake.requests) == 3
 
 
+async def test_a_deleted_chat_is_hidden_and_closed_but_kept(db):
+    fake = FakeClaude(message(block("text", text="Перша.")), message(block("text", text="Друга.")))
+    async with web(app_with(db, fake)) as c:
+        gone, kept = [(await c.post("/api/chats")).json()["id"] for _ in range(2)]
+        await c.post(f"/api/chats/{gone}/messages", json={"content": "Видалю"})
+        await c.post(f"/api/chats/{kept}/messages", json={"content": "Лишу"})
+        reply_id = (await c.get(f"/api/chats/{gone}")).json()["messages"][-1]["id"]
+        other = {**await db.conversations.find_one({"mcp_session_id": SESSION_PREFIX + gone}, {"_id": 0}),
+                 "user_id": "someone-else", "session_key": "other"}
+        await db.conversations.insert_one(other)               # another user's chat with the same id
+
+        assert (await c.delete(f"/api/chats/{gone}", headers={"X-Brain": ""})).status_code == 403
+        assert (await c.delete(f"/api/chats/{gone}")).json() == {"deleted": gone}
+        assert [x["id"] for x in (await c.get("/api/chats")).json()["chats"]] == [kept]
+        assert (await c.get(f"/api/chats/{gone}")).status_code == 404
+        r = await c.post(f"/api/chats/{gone}/messages", json={"content": "Ще?"})
+        assert events(r.text) == [{"type": "error", "detail": "Цей чат видалено. Почніть новий."}]
+        rated = await c.post(f"/api/chats/{gone}/messages/{reply_id}/rating", json={"reaction": "useful"})
+        assert rated.status_code == 404
+        assert (await c.delete(f"/api/chats/{gone}")).status_code == 404
+        assert (await c.delete(f"/api/chats/{'0' * 24}")).status_code == 404
+    assert len(fake.requests) == 2
+    mine = await db.conversations.find_one({"user_id": DEV_UID, "mcp_session_id": SESSION_PREFIX + gone})
+    assert mine["deleted_at"] and len(mine["messages"]) == 2          # a soft delete: nothing removed
+    assert "deleted_at" not in await db.conversations.find_one({"user_id": "someone-else"})
+
+
 async def test_a_bad_tool_input_goes_back_to_the_model_and_the_rounds_are_capped(db):
     bad = message(block("tool_use", id="tu_1", name="search_posts", input={"days": "lots"}), stop="tool_use")
     again = message(block("tool_use", id="tu_2", name="get_profile", input={}), stop="tool_use")

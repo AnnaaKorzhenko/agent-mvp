@@ -426,6 +426,13 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
             raise HTTPException(404, "Немає такого чату")
         return {"id": chat_id, "messages": messages}
 
+    @app.delete("/api/chats/{chat_id}")
+    async def delete_chat(chat_id: str, user: WebUser = Depends(web_user)):
+        """A soft delete: the chat leaves «Нещодавні» and can't be opened or continued; its log stays."""
+        if not await chat_on().delete(await context(user), chat_id_ok(chat_id)):
+            raise HTTPException(404, "Немає такого чату")
+        return {"deleted": chat_id}
+
     @app.post("/api/chats/{chat_id}/messages/{message_id}/rating")
     async def rate_reply(chat_id: str, message_id: str, body: RatingIn, user: WebUser = Depends(web_user)):
         """A rating of one of the analyst's replies: saved as feedback on an answer and on the reply itself."""
