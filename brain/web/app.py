@@ -15,6 +15,7 @@ import dataclasses
 import json
 import logging
 import secrets
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -96,6 +97,24 @@ class FeedbackIn(BaseModel):
     digest_id: str | None = None
     item_n: int | None = None
     text: str | None = Field(None, max_length=2000)
+
+
+PUSH_KEEP = 5                             # Web Push subscriptions per user: the newest stay
+B64URL = r"^[A-Za-z0-9_-]+={0,2}$"
+
+
+class PushKeys(BaseModel):
+    p256dh: str = Field(min_length=16, max_length=200, pattern=B64URL)
+    auth: str = Field(min_length=8, max_length=100, pattern=B64URL)
+
+
+class PushSubscribeIn(BaseModel):              # the browser's PushSubscription.toJSON()
+    endpoint: str = Field(min_length=12, max_length=1000, pattern=r"^https://\S+$")
+    keys: PushKeys
+
+
+class PushUnsubscribeIn(BaseModel):
+    endpoint: str = Field(min_length=12, max_length=1000, pattern=r"^https://\S+$")
 
 
 class PauseIn(BaseModel):
@@ -329,6 +348,29 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
         did = f"оцінив {what}: {body.reaction}" if body.reaction else \
             f"коментар до {'поста' if post else 'пункту'} {what.split(' ', 1)[1]}"
         return await tool(user, "record_feedback", body.model_dump(exclude_none=True), did)
+
+    # ---- Web Push: the morning digest as a notification (users.push_subscriptions) --------------------------
+
+    @app.get("/api/push/key")
+    async def push_key(user: WebUser = Depends(web_user)):
+        """The VAPID public key the browser subscribes with; null when Web Push isn't set up on the server."""
+        return {"key": settings.web_push_public_key or None}
+
+    @app.post("/api/push/subscribe")
+    async def push_subscribe(body: PushSubscribeIn, user: WebUser = Depends(web_user)):
+        if not settings.web_push_public_key:
+            raise HTTPException(503, "Сповіщення вимкнено: на сервері не задано WEB_PUSH_PUBLIC_KEY.")
+        ctx = await context(user)               # the session's user: never one named in the request
+        sub = {"endpoint": body.endpoint, "keys": body.keys.model_dump(), "created_at": datetime.now(timezone.utc)}
+        if not await svc.repos.users.save_push_subscription(ctx.user_id, sub, PUSH_KEEP):
+            raise HTTPException(404, "Немає такого користувача")
+        return {"subscribed": True}
+
+    @app.post("/api/push/unsubscribe")
+    async def push_unsubscribe(body: PushUnsubscribeIn, user: WebUser = Depends(web_user)):
+        ctx = await context(user)
+        removed = await svc.repos.users.delete_push_subscription(ctx.user_id, body.endpoint)
+        return {"subscribed": False, "removed": removed}
 
     # ---- the agents console (brain/web/admin.py): ADMIN_EMAILS only ------------------------------------------
 

@@ -322,6 +322,21 @@ class UsersRepo:
                                          "at": datetime.now(timezone.utc)}}})
         return result.modified_count == 1
 
+    async def save_push_subscription(self, user_id: UserId, sub: dict, keep: int) -> bool:
+        """Saves a Web Push subscription: one per endpoint (a new one replaces it), the newest `keep` kept.
+        Returns False if the user does not exist."""
+        key = user_key(user_id)
+        await self.col.update_one({"_id": key}, {"$pull": {"push_subscriptions": {"endpoint": sub["endpoint"]}}})
+        result = await self.col.update_one(
+            {"_id": key}, {"$push": {"push_subscriptions": {"$each": [sub], "$slice": -keep}}})
+        return result.matched_count == 1
+
+    async def delete_push_subscription(self, user_id: UserId, endpoint: str) -> bool:
+        """Removes the user's subscription for `endpoint`. Returns True if there was one."""
+        result = await self.col.update_one({"_id": user_key(user_id), "push_subscriptions.endpoint": endpoint},
+                                           {"$pull": {"push_subscriptions": {"endpoint": endpoint}}})
+        return result.modified_count == 1
+
     async def get_topics(self, user_id: UserId, findings: bool = False) -> list[TopicDoc]:
         """users.topics; without their findings and hits unless asked (those are the bulky part)."""
         pipeline: list[dict] = [{"$match": {"_id": user_key(user_id)}}, {"$project": {"topics": 1}}]
