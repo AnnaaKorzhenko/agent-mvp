@@ -94,6 +94,9 @@ class Settings(BaseSettings):
     # --- Automatic learning (brain/agents/learner.py) ---
     learning_auto: bool = Field(False, alias="LEARNING_AUTO")
     learning_feedback_threshold: int = Field(20, ge=1, alias="LEARNING_FEEDBACK_THRESHOLD")
+    # New chat messages since the last run that make a user due. The web service queues the nudge after a chat turn
+    # when LEARNING_AUTO is on there too (the worker runs it).
+    learning_chat_threshold: int = Field(10, ge=1, alias="LEARNING_CHAT_THRESHOLD")
     learning_goal_delay_minutes: int = Field(2, ge=0, alias="LEARNING_GOAL_DELAY_MINUTES")
     learning_cooldown_minutes: int = Field(30, ge=0, alias="LEARNING_COOLDOWN_MINUTES")
     learning_max_runs_per_day: int = Field(20, ge=0, alias="LEARNING_MAX_RUNS_PER_DAY")

@@ -26,6 +26,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult
 from pydantic import BaseModel, Field, ValidationError
 
+from brain.agents import learner
 from brain.audit.conversations import WIDGET_PREFIX
 from brain.audit.log import AuditLog
 from brain.config import Settings, get_settings
@@ -484,6 +485,8 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
             async for event in c.turn(caller(user), ctx, chat_id, text, user.name,
                                       body.item.model_dump() if body.item else None):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            # Enough new messages: the worker updates the profile (brain/agents/learner.py).
+            await learner.nudge_after_chat(svc.repos.db, settings, user_key(ctx.user_id))
 
         return StreamingResponse(events(), media_type="text/event-stream",
                                  headers={"X-Accel-Buffering": "no"})

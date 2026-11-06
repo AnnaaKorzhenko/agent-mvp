@@ -212,6 +212,21 @@ async def test_a_bad_tool_input_goes_back_to_the_model_and_the_rounds_are_capped
     assert "забагато кроків" in "".join(e.get("text", "") for e in ev)
 
 
+async def test_enough_chat_messages_queue_a_learner_nudge_for_the_worker(db):
+    await db.users.update_one({"_id": DEV_UID}, {"$set": {"identities": [{"provider": "dev", "subject": "d"}],
+                                                          "goals": []}})        # nothing else makes it due
+    fake = FakeClaude(*[message(block("text", text=f"Відповідь {i}.")) for i in range(3)])
+    async with web(app_with(db, fake, LEARNING_AUTO=True, LEARNING_CHAT_THRESHOLD=2)) as c:
+        chat_id = (await c.post("/api/chats")).json()["id"]
+        await c.post(f"/api/chats/{chat_id}/messages", json={"content": "Перше"})
+        assert await db.agent_runs.count_documents({}) == 0
+        await c.post(f"/api/chats/{chat_id}/messages", json={"content": "Друге"})
+        await c.post(f"/api/chats/{chat_id}/messages", json={"content": "Третє"})
+    [queued] = await db.agent_runs.find({}).to_list(None)                      # debounced: one run
+    assert (queued["agent"], queued["scope"], queued["status"], queued["trigger"]) == \
+        ("learner", DEV_UID, "queued", "nudge")
+
+
 async def test_without_a_key_the_chat_is_off(db):
     async with web(app_with(db, None)) as c:
         assert (await c.post("/api/chats")).status_code == 503
