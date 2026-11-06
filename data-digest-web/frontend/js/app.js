@@ -422,7 +422,12 @@ async function loadDigest() {
   state.digest.loading = true;
   state.digest.error = '';
   if (state.screen === 'digests') render();
-  try { state.digest.data = await api.getDigest(state.digest.side); }
+  try {
+    state.digest.data = await api.getDigest(state.digest.side);
+    (state.digest.data.digests || []).forEach((d) => (d.sections || []).forEach((sec) => (sec.items || []).forEach((it) => {
+      if (it.my_reaction) state.ratings[`d:${d.digest_id}/${it.n}`] = it.my_reaction;
+    })));
+  }
   catch (e) { state.digest.data = null; state.digest.error = 'Не вдалося завантажити дайджест: ' + e.message; }
   state.digest.loading = false;
   if (state.screen === 'digests') render();
@@ -483,7 +488,11 @@ async function loadSearch() {
   s.error = '';
   if (s.q.trim().length < 2) { s.items = []; s.note = 'Введіть, що шукати.'; }
   else {
-    try { const r = await api.searchPosts(s.q, s.side, s.days); s.items = r.results || []; s.note = r.note || ''; }
+    try {
+      const r = await api.searchPosts(s.q, s.side, s.days);
+      s.items = r.results || []; s.note = r.note || '';
+      s.items.forEach((p) => { if (p.my_reaction) state.ratings['p:' + p.post_id] = p.my_reaction; });
+    }
     catch (e) { s.items = []; s.error = 'Пошук не вдався: ' + e.message; }
   }
   // оновлюємо лише результати, щоб не збивати фокус у полі пошуку

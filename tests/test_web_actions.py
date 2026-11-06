@@ -11,10 +11,11 @@ from brain.audit.log import AuditLog
 from brain.db.repositories import Repos
 from brain.domain import proposals as proposals_domain
 from brain.integrations.backends import AnthropicBackend
-from brain.tools.base import Services
+from brain.tools import catalog
+from brain.tools.base import Origin, Services
 from brain.web.app import create_app
 from tests.conftest import make_settings
-from tests.fixtures.sample_data import DIGESTS, POSTS, USERS, load_samples
+from tests.fixtures.sample_data import DIGEST_UA, DIGESTS, P_GRANTS, POSTS, USERS, load_samples
 from tests.test_web_chat import FakeClaude, block, events, message
 
 DEV_UID = 820_000_003
@@ -120,6 +121,35 @@ async def test_a_news_item_is_rated_and_commented(db):
         assert r.status_code == 200 and r.json()["target_type"] == "post"
     [rating] = [f for f in (await user(db))["feedback"] if f["target_type"] == "digest_item"]
     assert rating["reaction"] == "not_useful" and rating["text"] == "це я вже знаю"
+
+
+async def test_earlier_ratings_come_back_with_the_digest_and_the_posts_but_not_to_claude(db):
+    bot = {"post_id": P_GRANTS, "reaction": "like", "text": "", "digest_id": DIGEST_UA, "item_n": 3,
+           "side": "ua", "category": "investments", "tags": [], "at": DIGESTS[0]["created_at"]}
+    await db.users.update_one({"_id": DEV_UID}, {"$push": {"feedback": bot}})          # the Telegram bot's rating
+    async with web(app_with(db)) as c:
+        await c.post("/api/feedback", json={"reaction": "useful", "target_type": "digest_item",
+                                            "digest_id": str(DIGEST_UA), "item_n": 1})
+        await c.post("/api/feedback", json={"reaction": "not_useful", "target_type": "digest_item",
+                                            "digest_id": str(DIGEST_UA), "item_n": 1})      # changed their mind
+        await c.post("/api/feedback", json={"reaction": "neutral", "target_type": "post", "post_id": str(P_GRANTS),
+                                            "text": "секретний коментар"})
+        digest = (await c.get("/api/digest", params={"side": "ua"})).json()
+        [d] = digest["digests"]
+        mine = {it["n"]: it["my_reaction"] for s in d["sections"] for it in s["items"]}
+        assert mine[1] == "not_useful" and mine[3] == "useful" and mine.get(2) is None
+        found = (await c.get("/api/posts", params={"q": "гранти", "days": 30})).json()["results"]
+        assert [(r["post_id"], r["my_reaction"]) for r in found] == [(str(P_GRANTS), "neutral")]
+        assert (await c.get(f"/api/posts/{P_GRANTS}")).json()["my_reaction"] == "neutral"
+        assert "секретний коментар" not in str(digest) + str(found)
+    svc = Services(settings=make_settings(DEV_USER_ID=DEV_UID), repos=Repos(db), audit=AuditLog(db),
+                   token=lambda: None)
+    specs = catalog.build(svc)
+    claude = Origin("mcp-1", {"name": "claude", "version": "1"}, lambda: False)
+    for name, args in (("get_digest", {"side": "ua"}), ("search_posts", {"query": "гранти", "days": 30}),
+                       ("get_post", {"post_id": str(P_GRANTS)})):
+        r = await catalog.call(svc, specs[name], args, "покажи", claude)
+        assert "my_reaction" not in str(r), name
 
 
 async def test_a_reply_of_the_analyst_is_rated(db):

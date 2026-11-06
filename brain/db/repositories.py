@@ -253,6 +253,14 @@ class UsersRepo:
         entries = (doc or {}).get("feedback") or []
         return entries[0] if entries else None
 
+    async def feedback_keys(self, user_id: UserId) -> list[dict]:
+        """What the user rated and how, oldest first: post_id, digest_id, item_n, target_type and reaction of each
+        entry, never the texts or reasons."""
+        doc = await self.col.find_one({"_id": user_key(user_id)},
+                                      {f"feedback.{k}": 1 for k in
+                                       ("post_id", "digest_id", "item_n", "target_type", "reaction")})
+        return (doc or {}).get("feedback") or []
+
     async def replace_feedback(self, user_id: UserId, match: dict | None, entry: dict, inc: dict,
                                keep: int) -> bool:
         """Removes earlier entries matching `match` (if given), pushes `entry` (capped at `keep`), applies `inc`.

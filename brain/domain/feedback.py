@@ -156,6 +156,27 @@ async def record_feedback(repos: Repos, ctx: UserContext, *, mcp_channels: list[
                           LEGACY.get(prev_reaction, prev_reaction), inc, _confirmation(reaction, inc))
 
 
+@dataclass
+class EarlierReactions:
+    posts: dict[str, str]                   # post_id -> reaction
+    items: dict[tuple[str, int], str]       # (digest_id, item_n) -> reaction
+
+
+async def earlier_reactions(repos: Repos, ctx: UserContext) -> EarlierReactions:
+    """The user's own latest reaction to each post and digest item, in the buttons' words, so the web UI shows
+    what was rated after a reload. Bot entries count too (the same person); only the reaction leaves here."""
+    out = EarlierReactions({}, {})
+    for f in await repos.users.feedback_keys(ctx.user_id):      # oldest first: a later rating wins
+        reaction = LEGACY.get(f.get("reaction"), f.get("reaction"))
+        if reaction not in REACTIONS or f.get("target_type") not in (None, *SCORED_TARGETS):
+            continue
+        if f.get("digest_id") is not None and f.get("item_n") is not None:
+            out.items[(str(f["digest_id"]), int(f["item_n"]))] = reaction
+        elif f.get("post_id") is not None:
+            out.posts[str(f["post_id"])] = reaction
+    return out
+
+
 async def _follow_up(repos: Repos, ctx: UserContext, feedback_id: str, reaction: str | None,
                      reasons: list[str] | None, text: str | None) -> FeedbackResult:
     """Adds a comment and/or reasons to an earlier rating. Scores don't change. With neither, the user

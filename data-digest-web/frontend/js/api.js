@@ -34,7 +34,8 @@ window.api = {
 
   // GET /digest?side=both|ua|ru|topics[&date=YYYY-MM-DD]
   // -> { date, digests: [{ side, side_note, digest_id, sections: [{ category, title, items: [
-  //        { ref, n, text, source_urls, source_post_ids, is_russian_source_claim, why: [..], relevance }] }] }],
+  //        { ref, n, text, source_urls, source_post_ids, is_russian_source_claim, why: [..], relevance,
+  //        my_reaction: useful | not_useful | neutral | null }] }] }],
   //      missing_sides, note, proposals: [...], topics_to_renew: [...] }
   async getDigest(side, date) {
     if (USE_MOCK) { await delay(150); return { date: null, digests: [], missing_sides: [], note: 'Демо-режим' }; }
@@ -45,7 +46,7 @@ window.api = {
 
   // GET /posts?q=...&side=all|ua|ru&days=1..30
   // -> { query, results: [{ ref, post_id, summary, tags, category, source_side, is_russian_source_claim,
-  //        channel: { username, country }, post_url, published_at, importance, why }], note }
+  //        channel: { username, country }, post_url, published_at, importance, why, my_reaction }], note }
   async searchPosts(q, side, days) {
     if (USE_MOCK) { await delay(150); return { query: q, results: [] }; }
     return http(`/posts?${new URLSearchParams({ q, side, days })}`);

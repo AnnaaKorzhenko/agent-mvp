@@ -31,6 +31,7 @@ from brain.audit.log import AuditLog
 from brain.config import Settings, get_settings
 from brain.db.client import get_db
 from brain.db.repositories import Repos, user_key
+from brain.domain import feedback as feedback_domain
 from brain.domain import proposals as proposals_domain
 from brain.domain.identity import IdentityError, UserContext, resolve_user
 from brain.integrations.backends import AnthropicBackend
@@ -286,10 +287,21 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
         return {"name": user.name, "email": user.email, "picture": user.picture, "dev": login is None,
                 "admin": is_admin(user)}
 
+    async def earlier(user: WebUser) -> feedback_domain.EarlierReactions:
+        """The user's own earlier ratings, added to what the web API returns (`my_reaction`), so the buttons show
+        them after a reload. Only here: the tools' output (and so Claude's) stays as it is."""
+        return await feedback_domain.earlier_reactions(svc.repos, await context(user))
+
     @app.get("/api/digest")
     async def digest(side: Literal["ua", "ru", "topics", "both"] = "both", date: str | None = None,
                      user: WebUser = Depends(web_user)):
-        return await tool(user, "get_digest", {"side": side, "date": date}, f"відкрив дайджест ({side})")
+        result = await tool(user, "get_digest", {"side": side, "date": date}, f"відкрив дайджест ({side})")
+        mine = await earlier(user)
+        for d in result.get("digests") or []:
+            for section in d.get("sections") or []:
+                for item in section.get("items") or []:
+                    item["my_reaction"] = mine.items.get((d.get("digest_id"), item.get("n")))
+        return result
 
     @app.get("/api/posts")
     async def posts(q: str = "", side: Literal["ua", "ru", "all"] = "all", days: int = Query(7, ge=1, le=30),
@@ -297,12 +309,18 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
         q = q.strip()
         if len(q) < 2:
             return {"query": q, "results": [], "note": "Введіть щонайменше 2 символи."}
-        return await tool(user, "search_posts", {"query": q, "side": side, "days": days, "limit": limit},
-                          f"шукає в постах: {q}")
+        result = await tool(user, "search_posts", {"query": q, "side": side, "days": days, "limit": limit},
+                            f"шукає в постах: {q}")
+        mine = await earlier(user)
+        for r in result.get("results") or []:
+            r["my_reaction"] = mine.posts.get(r.get("post_id"))
+        return result
 
     @app.get("/api/posts/{post_id}")
     async def post(post_id: str, user: WebUser = Depends(web_user)):
-        return await tool(user, "get_post", {"post_id": post_id}, "відкрив пост")
+        result = await tool(user, "get_post", {"post_id": post_id}, "відкрив пост")
+        result["my_reaction"] = (await earlier(user)).posts.get(result.get("post_id"))
+        return result
 
     @app.get("/api/profile")
     async def profile(user: WebUser = Depends(web_user)):
