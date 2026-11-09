@@ -201,3 +201,45 @@ ul.plain.editable li { display: flex; align-items: baseline; justify-content: sp
 .agent .head-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
 .agent.paused { border-color: var(--warn); background: var(--warn-soft); }
 .agent details summary { cursor: pointer; }
+
+
+
+
+/* Сторінка «Інвестиції»: карта, що згортається, і шар «натисніть, щоб керувати» */
+.fold { padding: 0; gap: 0; overflow: hidden; }
+.fold > summary {
+  list-style: none; display: flex; align-items: center; gap: 12px;
+  padding: 16px 22px; cursor: pointer; user-select: none;
+}
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary::before {
+  content: ''; flex-shrink: 0; width: 8px; height: 8px;
+  border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted);
+  transform: rotate(-45deg); transition: transform .15s;
+}
+.fold[open] > summary::before { transform: rotate(45deg); }
+.fold[open] > summary { border-bottom: 1px solid var(--border); }
+.fold > summary:hover { background: #FAF9F6; }
+.fold-title { font-size: 17px; font-weight: 600; }
+.fold > summary .sub { margin-left: auto; font-size: 13px; }
+.fold .note { padding: 10px 22px; border-top: 1px solid var(--border); }
+.fold .note a { color: var(--accent); }
+
+.embed-wrap { position: relative; }
+.embed-frame { display: block; width: 100%; height: 600px; border: 0; }
+@media (max-width: 600px) { .embed-frame { height: 75vh; } }
+.embed-shield {
+  position: absolute; inset: 0; width: 100%; border: 0; padding: 0;
+  background: transparent; cursor: pointer;
+  display: flex; align-items: flex-end; justify-content: center;
+}
+.embed-shield span {
+  margin-bottom: 16px; padding: 6px 12px; border-radius: 999px;
+  background: var(--ink-2); color: #fff; font-size: 13px;
+  opacity: 0; transition: opacity .15s;
+}
+.embed-shield:hover span, .embed-shield:focus-visible span { opacity: .9; }
+.embed-shield[hidden] { display: none; }
+
+
+.section-label[data-invest] { scroll-margin-top: 16px; }

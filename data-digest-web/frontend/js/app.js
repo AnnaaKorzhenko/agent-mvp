@@ -3,7 +3,8 @@
 const state = {
   screen: 'chat',
   chat: { id: null, title: 'Новий чат', messages: [], loading: false },
-  digest: { side: 'both', data: null, loading: false, error: '' },
+  // digest: { side: 'both', data: null, loading: false, error: '' },
+  digest: { side: 'both', data: null, loading: false, error: '', jump: null, jumpNote: '' },
   search: { q: '', side: 'all', days: 7, items: [], note: '', error: '', loading: false },
   proposals: { items: [], loading: false, error: '', answered: {}, reasonFor: null },
   profile: null,
@@ -34,11 +35,12 @@ function go(screen) {
   if (screen === 'profile') { state.push.note = ''; loadProfile(); loadPush(); }
   if (screen === 'proposals') loadProposals();
   if (screen === 'agents') loadAgents();
+  // if (screen === 'map') loadInvestDigest();
 }
 
 function render() {
   const view = { chat: renderChat, digests: renderDigests, search: renderSearch, profile: renderProfile,
-    proposals: renderProposals, agents: renderAgents }[state.screen];
+    proposals: renderProposals, agents: renderAgents, map: renderMap }[state.screen];
   $main.innerHTML = view();
   if (state.screen === 'chat') {
     const input = $main.querySelector('.composer input');
@@ -346,6 +348,9 @@ const SIDE_LABEL = { ua: 'Українські джерела', ru: 'Росій�
 const SIDE_NOTE = { ru: 'Заяви російських каналів, а не перевірені факти.' };
 // Емодзі з назв розділів пайплайна: на ноутбуці директора вони сірі квадрати
 const noEmoji = (s) => String(s || '').replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, '').trim();
+// Розділ про інвестиції впізнаємо за category або назвою: на нього веде кнопка зі сторінки «Інвестиції».
+const INVEST_RE = /invest|інвест|фінанс|funding/i;
+const isInvest = (s) => INVEST_RE.test(s.category || '') || INVEST_RE.test(s.title || '');
 
 function host(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch (e) { return 'джерело'; }
@@ -390,10 +395,10 @@ function digestHtml(data) {
       <h2 class="h2">${esc(SIDE_LABEL[d.side] || d.side)}</h2>
       ${SIDE_NOTE[d.side] ? `<span class="sub">${esc(SIDE_NOTE[d.side])}</span>` : ''}
       ${d.sections.map((s) => `
-        ${s.title ? `<div class="section-label">${esc(noEmoji(s.title))}</div>` : ''}
+                ${s.title || isInvest(s) ? `<div class="section-label"${isInvest(s) ? ' data-invest="1"' : ''}>${esc(noEmoji(s.title))}</div>` : ''}
         ${s.items.map((it) => itemHtml(it, d.side, d.digest_id)).join('')}`).join('')}
     </section>`).join('');
-  const notes = [data.note, (data.missing_sides || []).length ? 'Ще немає: ' + data.missing_sides.map((m) => SIDE_LABEL[m] || m).join(', ') : '']
+    const notes = [state.digest.jumpNote, data.note, (data.missing_sides || []).length ? 'Ще немає: ' + data.missing_sides.map((m) => SIDE_LABEL[m] || m).join(', ') : '']
     .filter(Boolean).map((n) => `<p class="sub">${esc(n)}</p>`).join('');
   const n = (data.proposals || []).length;
   const offer = n ? `<button class="notice" data-go="proposals">Система має для вас пропозицій: ${n}. Переглянути</button>` : '';
@@ -431,6 +436,12 @@ async function loadDigest() {
   catch (e) { state.digest.data = null; state.digest.error = 'Не вдалося завантажити дайджест: ' + e.message; }
   state.digest.loading = false;
   if (state.screen === 'digests') render();
+  if (state.digest.jump === 'invest' && state.screen === 'digests') {
+    state.digest.jump = null;
+    const target = $main.querySelector('[data-invest]');
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    else { state.digest.jumpNote = 'У дайджесті за цей день розділу про інвестиції немає.'; render(); state.digest.jumpNote = ''; }
+  }
 }
 
 // ---------- Пошук ----------
@@ -783,6 +794,40 @@ function correctedNote(r) {
   return parts.join(' ');
 }
 
+
+// ---------- Інвестиції: карта (згортається) + дайджест по інвестиціях ----------
+// ---------- Інвестиції: карта (згортається) і перехід до розділу «Інвестиції» в дайджесті ----------
+const MAP_SRC = 'https://defense-valley.news/embed/map/';
+let mapOpen = true;
+try { mapOpen = localStorage.getItem('mapOpen') !== '0'; } catch (e) { /* без сховища: карта розгорнута */ }
+
+function renderMap() {
+  return `
+    <div class="page"><div class="page-inner">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <h1 class="h1">Інвестиції в мілтех</h1>
+                <span class="sub">Карта європейського фінансування оборонних стартапів.</span>
+      </div>
+
+      <details class="card fold" id="map-fold" ${mapOpen ? 'open' : ''}>
+        <summary>
+          <span class="fold-title">Карта інвестицій у Європі</span>
+          <span class="sub">Defense Valley News</span>
+        </summary>
+        <div class="embed-wrap">
+          <iframe class="embed-frame"
+            src="${MAP_SRC}"
+            title="European defense-tech investment map — Defense Valley News"
+            loading="lazy"
+            referrerpolicy="strict-origin-when-cross-origin"
+            sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"></iframe>
+        </div>
+        <p class="note">Дані: <a href="https://defense-valley.news" target="_blank" rel="noopener noreferrer">Defense Valley News — European defense-tech funding tracker</a></p>
+      </details>
+      <button class="notice" data-invest-digest="1">Новини про інвестиції з нашої бази: перейти до розділу «Інвестиції» в дайджесті →</button>
+    </div></div>`;
+}
+
 // ---------- Агенти (лише для адміністраторів) ----------
 const RUN_STATUS = { done: 'готово', failed: 'помилка', skipped: 'пропущено', expired: 'обірвано', running: 'працює', queued: 'у черзі' };
 const KIND_NAME = { goal: 'цілі', topic: 'теми', advice: 'поради' };
@@ -917,6 +962,7 @@ $main.addEventListener('click', async (e) => {
   const d = el.dataset;
 
   if (d.action === 'stop') return stopAnswer();
+  if (d.mapActivate) { el.hidden = true; return; }
   if (d.chatDelete) {
     if (d.chatDelete === 'yes') return deleteChat();
     state.chat.confirmDelete = d.chatDelete === 'ask';
@@ -955,11 +1001,17 @@ $main.addEventListener('click', async (e) => {
   }
   if (d.prefsMentions) return profileAction(() => api.setPrefs({ mentions: d.prefsMentions === '1' }), 'Збережено.');
   if (d.push) return setPush(d.push === '1');
-
+  if (d.investDigest) { state.digest.side = 'both'; state.digest.jump = 'invest'; return go('digests'); }
   if (d.sideDigest) { state.digest.side = d.sideDigest; return loadDigest(); }
   if (d.searchSide) { state.search.side = d.searchSide; render(); return loadSearch(); }
   if (d.days) { state.search.days = +d.days; render(); return loadSearch(); }
 });
+
+$main.addEventListener('toggle', (e) => {
+  if (e.target.id !== 'map-fold') return;
+  mapOpen = e.target.open;
+  try { localStorage.setItem('mapOpen', mapOpen ? '1' : '0'); } catch (err) { /* не критично */ }
+}, true);
 
 // ---------- Старт ----------
 loadMe();
