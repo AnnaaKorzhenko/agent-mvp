@@ -161,16 +161,23 @@ DEEP_DIVE_STEPS = (
 
 # ---- the handlers -----------------------------------------------------------------------------------------
 
-async def get_digest(call: Call, side: str = "both", date: str | None = None, as_text: bool = False):
+async def get_digest(call: Call, side: str = "both", date: str | None = None, as_text: bool = False,
+                     unseen_only: bool = False):
     svc = call.svc
     widget = not as_text and call.origin.widgets()
 
     async def body(ctx: UserContext) -> CallToolResult:
+        day = digests_domain.unseen_day(date) if unseen_only else date
         await topics_domain.sync_if_due(svc.repos)
-        res = await digests_domain.get_digests(svc.repos, ctx, side, date)
+        res = await digests_domain.get_digests(svc.repos, ctx, side, day)
+        found = bool(res.digests)
+        if unseen_only:
+            await digests_domain.drop_seen(svc.repos, ctx, res)
         result = _digest_out(res)
-        if not result.digests:
+        if not found:
             result.note = "No digest found for this date. Say so; do not invent news."
+        elif not result.digests:
+            result.note = digests_domain.ALL_SEEN_NOTE
         result.shown_in_widget = widget and bool(result.digests)
         await _renewals(svc, ctx, result)
         await _proposals(svc, ctx, result)
@@ -193,7 +200,8 @@ async def get_morning_digest(call: Call):
                 status=m.status, date=m.result.date if m.result else None, digests=[],
                 missing_sides=m.result.missing_sides if m.result else [],
                 note=("Today's digest isn't complete yet." if m.status == "not_ready"
-                      else "Today's digest was already delivered.") + " Don't present any news.")
+                      else "Today's digest was already delivered. You may offer to show what the user hasn't "
+                           "seen of it yet (get_digest with unseen_only=true).") + " Don't present any news.")
             await call.done(items=0)
             return CallToolResult(content=[TextContent(type="text", text=result.model_dump_json())],
                                   structured_content=result.model_dump(mode="json"))

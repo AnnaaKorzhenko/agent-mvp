@@ -4,7 +4,7 @@ const state = {
   screen: 'chat',
   chat: { id: null, title: 'Новий чат', messages: [], loading: false },
   // digest: { side: 'both', data: null, loading: false, error: '' },
-  digest: { side: 'both', data: null, loading: false, error: '', jump: null, jumpNote: '' },
+  digest: { side: 'both', unseen: false, data: null, loading: false, error: '', jump: null, jumpNote: '' },
   search: { q: '', side: 'all', days: 7, items: [], note: '', error: '', loading: false },
   proposals: { items: [], loading: false, error: '', answered: {}, reasonFor: null },
   profile: null,
@@ -467,7 +467,10 @@ function renderDigests() {
           <span class="sub">${d.data?.date ? esc(d.data.date) + ' · ' : ''}упорядковано за вашими цілями та інтересами</span>
         </div>
       </div>
-      <div class="segmented" role="group" aria-label="Джерела">${seg}</div>
+      <div class="row">
+        <div class="segmented" role="group" aria-label="Джерела">${seg}</div>
+        <button class="chip ${d.unseen ? 'on' : ''}" role="switch" aria-checked="${d.unseen}" data-unseen-digest="${d.unseen ? '0' : '1'}">Лише нове за сьогодні</button>
+      </div>
       ${d.loading ? '<p class="sub">Завантаження…</p>' : d.error ? `<p class="sub">${esc(d.error)}</p>` : digestHtml(d.data)}
     </div></div>`;
 }
@@ -477,7 +480,7 @@ async function loadDigest() {
   state.digest.error = '';
   if (state.screen === 'digests') render();
   try {
-    state.digest.data = await api.getDigest(state.digest.side);
+    state.digest.data = await api.getDigest(state.digest.side, null, state.digest.unseen);
     (state.digest.data.digests || []).forEach((d) => (d.sections || []).forEach((sec) => (sec.items || []).forEach((it) => {
       if (it.my_reaction) state.ratings[`d:${d.digest_id}/${it.n}`] = it.my_reaction;
     })));
@@ -1052,7 +1055,8 @@ $main.addEventListener('click', async (e) => {
   }
   if (d.prefsMentions) return profileAction(() => api.setPrefs({ mentions: d.prefsMentions === '1' }), 'Збережено.');
   if (d.push) return setPush(d.push === '1');
-  if (d.investDigest) { state.digest.side = 'both'; state.digest.jump = 'invest'; return go('digests'); }
+  if (d.investDigest) { state.digest.side = 'both'; state.digest.unseen = false; state.digest.jump = 'invest'; return go('digests'); }
+  if (d.unseenDigest) { state.digest.unseen = d.unseenDigest === '1'; return loadDigest(); }
   if (d.sideDigest) { state.digest.side = d.sideDigest; return loadDigest(); }
   if (d.searchSide) { state.search.side = d.searchSide; render(); return loadSearch(); }
   if (d.days) { state.search.days = +d.days; render(); return loadSearch(); }

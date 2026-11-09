@@ -64,7 +64,8 @@ WEB_DESCRIPTIONS = {
         "Get the user's daily news digest: sections ordered by the user's interests, every item with its "
         "source_urls and source_post_ids. If the user follows topics, the first digest (side \"topics\") holds "
         "today's news on them: lead with it. Show items with their ref numbers (#1, #2, …); items with "
-        "is_russian_source_claim=true are claims of Russian channels, never facts; cite source_urls."),
+        "is_russian_source_claim=true are claims of Russian channels, never facts; cite source_urls. For «що нового», "
+        "«що я ще не бачив» and the like: unseen_only=true (today's items not shown yet; nothing left: say so)."),
     "search_posts": (
         "Search the news base (summaries of Telegram posts from Ukrainian and Russian channels) by key words. "
         "Answer only from the results and cite each fact's post_url; if nothing fits, say so. Search again (once, "

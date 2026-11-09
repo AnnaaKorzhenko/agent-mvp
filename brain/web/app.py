@@ -295,8 +295,10 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
 
     @app.get("/api/digest")
     async def digest(side: Literal["ua", "ru", "topics", "both"] = "both", date: str | None = None,
-                     user: WebUser = Depends(web_user)):
-        result = await tool(user, "get_digest", {"side": side, "date": date}, f"відкрив дайджест ({side})")
+                     unseen_only: bool = False, user: WebUser = Depends(web_user)):
+        args = {"side": side, "date": date} | ({"unseen_only": True} if unseen_only else {})
+        result = await tool(user, "get_digest", args,
+                            f"відкрив дайджест ({side}{', лише нове' if unseen_only else ''})")
         mine = await earlier(user)
         for d in result.get("digests") or []:
             for section in d.get("sections") or []:

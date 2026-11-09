@@ -129,3 +129,51 @@ async def test_a_failure_to_mark_never_fails_the_call(world, monkeypatch):
     async with Client(create_server(svc)) as c:
         r = await c.call_tool("get_digest", {"user_message": "дайджест", "date": kyiv(0).date().isoformat()})
         assert not r.is_error and r.structured_content["digests"]
+
+
+async def test_unseen_only_in_the_web_shows_what_claude_did_not(world):
+    db, uid = world
+    ua = await add_digest(db, "ua", kyiv(0))
+    ru = await add_digest(db, "ru", kyiv(0))
+    settings = make_settings(DEV_USER_ID=uid, TRUST_LEVEL="cloud")
+    svc = Services(settings=settings, repos=Repos(db), audit=AuditLog(db), token=lambda: None)
+    async with Client(create_server(svc)) as c:
+        r = await c.call_tool("get_digest", {"user_message": "дайджест", "side": "ua"})
+        assert not r.is_error and r.structured_content["digests"]
+    app = create_app(settings, svc)
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="https://app.example.com") as w:
+        r = await w.get("/api/digest", params={"unseen_only": "1"})
+        assert r.status_code == 200
+        body = r.json()
+        assert [d["digest_id"] for d in body["digests"]] == [ru]
+        assert all(s["items"] for d in body["digests"] for s in d["sections"])
+        again = (await w.get("/api/digest", params={"unseen_only": "1"})).json()
+        assert again["digests"] == [] and again["note"] == digests.ALL_SEEN_NOTE
+        full = (await w.get("/api/digest")).json()
+        assert {d["digest_id"] for d in full["digests"]} == {ua, ru}
+
+
+async def test_unseen_only_keeps_the_order_and_drops_empty_sections(world):
+    db, uid = world
+    repos = Repos(db)
+    day = kyiv(0).date().isoformat()
+    await add_digest(db, "ua", kyiv(0))
+    res = await digests.get_digests(repos, ctx(uid), "ua", day)
+    v = res.digests[0]
+    assert len(v.sections) > 1
+    first, rest = v.sections[0], v.sections[1:]
+    await repos.users.mark_digest_seen(uid, day, [digests.seen_key(v.digest.id, v.number(i)) for i in first[1]],
+                                       digests.SEEN_MAX)
+    await digests.drop_seen(repos, ctx(uid), res)
+    assert [(s, [v.number(i) for i in its]) for s, its in res.digests[0].sections] == \
+           [(s, [v.number(i) for i in its]) for s, its in rest]
+
+
+async def test_unseen_only_refuses_a_past_date(world):
+    db, uid = world
+    svc = Services(settings=make_settings(DEV_USER_ID=uid, TRUST_LEVEL="cloud"), repos=Repos(db),
+                   audit=AuditLog(db), token=lambda: None)
+    app = create_app(svc.settings, svc)
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="https://app.example.com") as w:
+        r = await w.get("/api/digest", params={"unseen_only": "1", "date": kyiv(8, days=-1).date().isoformat()})
+        assert r.status_code == 400 and "today" in r.text

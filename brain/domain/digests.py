@@ -153,6 +153,28 @@ async def mark_seen(repos: Repos, ctx: UserContext, res: DigestResultView, today
     return len(keys)
 
 
+ALL_SEEN_NOTE = "Усе з сьогоднішнього дайджесту ви вже бачили."
+
+
+def unseen_day(day: str | None, today: date | None = None) -> str:
+    """The date for an unseen-only request: today (Kyiv) only, the default."""
+    today = today or kyiv_today()
+    wanted = parse_date(day)
+    if wanted is not None and wanted != today:
+        raise InvalidInput("unseen_only works for today's digest only: omit date or pass today's")
+    return today.isoformat()
+
+
+async def drop_seen(repos: Repos, ctx: UserContext, res: DigestResultView) -> None:
+    """Keeps only the items the user wasn't shown today, in the same order and sections; empty sections and
+    digests are dropped."""
+    seen = await repos.users.digest_seen(ctx.user_id, res.date or kyiv_today().isoformat())
+    for v in res.digests:
+        v.sections = [(s, kept) for s, items in v.sections
+                      if (kept := [i for i in items if seen_key(v.digest.id, v.number(i)) not in seen])]
+    res.digests = [v for v in res.digests if v.sections]
+
+
 MORNING_WAIT_UNTIL = 12      # Kyiv hour: until then, wait for both sides before delivering
 
 
