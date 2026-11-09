@@ -22,7 +22,7 @@ logger = logging.getLogger("brain.db")
 
 M = TypeVar("M", bound=BaseModel)
 
-# What a post search may return; raw_text / clean_text are never read.
+# What a post search may return; raw_text / clean_text are only read by PostsRepo.own_text.
 POST_FIELDS = {"post_url": 1, "channel_id": 1, "published_at": 1, "processed": 1, "summary": 1,
                "source_side": 1, "category": 1, "tags": 1, "importance": 1, "is_ad": 1,
                "is_duplicate": 1, "views": 1, "sensitivity": 1}
@@ -67,6 +67,14 @@ class PostsRepo:
             return None
         doc = await self.col.find_one({"_id": oid, "processed": True, **sensitivity_filter(allowed)}, POST_FIELDS)
         return parse(PostDoc, doc, "posts")
+
+    async def own_text(self, post_id: str | ObjectId) -> dict:
+        """The post's own text fields ({clean_text, raw_text, text_removed}, whichever are set): read only for
+        get_post(full_text=True), after the post itself passed the sensitivity check."""
+        oid = to_object_id(post_id)
+        doc = await self.col.find_one({"_id": oid}, {"_id": 0, "clean_text": 1, "raw_text": 1, "text_removed": 1}) \
+            if oid else None
+        return doc or {}
 
     async def get_many(self, ids: list, allowed: list[str]) -> dict[str, PostDoc]:
         oids = [o for o in (to_object_id(i) for i in ids) if o]

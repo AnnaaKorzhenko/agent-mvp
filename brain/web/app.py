@@ -318,8 +318,9 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
         return result
 
     @app.get("/api/posts/{post_id}")
-    async def post(post_id: str, user: WebUser = Depends(web_user)):
-        result = await tool(user, "get_post", {"post_id": post_id}, "відкрив пост")
+    async def post(post_id: str, full_text: bool = False, user: WebUser = Depends(web_user)):
+        args = {"post_id": post_id, **({"full_text": True} if full_text else {})}
+        result = await tool(user, "get_post", args, "відкрив повний текст поста" if full_text else "відкрив пост")
         result["my_reaction"] = (await earlier(user)).posts.get(result.get("post_id"))
         return result
 

@@ -120,6 +120,8 @@ async def test_search_posts_validates_arguments(client):
 async def test_get_post(client, test_db):
     ok = await client.call_tool("get_post", {"post_id": str(P_DRONES)})
     assert ok.structured_content["channel"]["username"] == "ua_defense_news"
+    ua = await client.call_tool("get_post", {"post_id": str(P_DRONES), "full_text": True})
+    assert ua.structured_content["full_text"] is None                    # a ua post's link works: no text
     for bad in (str(P_SECRET), "nope"):
         r = await client.call_tool("get_post", {"post_id": bad})
         assert r.is_error and "Post not found" in r.content[0].text

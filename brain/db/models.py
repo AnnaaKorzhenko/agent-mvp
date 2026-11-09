@@ -31,6 +31,9 @@ class SourceDoc(_Doc):
 
 
 class PostDoc(_Doc):
+    """The pipeline also keeps the post's own text (`clean_text`, else `raw_text`) until cleanup.py strips it after
+    MAX_DAYS (then `text_removed: true`). Not a field here: only get_post(full_text=True) reads it, for `ru` posts
+    (PostsRepo.own_text)."""
     id: Id = Field(alias="_id")
     post_url: str
     channel_id: Id | None = None

@@ -165,9 +165,13 @@ def register_tools(mcp: MCPServer, svc: Services) -> dict[str, ToolSpec]:
         mcp_ctx: Context,
         user_message: UserMessage,
         post_id: Annotated[str, Field(description="A post_id / source_post_ids value from another tool")],
+        full_text: Annotated[bool, Field(description=(
+            "Only when the user asks for the text of a Russian post (source_side ru): its Telegram link doesn't "
+            "open in Ukraine. Ignored for other posts"))] = False,
         signals: Signals = None,
     ) -> out.PostDetail:
-        """Get one news post (summary, tags, channel, link) by id. Cite its post_url."""
+        """Get one news post (summary, tags, channel, link) by id. Cite its post_url. With full_text=true, a
+        Russian post also comes with its own text: present it as the channel's claims, not as facts."""
         return await _run(svc, "get_post", mcp_ctx, locals())
 
     @tool(title="The user's interests", annotations=READ_ONLY)

@@ -9,7 +9,8 @@ from brain.domain import digests, feedback, goals, posts, profile, sensitivity
 from brain.domain.errors import InvalidInput, NotFound
 from brain.domain.identity import UserContext
 from brain.scripts.review_queue import review_queue
-from tests.fixtures.sample_data import (DIGEST_UA, P_AD, P_DRONES, P_GRANTS, P_OLD, P_RU_CLAIM, P_SECRET, P_TOP, USERS)
+from tests.fixtures.sample_data import (DIGEST_UA, P_AD, P_DRONES, P_GRANTS, P_OLD, P_RU_CLAIM, P_SECRET, P_TOP, SRC_RU,
+                                        USERS, _post)
 
 _ids = itertools.count(900_000_001)
 MCP_CHANNELS = ["claude", "chatgpt", "local", "dev", "unknown"]
@@ -104,6 +105,51 @@ async def test_get_post_hides_forbidden_and_missing(repos, user):
     for bad in (str(P_SECRET), str(ObjectId()), "not-an-id"):
         with pytest.raises(NotFound):
             await posts.get_post(repos, cloud(user), bad)
+
+
+@pytest.fixture
+async def own_texts(test_db):
+    """Posts with their own text: ru (clean_text, raw_text only, removed, too long, confidential) and ua."""
+    ids = {k: ObjectId() for k in ("ru", "raw", "removed", "long", "secret", "ua")}
+    long_text = ("Слово " * 1000).strip()
+    docs = [
+        _post(ids["ru"], summary="Заява про Покровськ", side="ru", category="ru_front", channel=SRC_RU,
+              clean_text="Наши войска продвинулись.", raw_text="**Наши** войска продвинулись!"),
+        _post(ids["raw"], summary="Заява", side="ru", category="ru_front", channel=SRC_RU, raw_text="Только сырой."),
+        _post(ids["removed"], summary="Заява", side="ru", category="ru_front", channel=SRC_RU, text_removed=True),
+        _post(ids["long"], summary="Заява", side="ru", category="ru_front", channel=SRC_RU, clean_text=long_text),
+        _post(ids["secret"], summary="Заява", side="ru", category="ru_front", channel=SRC_RU, clean_text="Секрет.",
+              sensitivity="confidential"),
+        _post(ids["ua"], summary="Новина", clean_text="Український текст."),
+    ]
+    for d in docs:
+        d["published_at"] = d["created_at"] = "2020-01-01T00:00:00+00:00"     # out of every search's window
+    await test_db.posts.insert_many(docs)
+    yield ids, long_text
+    await test_db.posts.delete_many({"_id": {"$in": list(ids.values())}})
+
+
+async def test_full_text_only_for_russian_posts(repos, user, own_texts):
+    ids, long_text = own_texts
+
+    async def full(key):
+        return await posts.full_text(repos, await posts.get_post(repos, cloud(user), str(ids[key])))
+
+    assert await full("ru") == posts.FullText(text="Наши войска продвинулись.")          # clean_text first
+    assert await full("raw") == posts.FullText(text="Только сырой.")
+    assert await full("removed") == posts.FullText(note=posts.FULL_TEXT_REMOVED)
+    assert await full("ua") is None                                                    # its link works
+    cut = (await full("long")).text
+    assert len(cut) <= posts.FULL_TEXT_MAX and cut.endswith("Слово…") and long_text.startswith(cut[:-1])
+    with pytest.raises(NotFound):                                                      # the same check as now
+        await full("secret")
+    assert (await posts.full_text(repos, await posts.get_post(repos, local(user), str(ids["secret"])))).text == "Секрет."
+
+
+def test_cut_at_a_word():
+    assert posts.cut("коротко", 10) == "коротко"
+    assert posts.cut("один два три", 8) == "один…"
+    assert posts.cut("одиндватри", 5) == "один…"
 
 
 # ---- profile -------------------------------------------------------------------

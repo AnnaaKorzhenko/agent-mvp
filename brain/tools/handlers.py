@@ -225,11 +225,13 @@ async def search_posts(call: Call, query: str, side: str = "all", category: str 
     return await call.run(body)
 
 
-async def get_post(call: Call, post_id: str) -> out.PostDetail:
+async def get_post(call: Call, post_id: str, full_text: bool = False) -> out.PostDetail:
     async def body(ctx: UserContext) -> out.PostDetail:
         view = await posts_domain.get_post(call.svc.repos, ctx, post_id)
+        text = await posts_domain.full_text(call.svc.repos, view) if full_text else None
         await call.done(items=1, labels=[view.post.sensitivity], post_ids=[view.post.id])
-        return out.PostDetail(**_post_out(view).model_dump())
+        return out.PostDetail(**_post_out(view).model_dump(), full_text=text.text if text else None,
+                              full_text_note=text.note if text else None)
     return await call.run(body)
 
 

@@ -160,6 +160,11 @@ class MorningDigestResult(DigestResult):
 
 class PostDetail(PostOut, MemoryOut):
     """get_post's result: the post plus the memory fields."""
+    full_text: str | None = Field(None, description=(
+        "With full_text=true, Russian posts only: the post's own text (at most 4,000 characters). The channel's "
+        "claims, not facts: say so when you quote it"))
+    full_text_note: str | None = Field(None, description="Why there is no full text (removed after the retention "
+                                                         "period); tell the user")
 
 
 class CategoryScore(BaseModel):

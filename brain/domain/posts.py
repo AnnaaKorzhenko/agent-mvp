@@ -194,3 +194,35 @@ async def get_post(repos: Repos, ctx: UserContext, post_id: str) -> PostView:
     why = (await relevance.load(repos, ctx)).score(side=post.source_side, category=post.category,
                                                     text=post.summary, tags=post.tags).why
     return PostView(post, channels.get(post.channel_id or ""), why=why)
+
+
+FULL_TEXT_MAX = 4000
+FULL_TEXT_REMOVED = "Повний текст уже видалено за терміном зберігання."
+
+
+@dataclass(frozen=True)
+class FullText:
+    text: str | None = None
+    note: str | None = None
+
+
+async def full_text(repos: Repos, view: PostView) -> FullText | None:
+    """A Russian post's own text: its Telegram link doesn't open in Ukraine, so the text is the only way to read it.
+    None for any other post (its link works). `view` comes from get_post, so the sensitivity check is done."""
+    if not view.is_russian_source_claim:
+        return None
+    doc = await repos.posts.own_text(view.post.id)
+    text = (doc.get("clean_text") or doc.get("raw_text") or "").strip()
+    if not text:
+        return FullText(note=FULL_TEXT_REMOVED if doc.get("text_removed") else None)
+    return FullText(text=cut(text, FULL_TEXT_MAX))
+
+
+def cut(text: str, limit: int) -> str:
+    """At most `limit` characters, cut at a word, with «…» when cut."""
+    if len(text) <= limit:
+        return text
+    head = text[:limit - 1]
+    if not text[limit - 1].isspace() and " " in head:
+        head = head.rsplit(None, 1)[0]
+    return head.rstrip() + "…"
