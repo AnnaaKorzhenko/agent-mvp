@@ -14,6 +14,9 @@
 - An agent paused from the web console (brain/web/admin.py) has one marker {agent, scope: "control", status:
   "paused", paused_by, created_at}: no ttl_at (it stays until unpaused), outside the queue and the uniqueness
   indexes (they cover queued and running only). The runtime checks it before every run.
+- The agents' worker (brain/agents/worker.py) keeps one marker {agent: "worker", scope: "control", status:
+  "heartbeat", at, host, pid}, rewritten every HEARTBEAT_EVERY: the console shows when it was last alive. Like the
+  pause markers it is no run: every count of runs and usage leaves scope "control" out.
   `output` holds a global agent's result for later runs (the scout's trend snapshot: built from posts, never
   from users' data).
 """
@@ -34,7 +37,9 @@ LEASE = timedelta(minutes=15)
 GLOBAL = "global"
 MAX_OUTCOME = 300
 PAUSED = "paused"
-CONTROL = "control"               # the scope of pause markers: not a user, not GLOBAL
+CONTROL = "control"               # the scope of the console's markers: not a user, not GLOBAL
+WORKER, HEARTBEAT = "worker", "heartbeat"
+HEARTBEAT_EVERY = timedelta(minutes=1)
 
 
 def _day_start(now: datetime) -> datetime:
@@ -160,6 +165,18 @@ class AgentRuns:
         else:
             await self.col.delete_many(key)
 
+    async def beat(self, host: str, pid: int, now: datetime | None = None) -> None:
+        """The worker's heartbeat: one marker, rewritten each time."""
+        await self.col.update_one({"agent": WORKER, "scope": CONTROL, "status": HEARTBEAT},
+                                  {"$set": {"at": now or datetime.now(timezone.utc), "host": host, "pid": pid}},
+                                  upsert=True)
+
+    async def heartbeat(self) -> dict | None:
+        """{at, host, pid} of the worker's last heartbeat, or None if it never ran."""
+        doc = await self.col.find_one({"agent": WORKER, "scope": CONTROL, "status": HEARTBEAT},
+                                      {"at": 1, "host": 1, "pid": 1})
+        return {k: doc.get(k) for k in ("at", "host", "pid")} if doc else None
+
     async def running_scopes(self, agent: str, now: datetime | None = None) -> set:
         now = now or datetime.now(timezone.utc)
         return {d["scope"] async for d in self.col.find(
@@ -168,11 +185,11 @@ class AgentRuns:
     async def usage(self, now: datetime | None = None, *, agent: str | None = None, scope: Any = None) -> Usage:
         """Today's (UTC) runs that called a model, and their tokens: of one agent, one scope, or all."""
         now = now or datetime.now(timezone.utc)
-        match: dict = {"started_at": {"$gte": _day_start(now)}, "model_calls": {"$gt": 0}}
+        match: dict = {"started_at": {"$gte": _day_start(now)}, "model_calls": {"$gt": 0}, "scope": {"$ne": CONTROL}}
         if agent is not None:
             match["agent"] = agent
         if scope is not None:
-            match["scope"] = scope
+            match["scope"] = scope            # a user or GLOBAL: never CONTROL
         rows = await (await self.col.aggregate([
             {"$match": match},
             {"$group": {"_id": None, "runs": {"$sum": 1}, "tokens": {"$sum": {"$add": [

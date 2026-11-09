@@ -15,7 +15,7 @@ from brain.domain.identity import UserContext
 from brain.mcp_server.server import create_server
 from brain.mcp_server.tools import Services
 from tests.conftest import make_settings
-from tests.fixtures.sample_data import DIGEST_UA, P_DRONES, P_GRANTS, USERS
+from tests.fixtures.sample_data import DIGEST_UA, P_DRONES, P_GRANTS, P_TOP, USERS
 
 _ids = itertools.count(910_000_001)
 FOUND = [{"title": "Brave1: гранти на РЕБ", "url": "https://brave1.gov.ua/news/1", "source": "Brave1",
@@ -404,3 +404,66 @@ def test_the_name_is_quoted_for_the_web_search():
     t = topics.TopicDoc(id="1", name="Рассвет", norm="рассвет", specific=["Рассвет"],
                         queries=["Рассвет спутниковая связь", '"Рассвет" спутниковая связь'])
     assert {q["q"] for q in topics.keyword_queries([t])} == {'"Рассвет" спутниковая связь'}
+
+
+# ---- related posts by the source posts' own vectors ---------------------------------------------
+
+@pytest.fixture
+def vectors(monkeypatch):
+    """Semantic search on, the Atlas part (`_similar_ids`) stubbed: tests set `scores` or `error`."""
+    from brain.domain import semantic
+    state = {"scores": {}, "error": None, "calls": []}
+
+    async def similar(source_ids):
+        state["calls"].append(source_ids)
+        if state["error"]:
+            raise state["error"]
+        return dict(state["scores"])
+
+    async def no_search(*args, **kwargs):           # the name searches stay on the keyword path
+        raise semantic.SemanticUnavailable("test")
+
+    monkeypatch.setattr(semantic, "enabled", lambda settings=None: True)
+    monkeypatch.setattr(semantic, "search", no_search)
+    monkeypatch.setattr(topics, "_similar_ids", similar)
+    return state
+
+
+async def test_vector_related_posts_merge_with_the_name_searches(repos, user, vectors):
+    vectors["scores"] = {str(P_DRONES): 0.9, str(P_TOP): 0.99, str(P_GRANTS): 0.8}
+    seed = await topics.deep_dive(repos, cloud(user), digest_id=str(DIGEST_UA), item_n=3, query="Brave1")
+    ids = [v.post.id for v in seed.related_posts]
+    assert vectors["calls"] == [[str(P_GRANTS)]]
+    assert str(P_DRONES) in ids and len(ids) == len(set(ids))
+    assert str(P_TOP) not in ids                    # above the cloud label
+    assert str(P_GRANTS) not in ids                 # a source post is never related
+
+
+async def test_vector_related_posts_keep_the_limit(repos, user, vectors, monkeypatch):
+    monkeypatch.setattr(topics, "RELATED_LIMIT", 1)
+    vectors["scores"] = {str(P_DRONES): 5.0}
+    seed = await topics.deep_dive(repos, cloud(user), digest_id=str(DIGEST_UA), item_n=3, query="Brave1")
+    assert [v.post.id for v in seed.related_posts] == [str(P_DRONES)]
+
+
+async def test_vector_related_posts_alone_when_the_name_finds_nothing(repos, user, vectors):
+    vectors["scores"] = {str(P_DRONES): 0.91}
+    seed = await topics.deep_dive(repos, cloud(user), digest_id=str(DIGEST_UA), item_n=3, query="Ніщоподібне")
+    assert [(v.post.id, v.score) for v in seed.related_posts] == [(str(P_DRONES), 0.91)]
+
+
+async def test_a_failed_vector_search_leaves_the_name_searches(repos, user, vectors):
+    vectors["error"] = RuntimeError("no index")
+    failed = await topics.deep_dive(repos, cloud(user), digest_id=str(DIGEST_UA), item_n=3, query="Brave1")
+    vectors["error"], vectors["scores"] = None, {}
+    plain = await topics.deep_dive(repos, cloud(user), digest_id=str(DIGEST_UA), item_n=3, query="Brave1")
+    assert [v.post.id for v in failed.related_posts] == [v.post.id for v in plain.related_posts]
+
+
+async def test_semantic_off_leaves_the_dive_unchanged(repos, user, monkeypatch):
+    async def never(source_ids):
+        raise AssertionError("vector search while semantic search is off")
+
+    monkeypatch.setattr(topics, "_similar_ids", never)
+    seed = await topics.deep_dive(repos, cloud(user), digest_id=str(DIGEST_UA), item_n=3, query="Brave1")
+    assert seed.searched_for == ["Brave1"] and str(P_GRANTS) not in [v.post.id for v in seed.related_posts]

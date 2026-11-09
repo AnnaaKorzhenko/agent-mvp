@@ -68,6 +68,13 @@ class Settings(BaseSettings):
     web_chat_web_search: bool = Field(True, alias="WEB_CHAT_WEB_SEARCH")               # web_research, deep dives
     # web_research runs the searches with this smaller model and hands the chat a short brief
     web_chat_research_model: str = Field("claude-haiku-5-5", alias="WEB_CHAT_RESEARCH_MODEL")
+    # Web Push: a VAPID key pair from `python -m brain.scripts.vapid_keys`, the same on the web app and the worker.
+    # WEB_PUSH_CONTACT: a mailto: or https: URL the push services can reach us at (the VAPID `sub` claim).
+    web_push_public_key: str | None = Field(None, alias="WEB_PUSH_PUBLIC_KEY")
+    web_push_private_key: SecretStr | None = Field(None, alias="WEB_PUSH_PRIVATE_KEY")
+    web_push_contact: str | None = Field(None, alias="WEB_PUSH_CONTACT")
+    # The worker's morning push of the digest to subscribed browsers; needs the key pair
+    morning_push: bool = Field(False, alias="MORNING_PUSH")
 
     # --- Model backends (not used by v0 tools) ---
     model_backend: Literal["local", "anthropic"] = Field("local", alias="MODEL_BACKEND")
@@ -87,6 +94,9 @@ class Settings(BaseSettings):
     # --- Automatic learning (brain/agents/learner.py) ---
     learning_auto: bool = Field(False, alias="LEARNING_AUTO")
     learning_feedback_threshold: int = Field(20, ge=1, alias="LEARNING_FEEDBACK_THRESHOLD")
+    # New chat messages since the last run that make a user due. The web service queues the nudge after a chat turn
+    # when LEARNING_AUTO is on there too (the worker runs it).
+    learning_chat_threshold: int = Field(10, ge=1, alias="LEARNING_CHAT_THRESHOLD")
     learning_goal_delay_minutes: int = Field(2, ge=0, alias="LEARNING_GOAL_DELAY_MINUTES")
     learning_cooldown_minutes: int = Field(30, ge=0, alias="LEARNING_COOLDOWN_MINUTES")
     learning_max_runs_per_day: int = Field(20, ge=0, alias="LEARNING_MAX_RUNS_PER_DAY")

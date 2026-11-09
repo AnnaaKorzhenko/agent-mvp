@@ -47,6 +47,7 @@ MAX_PER_CALL = 15
 MAX_ALIASES_SEARCHED = 5
 RELATED_DAYS = 30
 RELATED_LIMIT = 10
+MAX_VECTOR_SOURCES = 3      # source posts whose own vectors look for related posts
 STATUSES = ("confirmed", "claim", "unclear")
 
 logger = logging.getLogger("brain.topics")
@@ -351,6 +352,47 @@ def _find_topic(topics: list[TopicDoc], subject: Subject, name: str | None) -> T
                 None)
 
 
+async def _similar_ids(source_ids: list[str]) -> dict[str, float]:
+    """Post ids nearest to each source post's own stored embedding (one $vectorSearch per source, no Voyage call),
+    within RELATED_DAYS, the sources left out; the best score per post."""
+    from brain.domain import semantic
+    s = semantic.get_settings()
+    col = semantic._vectors(s)
+    keys = [*source_ids, *(o for o in (to_object_id(i) for i in source_ids) if o)]
+    since = datetime.now(timezone.utc) - timedelta(days=RELATED_DAYS)
+    out: dict[str, float] = {}
+    async for doc in col.find({"post_id": {"$in": keys}}, {"embedding": 1}).limit(MAX_VECTOR_SOURCES):
+        if not doc.get("embedding"):
+            continue
+        stage = {"index": semantic.VECTOR_INDEX, "path": "embedding", "queryVector": doc["embedding"],
+                 "numCandidates": 200, "limit": RELATED_LIMIT + len(source_ids),
+                 "filter": {"published_dt": {"$gte": since}}}
+        cursor = await col.aggregate([{"$vectorSearch": stage},
+                                      {"$project": {"post_id": 1, "score": {"$meta": "vectorSearchScore"}}}])
+        for h in await cursor.to_list(stage["limit"]):
+            pid = str(h.get("post_id") or h["_id"])
+            if pid not in source_ids:
+                out[pid] = max(out.get(pid, 0.0), round(float(h.get("score", 0.0)), 4))
+    return out
+
+
+async def _vector_related(repos: Repos, ctx: UserContext, source_ids: list[str]) -> list[posts.PostView]:
+    """Related posts by the source posts' vectors, loaded with the caller's labels; [] when semantic search is off,
+    there are no sources or anything fails (the name searches then stand alone)."""
+    from brain.domain import semantic
+    if not source_ids or not semantic.enabled():
+        return []
+    try:
+        scores = await _similar_ids(source_ids)
+        found = await repos.posts.get_many(list(scores), ctx.allowed)
+        found_posts = sensitivity.filter_allowed(list(found.values()), ctx.max_sensitivity)
+        channels = await repos.sources.get_many([p.channel_id for p in found_posts if p.channel_id])
+    except Exception:
+        logger.exception("deep_dive: vector related posts failed, name searches only")
+        return []
+    return [posts.PostView(p, channels.get(p.channel_id or ""), scores[p.id]) for p in found_posts]
+
+
 async def deep_dive(repos: Repos, ctx: UserContext, *, digest_id: str | None = None, item_n: int | None = None,
                     post_id: str | None = None, text: str | None = None, query: str | None = None,
                     name: str | None = None) -> DeepDiveSeed:
@@ -380,6 +422,9 @@ async def deep_dive(repos: Repos, ctx: UserContext, *, digest_id: str | None = N
         for v in found:
             if v.post.id not in sources:
                 related.setdefault(v.post.id, v)
+    for v in await _vector_related(repos, ctx, [v.post.id for v in source_views]):
+        if v.post.id not in sources:
+            related.setdefault(v.post.id, v)
     ranked = sorted(related.values(), key=lambda v: v.score, reverse=True)[:RELATED_LIMIT]
     return DeepDiveSeed(subject, source_views, ranked, names, topic, [g.text for g in profile.goals if g.active])
 

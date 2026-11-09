@@ -6,6 +6,8 @@ MCP service obeys them wherever it runs:
 - pause / unpause: a marker the runtime checks before every run (brain/agents/runs.py);
 - run now: a queued run, picked up by the worker within a minute (IDLE). A per-user agent runs for the admin
   who pressed it.
+And the agents' worker's heartbeat (its own service, `python -m brain.agents`): when it was last alive, stale after
+WORKER_STALE. The console's markers (scope "control": pauses, the heartbeat) are never counted as runs.
 The same numbers as brain/scripts/agents_report.py, for a page instead of a terminal.
 """
 from __future__ import annotations
@@ -17,12 +19,13 @@ from datetime import datetime, timedelta, timezone
 
 from pymongo.asynchronous.database import AsyncDatabase
 
-from brain.agents import advisor, learner, scout, scout_web
-from brain.agents.runs import COLLECTION as RUNS, GLOBAL, PAUSED, AgentRuns
+from brain.agents import advisor, learner, morning_push, scout, scout_web
+from brain.agents.runs import COLLECTION as RUNS, CONTROL, GLOBAL, AgentRuns
 
 ENDED = ("accepted", "dismissed", "stale")
 FAILURES = 3
 QUEUE = 20
+WORKER_STALE = timedelta(minutes=3)     # three missed heartbeats (runs.HEARTBEAT_EVERY)
 
 
 @dataclass(frozen=True)
@@ -40,6 +43,7 @@ AGENTS = [
     AgentInfo(scout_web.AGENT, "Веб-скаут", False, "SCOUT_WEB"),
     AgentInfo(advisor.DAILY, "Порадник: щоденний запуск", False, "ADVISOR_AUTO"),
     AgentInfo(advisor.AGENT, "Порадник: поради користувачу", True, "ADVISOR_AUTO"),
+    AgentInfo(morning_push.AGENT, "Ранковий push у браузер", False, "MORNING_PUSH"),
 ]
 BY_NAME = {a.name: a for a in AGENTS}
 
@@ -52,7 +56,7 @@ def _iso(dt: datetime | None) -> str | None:
 
 async def _runs(db: AsyncDatabase, since: datetime) -> dict[str, dict]:
     rows = await (await db[RUNS].aggregate([
-        {"$match": {"created_at": {"$gte": since}, "status": {"$ne": PAUSED}}},
+        {"$match": {"created_at": {"$gte": since}, "scope": {"$ne": CONTROL}}},
         {"$group": {"_id": {"agent": "$agent", "status": "$status"}, "n": {"$sum": 1},
                     "calls": {"$sum": {"$ifNull": ["$model_calls", 0]}},
                     "tin": {"$sum": {"$ifNull": ["$tokens_in", 0]}}, "tout": {"$sum": {"$ifNull": ["$tokens_out", 0]}},
@@ -117,7 +121,7 @@ async def overview(db: AsyncDatabase, days: int = 7, now: datetime | None = None
     async def one(a: AgentInfo) -> dict:
         s = stats.get(a.name) or {"by_status": Counter(), "model_calls": 0, "tokens_in": 0, "tokens_out": 0,
                                   "web_searches": 0}
-        last = await db[RUNS].find_one({"agent": a.name, "finished_at": {"$exists": True}, "status": {"$ne": PAUSED}},
+        last = await db[RUNS].find_one({"agent": a.name, "finished_at": {"$exists": True}, "scope": {"$ne": CONTROL}},
                                        {"status": 1, "outcome": 1, "finished_at": 1}, sort=[("finished_at", -1)])
         failures = [{"at": _iso(f.get("finished_at")), "error": (f.get("error") or "")[:300]}
                     async for f in db[RUNS].find({"agent": a.name, "status": "failed", "created_at": {"$gte": since}},
@@ -142,13 +146,22 @@ async def overview(db: AsyncDatabase, days: int = 7, now: datetime | None = None
                                                                     "not_before": 1}).sort("not_before", 1).limit(QUEUE)]
 
     # Independent reads, in parallel: the page waits for the slowest, not for their sum.
-    stats, paused = await asyncio.gather(_runs(db, since), runs.paused_agents())
+    stats, paused, beat = await asyncio.gather(_runs(db, since), runs.paused_agents(), runs.heartbeat())
     *agents, queued, running, props, chat = await asyncio.gather(
         *(one(a) for a in AGENTS), queue(),
-        db[RUNS].count_documents({"status": "running", "lease_until": {"$gte": now}}),
+        db[RUNS].count_documents({"status": "running", "lease_until": {"$gte": now}, "scope": {"$ne": CONTROL}}),
         _proposals(db, since, now), _chat(db, since))
     return {"days": days, "since": _iso(since), "agents": agents, "queue": queued, "running": running,
-            "proposals": props, "chat": chat}
+            "proposals": props, "chat": chat, "worker": _worker(beat, now)}
+
+
+def _worker(beat: dict | None, now: datetime) -> dict:
+    """The worker's last heartbeat; stale when older than WORKER_STALE or missing (never ran, or the agents still
+    run inside the MCP service)."""
+    if not beat or not isinstance(beat.get("at"), datetime):
+        return {"at": None, "host": None, "pid": None, "stale": True}
+    at = beat["at"] if beat["at"].tzinfo else beat["at"].replace(tzinfo=timezone.utc)
+    return {"at": _iso(at), "host": beat.get("host"), "pid": beat.get("pid"), "stale": now - at > WORKER_STALE}
 
 
 async def set_paused(db: AsyncDatabase, name: str, paused: bool, by: str | None) -> None:

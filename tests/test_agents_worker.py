@@ -86,15 +86,50 @@ async def test_main_builds_the_agents_with_the_shared_function(monkeypatch):
         built.append(settings)
         return Agents(runtime=None, learner=None)
 
-    async def fake_run(agents):
+    async def fake_run(agents, heartbeat=None):
         assert agents.runtime is None and agents.learner is None
+        assert heartbeat is not None                 # the real worker always beats
 
     async def no_close():
         pass
 
     monkeypatch.setattr(worker, "build_agents", fake_build)
-    monkeypatch.setattr(worker, "get_db", lambda settings: None)
+    monkeypatch.setattr(worker, "get_db", lambda settings: {"agent_runs": None})
     monkeypatch.setattr(worker, "run", fake_run)
     monkeypatch.setattr(worker, "close_client", no_close)
     await worker.main()
     assert len(built) == 1
+
+
+async def test_the_worker_beats_even_with_no_agent_on_and_the_beat_is_no_run(own):
+    from brain.agents.runs import AgentRuns
+    runs = AgentRuns(own)
+    stop = asyncio.Event()
+    task = asyncio.create_task(worker.serve(Agents(runtime=None, learner=None), stop, heartbeat=runs))
+
+    async def beaten():
+        return await runs.heartbeat() is not None
+    await until(beaten)
+    stop.set()
+    await asyncio.wait_for(task, timeout=10)
+
+    beat = await runs.heartbeat()
+    assert beat["pid"] == os.getpid() and beat["host"] and beat["at"]
+    assert await own.agent_runs.count_documents({}) == 1                 # one marker, rewritten, not a doc per beat
+    assert (await runs.usage()).runs == 0
+
+
+async def test_a_failed_heartbeat_is_logged_and_tried_again(caplog):
+    class Flaky:
+        calls = 0
+
+        async def beat(self, host, pid):
+            Flaky.calls += 1
+            if Flaky.calls == 1:
+                raise RuntimeError("Atlas away")
+
+    with caplog.at_level(logging.ERROR, logger="brain.agents"):
+        task = asyncio.create_task(worker.beat(Flaky(), every=0.05))
+        await until(lambda: asyncio.sleep(0, Flaky.calls >= 2))
+        task.cancel()
+    assert any("heartbeat failed: RuntimeError: Atlas away" in r.getMessage() for r in caplog.records)

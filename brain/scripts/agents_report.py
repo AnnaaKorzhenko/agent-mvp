@@ -17,7 +17,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 
 from brain.agents import common
-from brain.agents.runs import COLLECTION as RUNS
+from brain.agents.runs import COLLECTION as RUNS, CONTROL, AgentRuns
 from brain.config import get_settings
 from brain.db.client import close_client, get_client
 from brain.db.repositories import Repos, user_key
@@ -32,8 +32,11 @@ def _utc(dt):
 
 async def runs_part(db, since: datetime) -> None:
     print(f"\n== Runs since {since:%Y-%m-%d %H:%M} UTC")
+    beat = await AgentRuns(db).heartbeat()
+    print(f"  worker heartbeat: {_utc(beat['at']):%m-%d %H:%M} UTC on {beat.get('host')} (pid {beat.get('pid')})"
+          if beat and _utc(beat.get("at")) else "  worker heartbeat: none (the agents run in the MCP service?)")
     rows = await (await db[RUNS].aggregate([
-        {"$match": {"created_at": {"$gte": since}, "status": {"$ne": "paused"}}},     # not the console's markers
+        {"$match": {"created_at": {"$gte": since}, "scope": {"$ne": CONTROL}}},  # not the console's markers
         {"$group": {"_id": {"agent": "$agent", "status": "$status"}, "n": {"$sum": 1},
                     "calls": {"$sum": {"$ifNull": ["$model_calls", 0]}},
                     "tin": {"$sum": {"$ifNull": ["$tokens_in", 0]}}, "tout": {"$sum": {"$ifNull": ["$tokens_out", 0]}},
@@ -51,7 +54,7 @@ async def runs_part(db, since: datetime) -> None:
         status = ", ".join(f"{k} {v}" for k, v in a["status"].most_common())
         print(f"  {agent:14} {sum(a['status'].values()):4} runs ({status}); {a['calls']} model calls, "
               f"{a['tin']:,} + {a['tout']:,} tokens" + (f", {a['web']} web searches" if a["web"] else ""))
-        last = await db[RUNS].find_one({"agent": agent, "finished_at": {"$exists": True}},
+        last = await db[RUNS].find_one({"agent": agent, "finished_at": {"$exists": True}, "scope": {"$ne": CONTROL}},
                                        {"outcome": 1, "finished_at": 1}, sort=[("finished_at", -1)])
         if last:
             print(f"  {'':14} last: {_utc(last['finished_at']):%m-%d %H:%M} {last.get('outcome', '')[:90]}")

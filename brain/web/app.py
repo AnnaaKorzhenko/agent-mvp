@@ -15,21 +15,24 @@ import dataclasses
 import json
 import logging
 import secrets
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult
 from pydantic import BaseModel, Field, ValidationError
 
+from brain.agents import learner
 from brain.audit.conversations import WIDGET_PREFIX
 from brain.audit.log import AuditLog
 from brain.config import Settings, get_settings
 from brain.db.client import get_db
 from brain.db.repositories import Repos, user_key
+from brain.domain import feedback as feedback_domain
 from brain.domain import proposals as proposals_domain
 from brain.domain.identity import IdentityError, UserContext, resolve_user
 from brain.integrations.backends import AnthropicBackend
@@ -96,6 +99,24 @@ class FeedbackIn(BaseModel):
     digest_id: str | None = None
     item_n: int | None = None
     text: str | None = Field(None, max_length=2000)
+
+
+PUSH_KEEP = 5                             # Web Push subscriptions per user: the newest stay
+B64URL = r"^[A-Za-z0-9_-]+={0,2}$"
+
+
+class PushKeys(BaseModel):
+    p256dh: str = Field(min_length=16, max_length=200, pattern=B64URL)
+    auth: str = Field(min_length=8, max_length=100, pattern=B64URL)
+
+
+class PushSubscribeIn(BaseModel):              # the browser's PushSubscription.toJSON()
+    endpoint: str = Field(min_length=12, max_length=1000, pattern=r"^https://\S+$")
+    keys: PushKeys
+
+
+class PushUnsubscribeIn(BaseModel):
+    endpoint: str = Field(min_length=12, max_length=1000, pattern=r"^https://\S+$")
 
 
 class PauseIn(BaseModel):
@@ -267,10 +288,21 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
         return {"name": user.name, "email": user.email, "picture": user.picture, "dev": login is None,
                 "admin": is_admin(user)}
 
+    async def earlier(user: WebUser) -> feedback_domain.EarlierReactions:
+        """The user's own earlier ratings, added to what the web API returns (`my_reaction`), so the buttons show
+        them after a reload. Only here: the tools' output (and so Claude's) stays as it is."""
+        return await feedback_domain.earlier_reactions(svc.repos, await context(user))
+
     @app.get("/api/digest")
     async def digest(side: Literal["ua", "ru", "topics", "both"] = "both", date: str | None = None,
                      user: WebUser = Depends(web_user)):
-        return await tool(user, "get_digest", {"side": side, "date": date}, f"відкрив дайджест ({side})")
+        result = await tool(user, "get_digest", {"side": side, "date": date}, f"відкрив дайджест ({side})")
+        mine = await earlier(user)
+        for d in result.get("digests") or []:
+            for section in d.get("sections") or []:
+                for item in section.get("items") or []:
+                    item["my_reaction"] = mine.items.get((d.get("digest_id"), item.get("n")))
+        return result
 
     @app.get("/api/posts")
     async def posts(q: str = "", side: Literal["ua", "ru", "all"] = "all", days: int = Query(7, ge=1, le=30),
@@ -278,12 +310,18 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
         q = q.strip()
         if len(q) < 2:
             return {"query": q, "results": [], "note": "Введіть щонайменше 2 символи."}
-        return await tool(user, "search_posts", {"query": q, "side": side, "days": days, "limit": limit},
-                          f"шукає в постах: {q}")
+        result = await tool(user, "search_posts", {"query": q, "side": side, "days": days, "limit": limit},
+                            f"шукає в постах: {q}")
+        mine = await earlier(user)
+        for r in result.get("results") or []:
+            r["my_reaction"] = mine.posts.get(r.get("post_id"))
+        return result
 
     @app.get("/api/posts/{post_id}")
     async def post(post_id: str, user: WebUser = Depends(web_user)):
-        return await tool(user, "get_post", {"post_id": post_id}, "відкрив пост")
+        result = await tool(user, "get_post", {"post_id": post_id}, "відкрив пост")
+        result["my_reaction"] = (await earlier(user)).posts.get(result.get("post_id"))
+        return result
 
     @app.get("/api/profile")
     async def profile(user: WebUser = Depends(web_user)):
@@ -329,6 +367,29 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
         did = f"оцінив {what}: {body.reaction}" if body.reaction else \
             f"коментар до {'поста' if post else 'пункту'} {what.split(' ', 1)[1]}"
         return await tool(user, "record_feedback", body.model_dump(exclude_none=True), did)
+
+    # ---- Web Push: the morning digest as a notification (users.push_subscriptions) --------------------------
+
+    @app.get("/api/push/key")
+    async def push_key(user: WebUser = Depends(web_user)):
+        """The VAPID public key the browser subscribes with; null when Web Push isn't set up on the server."""
+        return {"key": settings.web_push_public_key or None}
+
+    @app.post("/api/push/subscribe")
+    async def push_subscribe(body: PushSubscribeIn, user: WebUser = Depends(web_user)):
+        if not settings.web_push_public_key:
+            raise HTTPException(503, "Сповіщення вимкнено: на сервері не задано WEB_PUSH_PUBLIC_KEY.")
+        ctx = await context(user)               # the session's user: never one named in the request
+        sub = {"endpoint": body.endpoint, "keys": body.keys.model_dump(), "created_at": datetime.now(timezone.utc)}
+        if not await svc.repos.users.save_push_subscription(ctx.user_id, sub, PUSH_KEEP):
+            raise HTTPException(404, "Немає такого користувача")
+        return {"subscribed": True}
+
+    @app.post("/api/push/unsubscribe")
+    async def push_unsubscribe(body: PushUnsubscribeIn, user: WebUser = Depends(web_user)):
+        ctx = await context(user)
+        removed = await svc.repos.users.delete_push_subscription(ctx.user_id, body.endpoint)
+        return {"subscribed": False, "removed": removed}
 
     # ---- the agents console (brain/web/admin.py): ADMIN_EMAILS only ------------------------------------------
 
@@ -384,6 +445,13 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
             raise HTTPException(404, "Немає такого чату")
         return {"id": chat_id, "messages": messages}
 
+    @app.delete("/api/chats/{chat_id}")
+    async def delete_chat(chat_id: str, user: WebUser = Depends(web_user)):
+        """A soft delete: the chat leaves «Нещодавні» and can't be opened or continued; its log stays."""
+        if not await chat_on().delete(await context(user), chat_id_ok(chat_id)):
+            raise HTTPException(404, "Немає такого чату")
+        return {"deleted": chat_id}
+
     @app.post("/api/chats/{chat_id}/messages/{message_id}/rating")
     async def rate_reply(chat_id: str, message_id: str, body: RatingIn, user: WebUser = Depends(web_user)):
         """A rating of one of the analyst's replies: saved as feedback on an answer and on the reply itself."""
@@ -417,12 +485,26 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
             async for event in c.turn(caller(user), ctx, chat_id, text, user.name,
                                       body.item.model_dump() if body.item else None):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            # Enough new messages: the worker updates the profile (brain/agents/learner.py).
+            await learner.nudge_after_chat(svc.repos.db, settings, user_key(ctx.user_id))
 
         return StreamingResponse(events(), media_type="text/event-stream",
                                  headers={"X-Accel-Buffering": "no"})
 
     frontend = Path(settings.web_frontend_dir) if settings.web_frontend_dir else FRONTEND
     if frontend.is_dir():
+        # The service worker and the manifest get explicit types (`.webmanifest` isn't in every mimetypes table)
+        # and no-cache: a browser must see a new sw.js at once, not after its HTTP cache expires.
+        @app.get("/sw.js", include_in_schema=False)
+        async def service_worker():
+            return FileResponse(frontend / "sw.js", media_type="text/javascript",
+                                headers={"Cache-Control": "no-cache"})
+
+        @app.get("/manifest.webmanifest", include_in_schema=False)
+        async def manifest():
+            return FileResponse(frontend / "manifest.webmanifest", media_type="application/manifest+json",
+                                headers={"Cache-Control": "no-cache"})
+
         app.mount("/", StaticFiles(directory=frontend, html=True), name="frontend")
     else:
         logger.warning(f"no UI files at {frontend}: serving the API only")

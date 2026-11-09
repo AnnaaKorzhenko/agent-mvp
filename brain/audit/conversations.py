@@ -256,7 +256,8 @@ class ConversationLog:
             return []
         out = []
         async for doc in self.col.find({"user_id": user_id, "channel": channel, "mcp_session_id": mcp_session_id,
-                                        "session_key": {"$exists": True}}, {"messages": 1}).sort("part", 1):
+                                        "session_key": {"$exists": True}, "deleted_at": None},
+                                       {"messages": 1}).sort("part", 1):
             out += [m for m in doc.get("messages", []) if m.get("role") in ("user", "assistant")
                     and m.get("via") == "chat"]
         return out
@@ -268,7 +269,8 @@ class ConversationLog:
             return []
         found: dict[str, dict] = {}
         cursor = self.col.find(
-            {"user_id": user_id, "channel": channel, "mcp_session_id": {"$regex": f"^{re.escape(prefix)}"}},
+            {"user_id": user_id, "channel": channel, "mcp_session_id": {"$regex": f"^{re.escape(prefix)}"},
+             "deleted_at": None},
             {"mcp_session_id": 1, "part": 1, "started_at": 1, "updated_at": 1,
              "messages": {"$elemMatch": {"role": "user", "via": "chat"}}}).sort("updated_at", -1).limit(limit * 4)
         async for doc in cursor:
@@ -284,10 +286,29 @@ class ConversationLog:
         if self.col is None:
             return False
         r = await self.col.update_one(
-            {"user_id": user_id, "channel": channel, "mcp_session_id": mcp_session_id,
+            {"user_id": user_id, "channel": channel, "mcp_session_id": mcp_session_id, "deleted_at": None,
              "messages": {"$elemMatch": {"id": message_id, "role": "assistant"}}},
             {"$set": {"messages.$.rating": rating}})
         return r.modified_count == 1
+
+    async def delete(self, user_id, channel: str, mcp_session_id: str) -> bool:
+        """Hides the session from its user (every part gets `deleted_at`); nothing is removed: the learner, the
+        console and the daily budget still count it. False if the user has no such session left."""
+        if self.col is None:
+            return False
+        r = await self.col.update_many(
+            {"user_id": user_id, "channel": channel, "mcp_session_id": mcp_session_id,
+             "session_key": {"$exists": True}, "deleted_at": None},
+            {"$set": {"deleted_at": datetime.now(timezone.utc)}})
+        return r.modified_count > 0
+
+    async def deleted(self, user_id, channel: str, mcp_session_id: str) -> bool:
+        """Whether the user deleted this session: it can't be continued."""
+        if self.col is None:
+            return False
+        return bool(await self.col.find_one(
+            {"user_id": user_id, "channel": channel, "mcp_session_id": mcp_session_id,
+             "deleted_at": {"$ne": None}}, {"_id": 1}))
 
     async def assistant_tokens(self, user_id, channel: str, since: datetime) -> int:
         """Tokens of the replies logged since `since` (input + output, the web research's too), for a daily

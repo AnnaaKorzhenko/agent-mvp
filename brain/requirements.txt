@@ -10,3 +10,5 @@ anthropic>=2.3,<3
 openai>=1.0
 # The web app (brain/web): its API; the login uses httpx2 and PyJWT, already here through mcp
 fastapi>=0.160,<1
+# The morning digest as a Web Push (VAPID keys: brain/scripts/vapid_keys.py)
+pywebpush>=2.0
