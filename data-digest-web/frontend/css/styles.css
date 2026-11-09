@@ -162,6 +162,8 @@ ul.plain { margin: 0; padding-left: 18px; display: flex; flex-direction: column;
 .logout { margin-left: auto; font-size: 13px; color: var(--muted); text-decoration: none; }
 .logout:hover { color: var(--ink); }
 .story p { white-space: pre-line; }
+.full-text-box { display: flex; flex-direction: column; gap: 6px; }
+.full-text-box p.full-text { margin: 0; padding-left: 12px; border-left: 2px solid #ECEAE4; white-space: pre-line; font-size: 14px; line-height: 1.55; }
 
 /* Чат: відповідь у markdown, стан інструментів, кнопка «зупинити», активний чат у «Нещодавніх» */
 .bot-text.md { white-space: normal; }

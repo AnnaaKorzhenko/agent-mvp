@@ -52,6 +52,13 @@ window.api = {
     return http(`/posts?${new URLSearchParams({ q, side, days })}`);
   },
 
+  // GET /posts/{id}?full_text=1 -> { post_id, source_side, ..., full_text, full_text_note }
+  // Повний текст лише для російських постів: їхні посилання на Telegram в Україні не відкриваються.
+  async getPostText(id) {
+    if (USE_MOCK) return { post_id: id, full_text: null, full_text_note: 'Демо-режим' };
+    return http(`/posts/${encodeURIComponent(id)}?full_text=1`);
+  },
+
   // ---- Чат з аналітиком (brain/web/chat.py). Історію зберігає сервер, клієнт шле лише нове повідомлення.
 
   // POST /chats -> { id }  (нічого не зберігається до першого повідомлення)

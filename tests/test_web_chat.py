@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import httpx2
 import pytest
+from bson import ObjectId
 
 from brain.audit.log import AuditLog
 from brain.db.repositories import Repos
@@ -15,7 +16,7 @@ from brain.tools.base import Services
 from brain.web.app import create_app
 from brain.web.chat import SESSION_PREFIX, as_turns, echo
 from tests.conftest import make_settings
-from tests.fixtures.sample_data import USERS, load_samples
+from tests.fixtures.sample_data import SRC_RU, USERS, _post, load_samples
 
 DEV_UID = 820_000_002
 _dbs = itertools.count()
@@ -210,6 +211,22 @@ async def test_a_bad_tool_input_goes_back_to_the_model_and_the_rounds_are_capped
     assert result["is_error"] and result["content"].startswith("Invalid arguments")
     assert ev[-1] == {"type": "done", "message_id": ev[-1]["message_id"], "stop_reason": "max_rounds"}
     assert "забагато кроків" in "".join(e.get("text", "") for e in ev)
+
+
+async def test_the_chat_gets_a_russian_posts_full_text_when_it_asks(db):
+    post = ObjectId()
+    await db.posts.insert_one(_post(post, summary="Заява", side="ru", category="ru_front", channel=SRC_RU,
+                                    clean_text="Наши войска продвинулись."))
+    asks = message(block("tool_use", id="tu_1", name="get_post", input={"post_id": str(post), "full_text": True}),
+                   stop="tool_use")
+    fake = FakeClaude(asks, message(block("text", text="Канал стверджує, що…")))
+    async with web(app_with(db, fake)) as c:
+        chat_id = (await c.post("/api/chats")).json()["id"]
+        await c.post(f"/api/chats/{chat_id}/messages", json={"content": "Дай повний текст цього російського поста"})
+    [tool] = [t for t in fake.requests[0]["tools"] if t["name"] == "get_post"]
+    assert tool["input_schema"]["properties"]["full_text"]["type"] == "boolean"
+    result = fake.requests[1]["messages"][-1]["content"][0]
+    assert not result.get("is_error") and json.loads(result["content"])["full_text"] == "Наши войска продвинулись."
 
 
 async def test_enough_chat_messages_queue_a_learner_nudge_for_the_worker(db):
