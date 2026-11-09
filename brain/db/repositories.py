@@ -339,6 +339,22 @@ class UsersRepo:
                       "morning_digest.at": datetime.now(timezone.utc)}})
         return result.modified_count == 1
 
+    async def mark_digest_seen(self, user_id: UserId, day: str, keys: list[str], cap: int) -> None:
+        """Adds `keys` ("<digest_id>:<n>") to users.digest_seen = {date, items} for the Kyiv `day`, in one write:
+        a new day replaces the list, at most `cap` keys (the earliest kept). The update pipeline's $setUnion-like
+        step adds only the keys not there yet, so concurrent calls never duplicate or lose one."""
+        old = {"$cond": [{"$eq": ["$digest_seen.date", day]}, {"$ifNull": ["$digest_seen.items", []]}, []]}
+        new = {"$filter": {"input": {"$literal": list(dict.fromkeys(keys))},
+                           "cond": {"$not": [{"$in": ["$$this", old]}]}}}
+        await self.col.update_one({"_id": user_key(user_id)}, [{"$set": {"digest_seen": {
+            "date": day, "items": {"$slice": [{"$concatArrays": [old, new]}, cap]}}}}])
+
+    async def digest_seen(self, user_id: UserId, day: str) -> set[str]:
+        """The digest item keys the user was shown on the Kyiv `day`."""
+        doc = await self.col.find_one({"_id": user_key(user_id)}, {"digest_seen": 1})
+        seen = (doc or {}).get("digest_seen") or {}
+        return set(seen.get("items") or []) if seen.get("date") == day else set()
+
     async def claim_morning_push(self, user_id: UserId, key: str, day: str) -> bool:
         """Marks today's digest as pushed to the user's browsers (morning_digest.web_push), apart from the
         delivery to Claude. Atomic: True only for the one call that pushes it."""

@@ -134,7 +134,26 @@ async def get_digests(repos: Repos, ctx: UserContext, side: str = "both", day: s
     return result
 
 
-MORNING_WAIT_UNTIL = 12       # Kyiv hour: until then, wait for both sides before delivering
+SEEN_MAX = 500                # digest item keys remembered per user and Kyiv day (users.digest_seen)
+
+
+def seen_key(digest_id: str, n: int) -> str:
+    return f"{digest_id}:{n}"
+
+
+async def mark_seen(repos: Repos, ctx: UserContext, res: DigestResultView, today: date | None = None) -> int:
+    """Remembers the returned items of today's (Kyiv) digests as shown to the user, in any channel; a past day's
+    digest marks nothing. Returns how many keys were sent."""
+    today = today or kyiv_today()
+    keys = [seen_key(v.digest.id, v.number(i)) for v in res.digests
+            if v.digest.created_at.astimezone(KYIV).date() == today
+            for _, items in v.sections for i in items]
+    if keys:
+        await repos.users.mark_digest_seen(ctx.user_id, today.isoformat(), keys, SEEN_MAX)
+    return len(keys)
+
+
+MORNING_WAIT_UNTIL = 12      # Kyiv hour: until then, wait for both sides before delivering
 
 
 @dataclass
