@@ -14,7 +14,8 @@ const state = {
   ratings: {},         // що оцінено -> useful | not_useful
   rateError: {},
   fullText: {},        // повний текст російських постів: id через кому -> { open, loading, posts, error }
-  commentFor: null     // після «Не корисно»: де показати поле «Чому?»
+  commentFor: null,     // після «Не корисно»: де показати поле «Чому?»
+  companies: { q: '', country: '', sector: '', items: [], total: 0, countries: [], sectors: [], loading: false, error: '' },
 };
 
 const $main = document.getElementById('main');
@@ -36,7 +37,7 @@ function go(screen) {
   if (screen === 'profile') { state.push.note = ''; loadProfile(); loadPush(); }
   if (screen === 'proposals') loadProposals();
   if (screen === 'agents') loadAgents();
-  // if (screen === 'map') loadInvestDigest();
+  if (screen === 'map') loadCompanies();
 }
 
 function render() {
@@ -852,7 +853,7 @@ function correctedNote(r) {
 
 
 // ---------- Інвестиції: карта (згортається) + дайджест по інвестиціях ----------
-// ---------- Інвестиції: карта (згортається) і перехід до розділу «Інвестиції» в дайджесті ----------
+
 const MAP_SRC = 'https://defense-valley.news/embed/map/';
 let mapOpen = true;
 try { mapOpen = localStorage.getItem('mapOpen') !== '0'; } catch (e) { /* без сховища: карта розгорнута */ }
@@ -881,9 +882,124 @@ function renderMap() {
         <p class="note">Дані: <a href="https://defense-valley.news" target="_blank" rel="noopener noreferrer">Defense Valley News — European defense-tech funding tracker</a></p>
       </details>
       <button class="notice" data-invest-digest="1">Новини про інвестиції з нашої бази: перейти до розділу «Інвестиції» в дайджесті →</button>
+      ${companiesSectionHtml()}
     </div></div>`;
 }
 
+const COMPANIES_PAGE = 24;
+const safeUrl = (u) => {
+  const v = String(u || '').trim();
+  if (!v) return '';
+  if (/^https?:\/\//i.test(v)) return v;
+  return /^[\w.-]+\.[a-z]{2,}(\/|$)/i.test(v) ? 'https://' + v : '';   // «fieldmade.com» → https://fieldmade.com
+};
+
+function companyHtml(c) {
+  // Клік по картці: сайт компанії в новій вкладці; без сайту — її профіль на europedefencetech.com
+  const href = safeUrl(c.website || c.facts?.website) || safeUrl(c.profile_url);
+  const tag = href ? 'a' : 'div';
+  return `
+    <${tag} class="company" ${href ? `href="${esc(href)}" target="_blank" rel="noopener noreferrer" title="${esc(href)}"` : ''}>
+      <div class="company-head">
+        <div class="company-logo" aria-hidden="true">${esc(String(c.name || '?').trim().charAt(0).toUpperCase())}</div>
+        <h3>${esc(c.name)}</h3>
+      </div>
+      ${c.description ? `<p>${esc(c.description)}</p>` : ''}
+      <div class="company-foot">
+        <span>${esc(c.sector_label || '')}</span>
+        <span>${esc(c.stage || '')}</span>
+      </div>
+    </${tag}>`;
+}
+
+function companyFiltersHtml() {
+  const s = state.companies;
+  // сервер віддає списки як [{ id, label, count }]: id — для фільтра, label і count — для показу
+  const opts = (list, cur, all) => `<option value="">${all}</option>` + list.map((o) =>
+    `<option value="${esc(o.id)}" ${o.id === cur ? 'selected' : ''}>${esc(o.label)} (${o.count})</option>`).join('');
+  return `
+    <label><span class="filter-label">Країна</span>
+      <select id="company-country">${opts(s.countries, s.country, 'Усі країни')}</select></label>
+    <label><span class="filter-label">Категорія</span>
+      <select id="company-sector">${opts(s.sectors, s.sector, 'Усі категорії')}</select></label>`;
+}
+
+function companiesHtml() {
+  const s = state.companies;
+  if (s.error) return `<p class="sub">${esc(s.error)}</p>`;
+  if (!s.items.length) return `<p class="sub">${s.loading ? 'Завантаження…' : 'Нічого не знайдено. Змініть пошук або фільтри.'}</p>`;
+  const more = s.items.length < s.total
+    ? `<button class="btn-outline companies-more" data-companies-more="1" ${s.loading ? 'disabled' : ''}>${s.loading ? 'Завантаження…' : 'Показати ще'}</button>` : '';
+  return `<div class="company-grid">${s.items.map(companyHtml).join('')}</div>${more}`;
+}
+
+function companiesCount() {
+  const s = state.companies;
+  return s.loading && !s.items.length ? '' : `Знайдено компаній: ${s.total}`;
+}
+
+function companiesSectionHtml() {
+  const s = state.companies;
+  return `
+      <section class="companies">
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <h2 class="h2">Оборонні компанії Європи</h2>
+        
+        </div>
+        <div class="searchbox">
+          ${ICON_SEARCH}
+          <label for="company-search" class="sr-only">Пошук компаній</label>
+          <input id="company-search" value="${esc(s.q)}" autocomplete="off" placeholder="Назва, технологія, місто…">
+        </div>
+        <div class="company-filters" id="company-filters">${companyFiltersHtml()}</div>
+        <span class="sub" id="companies-count">${companiesCount()}</span>
+        <div id="companies">${companiesHtml()}</div>
+      </section>`;
+}
+
+function paintCompanies(filters) {
+  if (state.screen !== 'map') return;
+  const box = document.getElementById('companies');
+  if (box) box.innerHTML = companiesHtml();
+  const n = document.getElementById('companies-count');
+  if (n) n.textContent = companiesCount();
+  const f = document.getElementById('company-filters');
+  if (f && filters) f.innerHTML = companyFiltersHtml();
+}
+
+let companiesLoad = 0;   // лише найновіша відповідь: швидкий набір у пошуку не покаже застарілий результат
+async function loadCompanies(append) {
+  const s = state.companies;
+  const mine = ++companiesLoad;
+  s.loading = true;
+  s.error = '';
+  paintCompanies(false);
+  try {
+    const r = await api.getCompanies({ q: s.q, country: s.country, sector: s.sector,
+      skip: append ? s.items.length : 0, limit: COMPANIES_PAGE });
+    if (mine !== companiesLoad) return;
+    s.items = append ? s.items.concat(r.items || []) : (r.items || []);
+    s.total = r.total || 0;
+    // списки країн і категорій перемальовуємо лише коли вони змінились: інакше select втратить фокус
+    const ids = (l) => (l || []).map((o) => o.id + ':' + o.count).join();
+    const facets = !!r.countries && (ids(r.countries) !== ids(s.countries) || ids(r.sectors) !== ids(s.sectors));
+    if (r.countries) { s.countries = r.countries; s.sectors = r.sectors || []; }
+    s.loading = false;
+    paintCompanies(facets);
+  } catch (e) {
+    if (mine !== companiesLoad) return;
+    s.loading = false;
+    s.error = 'Не вдалося завантажити компанії: ' + e.message;
+    paintCompanies(false);
+  }
+}
+
+let companyTimer;
+function onCompanySearch(value) {
+  state.companies.q = value;
+  clearTimeout(companyTimer);
+  companyTimer = setTimeout(() => loadCompanies(false), 350);
+}
 // ---------- Агенти (лише для адміністраторів) ----------
 const RUN_STATUS = { done: 'готово', failed: 'помилка', skipped: 'пропущено', expired: 'обірвано', running: 'працює', queued: 'у черзі' };
 const KIND_NAME = { goal: 'цілі', topic: 'теми', advice: 'поради' };
@@ -1008,8 +1124,17 @@ $main.addEventListener('submit', (e) => {
   }
 });
 
+// $main.addEventListener('input', (e) => {
+//   if (e.target.id === 'post-search') onSearchInput(e.target.value);
+// });
 $main.addEventListener('input', (e) => {
   if (e.target.id === 'post-search') onSearchInput(e.target.value);
+  if (e.target.id === 'company-search') onCompanySearch(e.target.value);
+});
+
+$main.addEventListener('change', (e) => {
+  if (e.target.id === 'company-country') { state.companies.country = e.target.value; loadCompanies(false); }
+  if (e.target.id === 'company-sector') { state.companies.sector = e.target.value; loadCompanies(false); }
 });
 
 $main.addEventListener('click', async (e) => {
@@ -1019,6 +1144,7 @@ $main.addEventListener('click', async (e) => {
 
   if (d.action === 'stop') return stopAnswer();
   if (d.mapActivate) { el.hidden = true; return; }
+  if (d.companiesMore) return loadCompanies(true);
   if (d.chatDelete) {
     if (d.chatDelete === 'yes') return deleteChat();
     state.chat.confirmDelete = d.chatDelete === 'ask';

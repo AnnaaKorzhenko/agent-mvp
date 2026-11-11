@@ -245,3 +245,56 @@ ul.plain.editable li { display: flex; align-items: baseline; justify-content: sp
 
 
 .section-label[data-invest] { scroll-margin-top: 16px; }
+
+a.company,
+a.company:visited { color: inherit; text-decoration: none; }
+a.company * { text-decoration: none; }
+a.company { transition: border-color .15s, box-shadow .15s; }
+a.company:hover { border-color: var(--accent); box-shadow: 0 2px 10px rgba(29,33,37,.06); }
+a.company:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Сторінка «Інвестиції»: картки оборонних компаній — 3 в ряд, на вужчих екранах 2 і 1 */
+.companies { display: flex; flex-direction: column; gap: 14px; margin-top: 10px; }
+.companies .sub a { color: var(--accent); }
+.company-filters { display: flex; gap: 16px; flex-wrap: wrap; }
+.company-filters label { display: flex; align-items: center; gap: 8px; }
+.company-filters select {
+  -webkit-appearance: none; appearance: none;
+  height: 38px; min-width: 190px; max-width: 100%;
+  padding: 0 38px 0 14px; line-height: 36px;
+  border: 1px solid var(--border-2); border-radius: 999px;
+  background-color: var(--surface);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%235B6168' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 14px center;
+  color: var(--ink-2); font: inherit; font-size: 14px; cursor: pointer;
+}
+.company-filters select:hover { border-color: var(--muted); }
+.company-filters select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.company-filters label { display: flex; align-items: center; gap: 8px; }
+.company-filters .filter-label { margin: 0; }
+.company-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+.company {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 20px;
+  display: flex; flex-direction: column; gap: 14px; min-width: 0;
+}
+.company-head { display: flex; align-items: flex-start; gap: 12px; }
+.company-logo {
+  flex-shrink: 0; width: 44px; height: 44px; border-radius: 10px; border: 1px solid var(--border-2);
+  background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center;
+  font-size: 17px; font-weight: 600;
+}
+.company-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex-grow: 1; }
+.company-title h3 { margin: 0; font-size: 17px; font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+.company-title .sub { font-size: 13px; }
+.company-link { flex-shrink: 0; color: var(--muted); display: flex; padding: 2px; border-radius: 6px; }
+.company-link:hover { color: var(--accent); }
+.company p {
+  margin: 0; font-family: var(--serif); font-size: 15px; line-height: 1.55; color: var(--ink-2);
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+}
+.company-foot {
+  margin-top: auto; padding-top: 12px; border-top: 1px solid #ECEAE4;
+  display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; font-size: 13px; color: var(--muted);
+}
+#companies { display: flex; flex-direction: column; gap: 14px; }
+.companies-more { align-self: center; }
