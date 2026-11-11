@@ -391,8 +391,8 @@ async function toggleFullText(key) {
 }
 
 // ---------- Дайджести ----------
-const SIDES = [['both', 'Усе'], ['ua', 'Українські джерела'], ['ru', 'Російські джерела'], ['topics', 'Ваші теми й інтереси']];
-const SIDE_LABEL = { ua: 'Українські джерела', ru: 'Російські джерела', topics: 'Ваші теми й інтереси' };
+const SIDES = [['both', 'Усе'], ['ua', 'Українські джерела'], ['ru', 'Російські джерела'], ['world', 'Світові джерела'], ['topics', 'Ваші теми й інтереси']];
+const SIDE_LABEL = { ua: 'Українські джерела', ru: 'Російські джерела', world: 'Світові джерела', topics: 'Ваші теми й інтереси' };
 const SIDE_NOTE = { ru: 'Заяви російських каналів, а не перевірені факти.' };
 // Емодзі з назв розділів пайплайна: на ноутбуці директора вони сірі квадрати
 const noEmoji = (s) => String(s || '').replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, '').trim();
@@ -404,9 +404,12 @@ function host(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch (e) { return 'джерело'; }
 }
 
+// Джерело-відео (YouTube) підписуємо як відео, а не просто доменом
+const isVideo = (u) => /^(m\.|music\.)?(youtube\.com|youtu\.be)$/.test(host(u));
+
 function sourcesHtml(urls) {
   return (urls || []).slice(0, 6).map((u) =>
-    `<a class="source" href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(host(u))}</a>`).join('');
+    `<a class="source" href="${esc(u)}" target="_blank" rel="noopener noreferrer">${isVideo(u) ? '▶ YouTube' : esc(host(u))}</a>`).join('');
 }
 
 function whyHtml(why) {

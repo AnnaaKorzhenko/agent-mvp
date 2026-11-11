@@ -53,7 +53,7 @@ CLIENT = {"name": "web", "version": VERSION}
 
 
 class ItemRef(BaseModel):
-    digest_id: str = Field(pattern=r"^[0-9a-f]{24}$")
+    digest_id: str = Field(pattern=r"^[0-9a-f]{24}(-[a-z]{2,12})?$")     # "<_id>-<side>": a side of a "news" digest
     item_n: int = Field(ge=1, le=500)
 
 
@@ -294,7 +294,7 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
         return await feedback_domain.earlier_reactions(svc.repos, await context(user))
 
     @app.get("/api/digest")
-    async def digest(side: Literal["ua", "ru", "topics", "both"] = "both", date: str | None = None,
+    async def digest(side: Literal["ua", "ru", "world", "topics", "both"] = "both", date: str | None = None,
                      unseen_only: bool = False, user: WebUser = Depends(web_user)):
         args = {"side": side, "date": date} | ({"unseen_only": True} if unseen_only else {})
         result = await tool(user, "get_digest", args,

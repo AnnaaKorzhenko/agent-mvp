@@ -88,8 +88,8 @@ class DigestSectionOut(BaseModel):
 
 
 class DigestOut(BaseModel):
-    side: Literal["ua", "ru", "topics"] | str = Field(description=(
-        "topics: today's news on the topics the user follows (sections per topic), shown first"))
+    side: Literal["ua", "ru", "world", "topics"] | str = Field(description=(
+        "world: foreign sources; topics: today's news on the topics the user follows (sections per topic), shown first"))
     side_note: str | None = None
     digest_id: str
     created_at: str
@@ -329,7 +329,7 @@ class TopicSaved(MemoryOut):
 class AnalysisItem(BaseModel):
     id: str = Field(description="digest_id/n of the item")
     date: str
-    side: Literal["ua", "ru", "topics"] | str
+    side: Literal["ua", "ru", "world", "topics"] | str
     is_russian_source_claim: bool
     category: str
     text: str

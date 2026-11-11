@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, field_validator
 from pymongo.asynchronous.database import AsyncDatabase
 
 from brain.agents import common
-from brain.db.repositories import user_key
+from brain.db.repositories import SIDE_ID_SEP, news_sides, to_object_id, user_key
 from brain.domain import interests as interests_domain
 from brain.domain import sensitivity
 from brain.domain.tag_list import TAG_LIST
@@ -256,14 +256,18 @@ async def _rated_texts(db: AsyncDatabase, fb: list[dict]) -> dict[int, str]:
             out[i] = summaries[f["post_id"]]
         elif f.get("digest_id") is not None and f.get("item_n") is not None:
             by_item[(f["digest_id"], f["item_n"])] = i
-    digest_ids = list({d for d, _ in by_item})
-    async for d in db.digests.find({"_id": {"$in": digest_ids}}, {"sections.items": 1}):
-        c = 0
-        for s in d.get("sections") or []:
-            for it in s.get("items") or []:
-                c += 1
-                if (i := by_item.get((d["_id"], it.get("n", c)))) is not None:
-                    out[i] = it.get("text") or ""
+    # A side of a "news" document is rated as "<_id>-<side>" (repositories.news_sides)
+    oids = list({to_object_id(str(d).partition(SIDE_ID_SEP)[0]) for d, _ in by_item} - {None})
+    keys = {str(d): d for d, _ in by_item}
+    async for doc in db.digests.find({"_id": {"$in": oids}}, {"side": 1, "sections.items": 1, "sides": 1}):
+        for d in news_sides(doc):
+            c = 0
+            for s in d.get("sections") or []:
+                for it in s.get("items") or []:
+                    c += 1
+                    key = keys.get(str(d["_id"]))
+                    if key is not None and (i := by_item.get((key, it.get("n", c)))) is not None:
+                        out[i] = it.get("text") or ""
     return out
 
 

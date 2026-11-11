@@ -144,23 +144,41 @@ class SourcesRepo:
         await self.col.update_one(record, {"$set": {"queries": queries}}, upsert=True)
 
 
+NEWS_SIDE = "news"      # one document per pipeline run with every side in it (since 2026-11-11)
+SIDE_ID_SEP = "-"       # a side of a "news" document is the digest "<_id>-<side>"
+NEWS_SIDES = ("ua", "ru", "world")   # the sides a "news" document may hold
+
+
+def news_sides(doc: dict) -> list[dict]:
+    """A digests document as per-side digest documents. The pipeline's "news" shape ({side: "news", sides: {ua:
+    {period_start, sections, …}, ru: …, world: …}}) gives one per side, each with the run's period, trigger,
+    created_at and the side's own fields, and the id "<_id>-<side>" (each side numbers its items from 1). Any
+    other document is itself."""
+    if doc.get("side") != NEWS_SIDE:
+        return [doc]
+    top = {k: v for k, v in doc.items() if k not in ("sides", "sides_done", "side", "_id")}
+    return [{**top, **(part or {}), "_id": f"{doc['_id']}{SIDE_ID_SEP}{side}", "side": side}
+            for side, part in (doc.get("sides") or {}).items() if isinstance(part, dict)]
+
+
 class DigestsRepo:
     def __init__(self, db: AsyncDatabase):
         self.col = db["digests"]
 
     async def latest(self, side: str, period: str = "day", start: datetime | None = None,
                      end: datetime | None = None) -> DigestDoc | None:
-        """Latest digest of a side; scheduled first, any trigger as a fallback. start/end bound created_at."""
-        base: dict = {"period": period, "side": side}
+        """Latest digest of a side, its own document or its part of a "news" one; scheduled first, any trigger as
+        a fallback. start/end bound created_at."""
+        base: dict = {"period": period, "$or": [{"side": side}, {"side": NEWS_SIDE, f"sides.{side}": {"$type": "object"}}]}
         if start or end:
             base["created_at"] = {**({"$gte": start} if start else {}), **({"$lt": end} if end else {})}
         # The pipeline's digest of users' topics and interests (side "interests"; earlier trigger "topics") is never a
         # side's digest: the side filter keeps it out, and the trigger filter the older ones.
         for query in ({**base, "trigger": "scheduled"}, {**base, "trigger": {"$ne": "topics"}}):
             async for doc in self.col.find(query).sort("created_at", -1).limit(5):
-                digest = parse(DigestDoc, doc, "digests")
-                if digest and digest.sections:
-                    return digest
+                for part in news_sides(doc):
+                    if part["side"] == side and (digest := parse(DigestDoc, part, "digests")) and digest.sections:
+                        return digest
         return None
 
     TOPICS_DIGEST = {"$or": [{"side": "interests"}, {"trigger": "topics"}]}
@@ -178,17 +196,27 @@ class DigestsRepo:
         return None
 
     async def in_range(self, start: datetime, end: datetime, limit: int = 500) -> list[DigestDoc]:
-        """Every daily digest created in [start, end), oldest first (all sides and triggers)."""
+        """Every daily digest created in [start, end), oldest first (all sides and triggers; a "news" document
+        gives one per side)."""
         out = []
         async for doc in self.col.find({"period": "day", "created_at": {"$gte": start, "$lt": end}}
                                        ).sort("created_at", 1).limit(limit):
-            if (digest := parse(DigestDoc, doc, "digests")) and digest.sections:
-                out.append(digest)
+            for part in news_sides(doc):
+                if (digest := parse(DigestDoc, part, "digests")) and digest.sections:
+                    out.append(digest)
         return out
 
     async def get(self, digest_id: str | ObjectId) -> DigestDoc | None:
-        oid = to_object_id(digest_id)
-        return parse(DigestDoc, await self.col.find_one({"_id": oid}), "digests") if oid else None
+        """A digest by its id: a document's _id, or "<_id>-<side>" for a side of a "news" document."""
+        raw, _, side = str(digest_id or "").partition(SIDE_ID_SEP)
+        oid = to_object_id(raw)
+        if oid is None:
+            return None
+        doc = await self.col.find_one({"_id": oid})
+        if doc is None or (doc.get("side") == NEWS_SIDE) != bool(side):
+            return None
+        part = next((p for p in news_sides(doc) if not side or p["side"] == side), None)
+        return parse(DigestDoc, part, "digests") if part else None
 
 
 UserId = int | str     # Telegram users: int; users created for an OAuth login: the ObjectId as hex

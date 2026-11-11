@@ -95,8 +95,8 @@ def register_tools(mcp: MCPServer, svc: Services) -> dict[str, ToolSpec]:
     async def get_digest(
         mcp_ctx: Context,
         user_message: UserMessage,
-        side: Annotated[Literal["ua", "ru", "topics", "both"], Field(
-            description="ua: Ukrainian sources; ru: Russian sources (claims, not facts); topics: only news on the "
+        side: Annotated[Literal["ua", "ru", "world", "topics", "both"], Field(
+            description="ua: Ukrainian sources; ru: Russian sources (claims, not facts); world: foreign sources; topics: only news on the "
                         "topics the user follows; both: all of it (the default)")] = "both",
         date: Annotated[str | None, Field(
             description="Kyiv date YYYY-MM-DD; omit for the latest digest")] = None,

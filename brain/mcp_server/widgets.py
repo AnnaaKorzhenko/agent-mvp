@@ -92,7 +92,8 @@ def digest_index(result: out.DigestResult) -> str:
     ]
     for d, s, i in items:
         why = f" · для користувача: {'; '.join(i.why)}" if i.why else ""
-        origin = ("TOPIC " if d.side == "topics" else "") + ("RU" if i.is_russian_source_claim else "UA")
+        origin = ("TOPIC " if d.side == "topics" else "") + ("RU" if i.is_russian_source_claim else
+                                                               "WORLD" if d.side == "world" else "UA")
         lines.append(f"#{i.ref} {origin} · {s.title if d.side == 'topics' else s.category} · {d.digest_id}/{i.n} · "
                      f"{','.join(i.source_post_ids[:3])} · «{_short(i.text)}»{why}")
     for d in result.digests:

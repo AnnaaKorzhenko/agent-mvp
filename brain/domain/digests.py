@@ -11,6 +11,9 @@ sources record, brain/domain/topics.sync_queries) and builds one digest for all 
 their own followed topics, else one of their lasting interests (its names), regrouped by topic or interest
 («⭐ Спектр-К»), each story once (the pipeline repeats a story under every search it matched), before the ua and
 ru digests. It never counts as a side's digest, and the morning delivery doesn't wait for it.
+
+News sides: ua, ru and world. Since 2026-11-11 the pipeline writes one document per run with every side in it
+(side "news", sides.<side>); the repository gives each side as a digest of its own, id "<_id>-<side>".
 """
 from __future__ import annotations
 
@@ -29,6 +32,8 @@ KYIV = ZoneInfo("Europe/Kyiv")
 RU_NOTE = "Claims of Russian sources, not verified facts."
 TOPICS = "topics"            # the result's `side` for the topics-and-interests digest (and its old trigger)
 INTERESTS_SIDE = "interests"  # the pipeline's side for it
+SIDES = ("ua", "ru", "world")  # the news sides, in the order shown (world: foreign sources, since 2026-11-11)
+REQUIRED_SIDES = ("ua", "ru")  # the morning delivery waits for these; world comes when it comes
 
 
 def is_topics_digest(d: DigestDoc) -> bool:
@@ -105,12 +110,12 @@ def order_sections(sections: list[DigestSectionDoc], profile: UserProfileDoc | N
 
 
 async def get_digests(repos: Repos, ctx: UserContext, side: str = "both", day: str | None = None) -> DigestResultView:
-    """both: the user's tracked-topics items first (if any), then ua and ru; ua / ru: that side only; topics:
-    the tracked-topics items only."""
+    """both: the user's tracked-topics items first (if any), then ua, ru and world (world only when the pipeline
+    made one: it is never missing); ua / ru / world: that side only; topics: the tracked-topics items only."""
     both = side in ("both", "all", None)
-    sides = ["ua", "ru"] if both else [] if side == TOPICS else [side]
-    if any(s not in ("ua", "ru") for s in sides):
-        raise InvalidInput("side must be 'ua', 'ru', 'topics' or 'both'")
+    sides = list(SIDES) if both else [] if side == TOPICS else [side]
+    if any(s not in SIDES for s in sides):
+        raise InvalidInput("side must be 'ua', 'ru', 'world', 'topics' or 'both'")
     wanted = parse_date(day)
     start, end = kyiv_day_bounds(wanted) if wanted else (None, None)
     profile = await repos.users.get_profile(ctx.user_id)
@@ -126,7 +131,8 @@ async def get_digests(repos: Repos, ctx: UserContext, side: str = "both", day: s
     for s in sides:
         digest = await repos.digests.latest(s, "day", start, end)
         if digest is None or not sensitivity.is_allowed(digest.sensitivity, ctx.max_sensitivity):
-            result.missing_sides.append(s)
+            if s in REQUIRED_SIDES or not both:
+                result.missing_sides.append(s)
             continue
         result.digests.append(await _view(repos, ctx, digest, profile, prefs))
     if result.date is None and result.digests:
