@@ -35,7 +35,7 @@ from brain.db.repositories import Repos, user_key
 from brain.domain import feedback as feedback_domain
 from brain.domain import proposals as proposals_domain
 from brain.domain.identity import IdentityError, UserContext, resolve_user
-from brain.integrations.backends import AnthropicBackend
+from brain.integrations.backends import AnthropicBackend, OpenAIBackend, chat_backend
 from brain.tools import catalog
 from brain.tools.base import Origin, Services
 from brain.web import admin, session
@@ -151,15 +151,8 @@ def _next(path: str | None) -> str:
     return path if path and path.startswith("/") and not path.startswith("//") else "/"
 
 
-def chat_backend(settings: Settings, audit: AuditLog) -> AnthropicBackend | None:
-    """Claude for the chat, or None without ANTHROPIC_API_KEY (the chat then answers 503)."""
-    if not settings.anthropic_api_key:
-        return None
-    return AnthropicBackend(audit, settings, model=settings.web_chat_model)
-
-
 def create_app(settings: Settings | None = None, svc: Services | None = None,
-               login: Auth0Login | None = None, backend: AnthropicBackend | None = None) -> FastAPI:
+               login: Auth0Login | None = None, backend: AnthropicBackend | OpenAIBackend | None = None) -> FastAPI:
     settings = settings or get_settings()
     svc = svc or build_services(settings)
     login = login or (None if settings.dev_mode else Auth0Login(settings))
@@ -171,7 +164,7 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
     session_age = settings.web_session_days * 86400
     specs = catalog.build(svc)
     backend = backend or chat_backend(settings, svc.audit)
-    research = (AnthropicBackend(svc.audit, settings, client=backend.client, model=settings.web_chat_research_model)
+    research = (backend.with_model(settings.chat_model(research=True))
                 if backend and settings.web_chat_web_search else None)
     chat = Chat(svc, specs, backend, CLIENT, research) if backend else None
     app = FastAPI(title="News brain web", version=VERSION, docs_url=None, redoc_url=None, openapi_url=None)
@@ -424,7 +417,7 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
 
     def chat_on() -> Chat:
         if chat is None:
-            raise HTTPException(503, "Чат вимкнено: на сервері не задано ANTHROPIC_API_KEY.")
+            raise HTTPException(503, "Чат вимкнено: на сервері не задано ключ моделі (WEB_CHAT_PROVIDER і його API-ключ).")
         return chat
 
     def chat_id_ok(chat_id: str) -> str:

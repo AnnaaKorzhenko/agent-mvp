@@ -9,6 +9,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 TrustLevel = Literal["cloud", "local"]
 Sensitivity = Literal["public", "internal", "confidential", "restricted"]
+# The web chat's models when WEB_CHAT_MODEL / WEB_CHAT_RESEARCH_MODEL aren't set: (chat, web research)
+CHAT_DEFAULTS = {"anthropic": ("claude-sonnet-5-5", "claude-haiku-5-5"), "openai": ("gpt-5-mini", "gpt-5-mini")}
 
 
 class Settings(BaseSettings):
@@ -60,14 +62,20 @@ class Settings(BaseSettings):
     admin_emails: list[str] = Field(default_factory=list, alias="ADMIN_EMAILS")
     # The UI's files; default: data-digest-web/frontend in the repo
     web_frontend_dir: str | None = Field(None, alias="WEB_FRONTEND_DIR")
-    # The web chat (brain/web/chat.py): Claude through the Anthropic backend (needs ANTHROPIC_API_KEY)
-    web_chat_model: str = Field("claude-sonnet-5-5", alias="WEB_CHAT_MODEL")
+    # The web chat (brain/web/chat.py). WEB_CHAT_PROVIDER: anthropic (Claude) or openai (OpenAI, or any
+    # OpenAI-compatible API at WEB_CHAT_BASE_URL: OpenRouter, Groq, Mistral, DeepSeek, Together, Ollama, …). Unset:
+    # anthropic with ANTHROPIC_API_KEY, else openai with OPENAI_API_KEY. The key: WEB_CHAT_API_KEY, else the
+    # provider's own (ANTHROPIC_API_KEY / OPENAI_API_KEY). The models default per provider (CHAT_DEFAULTS).
+    web_chat_provider: Literal["anthropic", "openai"] | None = Field(None, alias="WEB_CHAT_PROVIDER")
+    web_chat_api_key: SecretStr | None = Field(None, alias="WEB_CHAT_API_KEY")
+    web_chat_base_url: str | None = Field(None, alias="WEB_CHAT_BASE_URL")
+    web_chat_model: str | None = Field(None, alias="WEB_CHAT_MODEL")
     web_chat_tokens_per_day: int = Field(500_000, ge=0, alias="WEB_CHAT_TOKENS_PER_DAY")     # per user, UTC day
     web_chat_max_rounds: int = Field(8, ge=1, le=20, alias="WEB_CHAT_MAX_ROUNDS")      # model calls per message
     web_chat_history: int = Field(30, ge=2, le=200, alias="WEB_CHAT_HISTORY")          # earlier messages sent
     web_chat_web_search: bool = Field(True, alias="WEB_CHAT_WEB_SEARCH")               # web_research, deep dives
-    # web_research runs the searches with this smaller model and hands the chat a short brief
-    web_chat_research_model: str = Field("claude-haiku-5-5", alias="WEB_CHAT_RESEARCH_MODEL")
+    # web_research runs the searches with this (smaller) model and hands the chat a short brief
+    web_chat_research_model: str | None = Field(None, alias="WEB_CHAT_RESEARCH_MODEL")
     # Web Push: a VAPID key pair from `python -m brain.scripts.vapid_keys`, the same on the web app and the worker.
     # WEB_PUSH_CONTACT: a mailto: or https: URL the push services can reach us at (the VAPID `sub` claim).
     web_push_public_key: str | None = Field(None, alias="WEB_PUSH_PUBLIC_KEY")
@@ -79,6 +87,7 @@ class Settings(BaseSettings):
     # --- Model backends (not used by v0 tools) ---
     model_backend: Literal["local", "anthropic"] = Field("local", alias="MODEL_BACKEND")
     anthropic_api_key: SecretStr | None = Field(None, alias="ANTHROPIC_API_KEY")
+    openai_api_key: SecretStr | None = Field(None, alias="OPENAI_API_KEY")
     anthropic_model: str = Field("claude-opus-5-5", alias="ANTHROPIC_MODEL")
 
     # --- Agents' backend and model (brain/agents/common.py): an agent's own setting, else these ---
@@ -174,6 +183,33 @@ class Settings(BaseSettings):
     @property
     def dev_mode(self) -> bool:
         return self.dev_user_id is not None and not self.oauth_issuer
+
+    @property
+    def chat_provider(self) -> str | None:
+        """The web chat's provider: WEB_CHAT_PROVIDER, else the one whose key is set; None: no chat."""
+        if self.web_chat_provider:
+            return self.web_chat_provider
+        if self.anthropic_api_key:
+            return "anthropic"
+        if self.openai_api_key or self.web_chat_api_key:
+            return "openai"
+        return None
+
+    @property
+    def chat_api_key(self) -> str | None:
+        own = {"anthropic": self.anthropic_api_key, "openai": self.openai_api_key}.get(self.chat_provider or "")
+        key = self.web_chat_api_key or own
+        return key.get_secret_value() if key else None
+
+    def chat_model(self, research: bool = False) -> str:
+        """WEB_CHAT_MODEL (or WEB_CHAT_RESEARCH_MODEL), else the provider's default. A Claude model name left over
+        with the openai provider (or another name with anthropic) is the other provider's: the default is used."""
+        provider = self.chat_provider or "anthropic"
+        name = self.web_chat_research_model if research else self.web_chat_model
+        claude = (name or "").startswith("claude")
+        if name and not self.web_chat_base_url and claude != (provider == "anthropic"):
+            name = None
+        return name or CHAT_DEFAULTS[provider][1 if research else 0]
 
     @property
     def resource_url(self) -> str | None:
