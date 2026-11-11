@@ -4,7 +4,7 @@ const state = {
   screen: 'chat',
   chat: { id: null, title: 'Новий чат', messages: [], loading: false },
   // digest: { side: 'both', data: null, loading: false, error: '' },
-  digest: { side: 'both', data: null, loading: false, error: '', jump: null, jumpNote: '' },
+  digest: { side: 'both', unseen: false, data: null, loading: false, error: '', jump: null, jumpNote: '' },
   search: { q: '', side: 'all', days: 7, items: [], note: '', error: '', loading: false },
   proposals: { items: [], loading: false, error: '', answered: {}, reasonFor: null },
   profile: null,
@@ -13,6 +13,7 @@ const state = {
   agents: { days: 7, data: null, error: '', note: '' },
   ratings: {},         // що оцінено -> useful | not_useful
   rateError: {},
+  fullText: {},        // повний текст російських постів: id через кому -> { open, loading, posts, error }
   commentFor: null     // після «Не корисно»: де показати поле «Чому?»
 };
 
@@ -342,9 +343,56 @@ async function openChat(id) {
   if (state.screen === 'chat') render();
 }
 
+// ---------- Повний текст російських постів ----------
+// Посилання на російські канали в Україні не відкриваються, тож текст поста показуємо тут, згорнутим під карткою.
+// key: id постів через кому (у пункті дайджесту їх може бути кілька); { open, loading, posts, error }.
+const FULL_TEXT_MAX = 3;
+const RU_CLAIM_NOTE = 'Заява російського каналу, не перевірений факт.';
+
+function fullTextHtml(ids) {
+  const key = (ids || []).slice(0, FULL_TEXT_MAX).join(',');
+  if (!key) return '';
+  const f = state.fullText[key] || {};
+  let body = '';
+  if (f.open) {
+    if (f.loading) body = '<p class="sub">Завантаження…</p>';
+    else if (f.error) body = `<p class="sub">${esc(f.error)}</p>`;
+    else {
+      const texts = (f.posts || []).filter((p) => p.full_text || p.full_text_note);
+      body = texts.length ? texts.map((p) => p.full_text
+        ? `<p class="sub">${esc(RU_CLAIM_NOTE)}${p.channel?.username ? ' @' + esc(p.channel.username) : ''}</p><p class="full-text">${esc(p.full_text)}</p>`
+        : `<p class="sub">${esc(p.full_text_note)}</p>`).join('')
+        : '<p class="sub">Повного тексту немає.</p>';
+    }
+  }
+  return `<div class="full-text-box" data-full-row="${esc(key)}">
+      <div class="row"><button class="btn-text" data-full-text="${esc(key)}" aria-expanded="${!!f.open}">${f.open ? 'Згорнути текст' : 'Повний текст'}</button></div>
+      ${body}
+    </div>`;
+}
+
+function repaintFullText(key) {
+  document.querySelectorAll('[data-full-row]').forEach((el) => {
+    if (el.dataset.fullRow === key) el.outerHTML = fullTextHtml(key.split(','));
+  });
+}
+
+async function toggleFullText(key) {
+  const f = state.fullText[key] || (state.fullText[key] = {});
+  f.open = !f.open;
+  if (f.open && !f.posts && !f.loading) {
+    f.loading = true; f.error = '';
+    repaintFullText(key);
+    try { f.posts = await Promise.all(key.split(',').map((id) => api.getPostText(id))); }
+    catch (e) { f.error = 'Не вдалося завантажити текст: ' + e.message; }
+    f.loading = false;
+  }
+  repaintFullText(key);
+}
+
 // ---------- Дайджести ----------
-const SIDES = [['both', 'Усе'], ['ua', 'Українські джерела'], ['ru', 'Російські джерела'], ['topics', 'Ваші теми й інтереси']];
-const SIDE_LABEL = { ua: 'Українські джерела', ru: 'Російські джерела', topics: 'Ваші теми й інтереси' };
+const SIDES = [['both', 'Усе'], ['ua', 'Українські джерела'], ['ru', 'Російські джерела'], ['world', 'Світові джерела'], ['topics', 'Ваші теми й інтереси']];
+const SIDE_LABEL = { ua: 'Українські джерела', ru: 'Російські джерела', world: 'Світові джерела', topics: 'Ваші теми й інтереси' };
 const SIDE_NOTE = { ru: 'Заяви російських каналів, а не перевірені факти.' };
 // Емодзі з назв розділів пайплайна: на ноутбуці директора вони сірі квадрати
 const noEmoji = (s) => String(s || '').replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, '').trim();
@@ -356,9 +404,12 @@ function host(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch (e) { return 'джерело'; }
 }
 
+// Джерело-відео (YouTube) підписуємо як відео, а не просто доменом
+const isVideo = (u) => /^(m\.|music\.)?(youtube\.com|youtu\.be)$/.test(host(u));
+
 function sourcesHtml(urls) {
   return (urls || []).slice(0, 6).map((u) =>
-    `<a class="source" href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(host(u))}</a>`).join('');
+    `<a class="source" href="${esc(u)}" target="_blank" rel="noopener noreferrer">${isVideo(u) ? '▶ YouTube' : esc(host(u))}</a>`).join('');
 }
 
 function whyHtml(why) {
@@ -384,6 +435,7 @@ function itemHtml(it, side, digestId) {
           <button class="btn-text" data-ask="${esc('Глибше про #' + it.ref + ': ' + about)}" data-item="${item}">Глибше, з інтернетом</button>
         </div>
       </div>
+      ${side === 'ru' || it.is_russian_source_claim ? fullTextHtml(it.source_post_ids) : ''}
       ${digestId ? rateHtml(`d:${digestId}/${it.n}`, 'news', { target_type: 'digest_item', digest_id: digestId, item_n: it.n }) : ''}
     </article>`;
 }
@@ -418,7 +470,10 @@ function renderDigests() {
           <span class="sub">${d.data?.date ? esc(d.data.date) + ' · ' : ''}упорядковано за вашими цілями та інтересами</span>
         </div>
       </div>
-      <div class="segmented" role="group" aria-label="Джерела">${seg}</div>
+      <div class="row">
+        <div class="segmented" role="group" aria-label="Джерела">${seg}</div>
+        <button class="chip ${d.unseen ? 'on' : ''}" role="switch" aria-checked="${d.unseen}" data-unseen-digest="${d.unseen ? '0' : '1'}">Лише нове за сьогодні</button>
+      </div>
       ${d.loading ? '<p class="sub">Завантаження…</p>' : d.error ? `<p class="sub">${esc(d.error)}</p>` : digestHtml(d.data)}
     </div></div>`;
 }
@@ -428,7 +483,7 @@ async function loadDigest() {
   state.digest.error = '';
   if (state.screen === 'digests') render();
   try {
-    state.digest.data = await api.getDigest(state.digest.side);
+    state.digest.data = await api.getDigest(state.digest.side, null, state.digest.unseen);
     (state.digest.data.digests || []).forEach((d) => (d.sections || []).forEach((sec) => (sec.items || []).forEach((it) => {
       if (it.my_reaction) state.ratings[`d:${d.digest_id}/${it.n}`] = it.my_reaction;
     })));
@@ -471,6 +526,7 @@ function resultsHtml() {
       </div>
       <p>${esc(r.summary)}</p>
       ${r.post_url ? `<div class="row"><a class="source" href="${esc(r.post_url)}" target="_blank" rel="noopener noreferrer">Відкрити пост</a></div>` : ''}
+      ${r.source_side === 'ru' && r.post_id ? fullTextHtml([r.post_id]) : ''}
       ${r.post_id ? rateHtml('p:' + r.post_id, 'news', { target_type: 'post', post_id: r.post_id }) : ''}
     </div>`).join('');
 }
@@ -976,6 +1032,7 @@ $main.addEventListener('click', async (e) => {
     return agentAction(() => api.pauseAgent(d.agentPause, on), `${d.agentPause}: ${on ? 'на паузі' : 'знято з паузи'}.`);
   }
   if (d.rate) return onRate(d.rate, d.reaction);
+  if (d.fullText) return toggleFullText(d.fullText);
   if (d.go) return go(d.go);
   if (d.ask) {
     let item = null;
@@ -1001,7 +1058,8 @@ $main.addEventListener('click', async (e) => {
   }
   if (d.prefsMentions) return profileAction(() => api.setPrefs({ mentions: d.prefsMentions === '1' }), 'Збережено.');
   if (d.push) return setPush(d.push === '1');
-  if (d.investDigest) { state.digest.side = 'both'; state.digest.jump = 'invest'; return go('digests'); }
+  if (d.investDigest) { state.digest.side = 'both'; state.digest.unseen = false; state.digest.jump = 'invest'; return go('digests'); }
+  if (d.unseenDigest) { state.digest.unseen = d.unseenDigest === '1'; return loadDigest(); }
   if (d.sideDigest) { state.digest.side = d.sideDigest; return loadDigest(); }
   if (d.searchSide) { state.search.side = d.searchSide; render(); return loadSearch(); }
   if (d.days) { state.search.days = +d.days; render(); return loadSearch(); }

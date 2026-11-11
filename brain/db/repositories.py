@@ -22,7 +22,7 @@ logger = logging.getLogger("brain.db")
 
 M = TypeVar("M", bound=BaseModel)
 
-# What a post search may return; raw_text / clean_text are never read.
+# What a post search may return; raw_text / clean_text are only read by PostsRepo.own_text.
 POST_FIELDS = {"post_url": 1, "channel_id": 1, "published_at": 1, "processed": 1, "summary": 1,
                "source_side": 1, "category": 1, "tags": 1, "importance": 1, "is_ad": 1,
                "is_duplicate": 1, "views": 1, "sensitivity": 1}
@@ -67,6 +67,14 @@ class PostsRepo:
             return None
         doc = await self.col.find_one({"_id": oid, "processed": True, **sensitivity_filter(allowed)}, POST_FIELDS)
         return parse(PostDoc, doc, "posts")
+
+    async def own_text(self, post_id: str | ObjectId) -> dict:
+        """The post's own text fields ({clean_text, raw_text, text_removed}, whichever are set): read only for
+        get_post(full_text=True), after the post itself passed the sensitivity check."""
+        oid = to_object_id(post_id)
+        doc = await self.col.find_one({"_id": oid}, {"_id": 0, "clean_text": 1, "raw_text": 1, "text_removed": 1}) \
+            if oid else None
+        return doc or {}
 
     async def get_many(self, ids: list, allowed: list[str]) -> dict[str, PostDoc]:
         oids = [o for o in (to_object_id(i) for i in ids) if o]
@@ -136,23 +144,41 @@ class SourcesRepo:
         await self.col.update_one(record, {"$set": {"queries": queries}}, upsert=True)
 
 
+NEWS_SIDE = "news"      # one document per pipeline run with every side in it (since 2026-11-11)
+SIDE_ID_SEP = "-"       # a side of a "news" document is the digest "<_id>-<side>"
+NEWS_SIDES = ("ua", "ru", "world")   # the sides a "news" document may hold
+
+
+def news_sides(doc: dict) -> list[dict]:
+    """A digests document as per-side digest documents. The pipeline's "news" shape ({side: "news", sides: {ua:
+    {period_start, sections, …}, ru: …, world: …}}) gives one per side, each with the run's period, trigger,
+    created_at and the side's own fields, and the id "<_id>-<side>" (each side numbers its items from 1). Any
+    other document is itself."""
+    if doc.get("side") != NEWS_SIDE:
+        return [doc]
+    top = {k: v for k, v in doc.items() if k not in ("sides", "sides_done", "side", "_id")}
+    return [{**top, **(part or {}), "_id": f"{doc['_id']}{SIDE_ID_SEP}{side}", "side": side}
+            for side, part in (doc.get("sides") or {}).items() if isinstance(part, dict)]
+
+
 class DigestsRepo:
     def __init__(self, db: AsyncDatabase):
         self.col = db["digests"]
 
     async def latest(self, side: str, period: str = "day", start: datetime | None = None,
                      end: datetime | None = None) -> DigestDoc | None:
-        """Latest digest of a side; scheduled first, any trigger as a fallback. start/end bound created_at."""
-        base: dict = {"period": period, "side": side}
+        """Latest digest of a side, its own document or its part of a "news" one; scheduled first, any trigger as
+        a fallback. start/end bound created_at."""
+        base: dict = {"period": period, "$or": [{"side": side}, {"side": NEWS_SIDE, f"sides.{side}": {"$type": "object"}}]}
         if start or end:
             base["created_at"] = {**({"$gte": start} if start else {}), **({"$lt": end} if end else {})}
         # The pipeline's digest of users' topics and interests (side "interests"; earlier trigger "topics") is never a
         # side's digest: the side filter keeps it out, and the trigger filter the older ones.
         for query in ({**base, "trigger": "scheduled"}, {**base, "trigger": {"$ne": "topics"}}):
             async for doc in self.col.find(query).sort("created_at", -1).limit(5):
-                digest = parse(DigestDoc, doc, "digests")
-                if digest and digest.sections:
-                    return digest
+                for part in news_sides(doc):
+                    if part["side"] == side and (digest := parse(DigestDoc, part, "digests")) and digest.sections:
+                        return digest
         return None
 
     TOPICS_DIGEST = {"$or": [{"side": "interests"}, {"trigger": "topics"}]}
@@ -170,17 +196,27 @@ class DigestsRepo:
         return None
 
     async def in_range(self, start: datetime, end: datetime, limit: int = 500) -> list[DigestDoc]:
-        """Every daily digest created in [start, end), oldest first (all sides and triggers)."""
+        """Every daily digest created in [start, end), oldest first (all sides and triggers; a "news" document
+        gives one per side)."""
         out = []
         async for doc in self.col.find({"period": "day", "created_at": {"$gte": start, "$lt": end}}
                                        ).sort("created_at", 1).limit(limit):
-            if (digest := parse(DigestDoc, doc, "digests")) and digest.sections:
-                out.append(digest)
+            for part in news_sides(doc):
+                if (digest := parse(DigestDoc, part, "digests")) and digest.sections:
+                    out.append(digest)
         return out
 
     async def get(self, digest_id: str | ObjectId) -> DigestDoc | None:
-        oid = to_object_id(digest_id)
-        return parse(DigestDoc, await self.col.find_one({"_id": oid}), "digests") if oid else None
+        """A digest by its id: a document's _id, or "<_id>-<side>" for a side of a "news" document."""
+        raw, _, side = str(digest_id or "").partition(SIDE_ID_SEP)
+        oid = to_object_id(raw)
+        if oid is None:
+            return None
+        doc = await self.col.find_one({"_id": oid})
+        if doc is None or (doc.get("side") == NEWS_SIDE) != bool(side):
+            return None
+        part = next((p for p in news_sides(doc) if not side or p["side"] == side), None)
+        return parse(DigestDoc, part, "digests") if part else None
 
 
 UserId = int | str     # Telegram users: int; users created for an OAuth login: the ObjectId as hex
@@ -330,6 +366,22 @@ class UsersRepo:
             {"$set": {"morning_digest.key": key, "morning_digest.date": day, "morning_digest.channel": channel,
                       "morning_digest.at": datetime.now(timezone.utc)}})
         return result.modified_count == 1
+
+    async def mark_digest_seen(self, user_id: UserId, day: str, keys: list[str], cap: int) -> None:
+        """Adds `keys` ("<digest_id>:<n>") to users.digest_seen = {date, items} for the Kyiv `day`, in one write:
+        a new day replaces the list, at most `cap` keys (the earliest kept). The update pipeline's $setUnion-like
+        step adds only the keys not there yet, so concurrent calls never duplicate or lose one."""
+        old = {"$cond": [{"$eq": ["$digest_seen.date", day]}, {"$ifNull": ["$digest_seen.items", []]}, []]}
+        new = {"$filter": {"input": {"$literal": list(dict.fromkeys(keys))},
+                           "cond": {"$not": [{"$in": ["$$this", old]}]}}}
+        await self.col.update_one({"_id": user_key(user_id)}, [{"$set": {"digest_seen": {
+            "date": day, "items": {"$slice": [{"$concatArrays": [old, new]}, cap]}}}}])
+
+    async def digest_seen(self, user_id: UserId, day: str) -> set[str]:
+        """The digest item keys the user was shown on the Kyiv `day`."""
+        doc = await self.col.find_one({"_id": user_key(user_id)}, {"digest_seen": 1})
+        seen = (doc or {}).get("digest_seen") or {}
+        return set(seen.get("items") or []) if seen.get("date") == day else set()
 
     async def claim_morning_push(self, user_id: UserId, key: str, day: str) -> bool:
         """Marks today's digest as pushed to the user's browsers (morning_digest.web_push), apart from the

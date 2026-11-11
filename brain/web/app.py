@@ -53,7 +53,7 @@ CLIENT = {"name": "web", "version": VERSION}
 
 
 class ItemRef(BaseModel):
-    digest_id: str = Field(pattern=r"^[0-9a-f]{24}$")
+    digest_id: str = Field(pattern=r"^[0-9a-f]{24}(-[a-z]{2,12})?$")     # "<_id>-<side>": a side of a "news" digest
     item_n: int = Field(ge=1, le=500)
 
 
@@ -294,9 +294,11 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
         return await feedback_domain.earlier_reactions(svc.repos, await context(user))
 
     @app.get("/api/digest")
-    async def digest(side: Literal["ua", "ru", "topics", "both"] = "both", date: str | None = None,
-                     user: WebUser = Depends(web_user)):
-        result = await tool(user, "get_digest", {"side": side, "date": date}, f"відкрив дайджест ({side})")
+    async def digest(side: Literal["ua", "ru", "world", "topics", "both"] = "both", date: str | None = None,
+                     unseen_only: bool = False, user: WebUser = Depends(web_user)):
+        args = {"side": side, "date": date} | ({"unseen_only": True} if unseen_only else {})
+        result = await tool(user, "get_digest", args,
+                            f"відкрив дайджест ({side}{', лише нове' if unseen_only else ''})")
         mine = await earlier(user)
         for d in result.get("digests") or []:
             for section in d.get("sections") or []:
@@ -318,8 +320,9 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
         return result
 
     @app.get("/api/posts/{post_id}")
-    async def post(post_id: str, user: WebUser = Depends(web_user)):
-        result = await tool(user, "get_post", {"post_id": post_id}, "відкрив пост")
+    async def post(post_id: str, full_text: bool = False, user: WebUser = Depends(web_user)):
+        args = {"post_id": post_id, **({"full_text": True} if full_text else {})}
+        result = await tool(user, "get_post", args, "відкрив повний текст поста" if full_text else "відкрив пост")
         result["my_reaction"] = (await earlier(user)).posts.get(result.get("post_id"))
         return result
 

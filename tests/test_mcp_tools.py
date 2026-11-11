@@ -93,7 +93,7 @@ async def test_get_digest(client, test_db):
     assert [i["n"] for i in items] == [1, 3, 1]                              # each digest's own numbers
     assert not any(t in json.dumps(d, ensure_ascii=False) for t in SECRET_TEXTS)
     msg = await last_tool_message(test_db, "get_digest")
-    assert msg["args"] == {"side": "both", "as_text": False}                        # None values dropped
+    assert msg["args"] == {"side": "both", "as_text": False, "unseen_only": False}  # None values dropped
     assert msg["result"]["ok"] and msg["result"]["count"] == 3 and len(msg["result"]["digest_ids"]) == 2
     # The withheld confidential item is a security event (a count, no content).
     event = await test_db.audit_log.find_one({"event": "sensitivity_filtered", "user_id": UID})
@@ -120,6 +120,8 @@ async def test_search_posts_validates_arguments(client):
 async def test_get_post(client, test_db):
     ok = await client.call_tool("get_post", {"post_id": str(P_DRONES)})
     assert ok.structured_content["channel"]["username"] == "ua_defense_news"
+    ua = await client.call_tool("get_post", {"post_id": str(P_DRONES), "full_text": True})
+    assert ua.structured_content["full_text"] is None                    # a ua post's link works: no text
     for bad in (str(P_SECRET), "nope"):
         r = await client.call_tool("get_post", {"post_id": bad})
         assert r.is_error and "Post not found" in r.content[0].text

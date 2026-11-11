@@ -7,6 +7,7 @@ can be added to exactly that rating later (feedback_id), without touching scores
 
 - post: keyed by post_id; digest_id / item_n are null.
 - digest_item: the bot's shape, keyed by (digest_id, item_n); post_id is the item's first source post.
+  digest_id is the ObjectId, or the string "<_id>-<side>" for a side of a "news" digest document.
 - answer / suggestion: Claude's own output, described by `about`, with the posts it cited.
 Post and digest-item ratings also keep a copy of what was rated: `about` (the post summary or the item text) and
 `source_urls`, because posts are deleted within days and a comment like «more on this device» means nothing
@@ -124,7 +125,7 @@ async def record_feedback(repos: Repos, ctx: UserContext, *, mcp_channels: list[
         sources = [o for o in (to_object_id(p) for p in item.source_post_ids) if o]
         posts = await repos.posts.get_many(sources, ctx.allowed)
         tags = list(dict.fromkeys(t for p in item.source_post_ids if p in posts for t in posts[p].tags))
-        entry.update(post_id=sources[0] if sources else None, digest_id=to_object_id(digest.id), item_n=item_n,
+        entry.update(post_id=sources[0] if sources else None, digest_id=to_object_id(digest.id) or digest.id, item_n=item_n,
                      side=digest.side, category=section.category, tags=tags[:MAX_TAGS],
                      about=_rated_text(item.text), source_urls=item.source_urls[:MAX_URLS])
         match = {"digest_id": entry["digest_id"], "item_n": item_n, "channel": {"$in": channels}}

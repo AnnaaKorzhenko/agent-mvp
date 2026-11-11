@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import httpx2
 import pytest
+from bson import ObjectId
 
 from brain.audit.log import AuditLog
 from brain.db.repositories import Repos
@@ -15,7 +16,7 @@ from brain.tools.base import Services
 from brain.web.app import create_app
 from brain.web.chat import SESSION_PREFIX, as_turns, echo
 from tests.conftest import make_settings
-from tests.fixtures.sample_data import USERS, load_samples
+from tests.fixtures.sample_data import SRC_RU, USERS, _post, load_samples
 
 DEV_UID = 820_000_002
 _dbs = itertools.count()
@@ -212,16 +213,41 @@ async def test_a_bad_tool_input_goes_back_to_the_model_and_the_rounds_are_capped
     assert "забагато кроків" in "".join(e.get("text", "") for e in ev)
 
 
-async def test_enough_chat_messages_queue_a_learner_nudge_for_the_worker(db):
+async def test_the_chat_gets_a_russian_posts_full_text_when_it_asks(db):
+    post = ObjectId()
+    await db.posts.insert_one(_post(post, summary="Заява", side="ru", category="ru_front", channel=SRC_RU,
+                                    clean_text="Наши войска продвинулись."))
+    asks = message(block("tool_use", id="tu_1", name="get_post", input={"post_id": str(post), "full_text": True}),
+                   stop="tool_use")
+    fake = FakeClaude(asks, message(block("text", text="Канал стверджує, що…")))
+    async with web(app_with(db, fake)) as c:
+        chat_id = (await c.post("/api/chats")).json()["id"]
+        await c.post(f"/api/chats/{chat_id}/messages", json={"content": "Дай повний текст цього російського поста"})
+    [tool] = [t for t in fake.requests[0]["tools"] if t["name"] == "get_post"]
+    assert tool["input_schema"]["properties"]["full_text"]["type"] == "boolean"
+    result = fake.requests[1]["messages"][-1]["content"][0]
+    assert not result.get("is_error") and json.loads(result["content"])["full_text"] == "Наши войска продвинулись."
+
+
+async def test_enough_chat_messages_queue_a_learner_nudge_for_the_worker(db, monkeypatch):
+    from brain.agents import learner
     await db.users.update_one({"_id": DEV_UID}, {"$set": {"identities": [{"provider": "dev", "subject": "d"}],
                                                           "goals": []}})        # nothing else makes it due
+    nudged, nudge = [], learner.nudge_after_chat
+
+    async def recorded(*args):             # the nudge never raises: a failed one would only show as no run
+        nudged.append(await nudge(*args))
+        return nudged[-1]
+
+    monkeypatch.setattr(learner, "nudge_after_chat", recorded)
     fake = FakeClaude(*[message(block("text", text=f"Відповідь {i}.")) for i in range(3)])
     async with web(app_with(db, fake, LEARNING_AUTO=True, LEARNING_CHAT_THRESHOLD=2)) as c:
         chat_id = (await c.post("/api/chats")).json()["id"]
-        await c.post(f"/api/chats/{chat_id}/messages", json={"content": "Перше"})
-        assert await db.agent_runs.count_documents({}) == 0
-        await c.post(f"/api/chats/{chat_id}/messages", json={"content": "Друге"})
-        await c.post(f"/api/chats/{chat_id}/messages", json={"content": "Третє"})
+        for n, text in enumerate(("Перше", "Друге", "Третє"), 1):
+            r = await c.post(f"/api/chats/{chat_id}/messages", json={"content": text})
+            assert events(r.text)[-1]["type"] == "done"
+            assert len(nudged) == n                                            # each turn's nudge has finished
+    assert nudged == [False, True, True]                                       # the second message reaches 2
     [queued] = await db.agent_runs.find({}).to_list(None)                      # debounced: one run
     assert (queued["agent"], queued["scope"], queued["status"], queued["trigger"]) == \
         ("learner", DEV_UID, "queued", "nudge")

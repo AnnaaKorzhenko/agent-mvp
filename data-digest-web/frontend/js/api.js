@@ -32,15 +32,16 @@ window.api = {
     return http('/me');
   },
 
-  // GET /digest?side=both|ua|ru|topics[&date=YYYY-MM-DD]
+  // GET /digest?side=both|ua|ru|topics[&date=YYYY-MM-DD][&unseen_only=1] (unseen_only: today's items not seen yet)
   // -> { date, digests: [{ side, side_note, digest_id, sections: [{ category, title, items: [
   //        { ref, n, text, source_urls, source_post_ids, is_russian_source_claim, why: [..], relevance,
   //        my_reaction: useful | not_useful | neutral | null }] }] }],
   //      missing_sides, note, proposals: [...], topics_to_renew: [...] }
-  async getDigest(side, date) {
+  async getDigest(side, date, unseenOnly) {
     if (USE_MOCK) { await delay(150); return { date: null, digests: [], missing_sides: [], note: 'Демо-режим' }; }
     const p = new URLSearchParams({ side });
     if (date) p.set('date', date);
+    if (unseenOnly) p.set('unseen_only', '1');
     return http(`/digest?${p}`);
   },
 
@@ -50,6 +51,13 @@ window.api = {
   async searchPosts(q, side, days) {
     if (USE_MOCK) { await delay(150); return { query: q, results: [] }; }
     return http(`/posts?${new URLSearchParams({ q, side, days })}`);
+  },
+
+  // GET /posts/{id}?full_text=1 -> { post_id, source_side, ..., full_text, full_text_note }
+  // Повний текст лише для російських постів: їхні посилання на Telegram в Україні не відкриваються.
+  async getPostText(id) {
+    if (USE_MOCK) return { post_id: id, full_text: null, full_text_note: 'Демо-режим' };
+    return http(`/posts/${encodeURIComponent(id)}?full_text=1`);
   },
 
   // ---- Чат з аналітиком (brain/web/chat.py). Історію зберігає сервер, клієнт шле лише нове повідомлення.

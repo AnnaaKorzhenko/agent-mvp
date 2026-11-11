@@ -30,7 +30,7 @@ from pymongo.asynchronous.database import AsyncDatabase
 from brain.agents import common, scout
 from brain.agents.runs import GLOBAL, AgentRuns
 from brain.agents.runtime import Budget, Report, Runtime
-from brain.db.repositories import Repos
+from brain.db.repositories import NEWS_SIDES, Repos
 from brain.domain import interests, topics
 from brain.domain.tag_list import TAG_LIST
 from brain.integrations.backends import ModelBackend
@@ -239,7 +239,8 @@ async def in_our_news(db: AsyncDatabase, names: list[str], now: datetime) -> boo
     since = now - timedelta(days=OURS_DAYS)
     if await db.posts.find_one({"published_at": {"$gte": since.isoformat()}, "summary": rx}, {"_id": 1}):
         return True
-    return bool(await db.digests.find_one({"created_at": {"$gte": since}, "sections.items.text": rx}, {"_id": 1}))
+    texts = ["sections.items.text", *(f"sides.{side}.sections.items.text" for side in NEWS_SIDES)]
+    return bool(await db.digests.find_one({"created_at": {"$gte": since}, "$or": [{t: rx} for t in texts]}, {"_id": 1}))
 
 
 def _flat(text: str) -> str:

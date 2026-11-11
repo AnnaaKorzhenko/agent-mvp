@@ -113,6 +113,14 @@ def _model_text(result: out.DigestResult, prefix: str = "") -> str:
     return text
 
 
+async def _mark_seen(svc: Services, ctx: UserContext, res: digests_domain.DigestResultView) -> None:
+    """Remembers today's returned items as shown (users.digest_seen). Never breaks the digest."""
+    try:
+        await digests_domain.mark_seen(svc.repos, ctx, res)
+    except Exception as e:                 # noqa: BLE001
+        logger.error(f"marking digest items seen failed: {type(e).__name__}: {e}")
+
+
 async def _digest_done(call: Call, res: digests_domain.DigestResultView, result: out.DigestResult) -> None:
     n = sum(len(s.items) for d in result.digests for s in d.sections)
     await call.done(items=n, labels=[v.digest.sensitivity for v in res.digests],
@@ -153,19 +161,27 @@ DEEP_DIVE_STEPS = (
 
 # ---- the handlers -----------------------------------------------------------------------------------------
 
-async def get_digest(call: Call, side: str = "both", date: str | None = None, as_text: bool = False):
+async def get_digest(call: Call, side: str = "both", date: str | None = None, as_text: bool = False,
+                     unseen_only: bool = False):
     svc = call.svc
     widget = not as_text and call.origin.widgets()
 
     async def body(ctx: UserContext) -> CallToolResult:
+        day = digests_domain.unseen_day(date) if unseen_only else date
         await topics_domain.sync_if_due(svc.repos)
-        res = await digests_domain.get_digests(svc.repos, ctx, side, date)
+        res = await digests_domain.get_digests(svc.repos, ctx, side, day)
+        found = bool(res.digests)
+        if unseen_only:
+            await digests_domain.drop_seen(svc.repos, ctx, res)
         result = _digest_out(res)
-        if not result.digests:
+        if not found:
             result.note = "No digest found for this date. Say so; do not invent news."
+        elif not result.digests:
+            result.note = digests_domain.ALL_SEEN_NOTE
         result.shown_in_widget = widget and bool(result.digests)
         await _renewals(svc, ctx, result)
         await _proposals(svc, ctx, result)
+        await _mark_seen(svc, ctx, res)
         await _digest_done(call, res, result)
         return CallToolResult(content=[TextContent(type="text", text=_model_text(result))],
                               structured_content=result.model_dump(mode="json"))
@@ -184,7 +200,8 @@ async def get_morning_digest(call: Call):
                 status=m.status, date=m.result.date if m.result else None, digests=[],
                 missing_sides=m.result.missing_sides if m.result else [],
                 note=("Today's digest isn't complete yet." if m.status == "not_ready"
-                      else "Today's digest was already delivered.") + " Don't present any news.")
+                      else "Today's digest was already delivered. You may offer to show what the user hasn't "
+                           "seen of it yet (get_digest with unseen_only=true).") + " Don't present any news.")
             await call.done(items=0)
             return CallToolResult(content=[TextContent(type="text", text=result.model_dump_json())],
                                   structured_content=result.model_dump(mode="json"))
@@ -193,6 +210,7 @@ async def get_morning_digest(call: Call):
         await _renewals(svc, ctx, result)
         await _proposals(svc, ctx, result)
         result.analysis_due = await _analysis_due(svc, ctx)
+        await _mark_seen(svc, ctx, m.result)
         await _digest_done(call, m.result, result)
         return CallToolResult(content=[TextContent(type="text", text=_model_text(result, "status: new\n"))],
                               structured_content=result.model_dump(mode="json"))
@@ -225,11 +243,13 @@ async def search_posts(call: Call, query: str, side: str = "all", category: str 
     return await call.run(body)
 
 
-async def get_post(call: Call, post_id: str) -> out.PostDetail:
+async def get_post(call: Call, post_id: str, full_text: bool = False) -> out.PostDetail:
     async def body(ctx: UserContext) -> out.PostDetail:
         view = await posts_domain.get_post(call.svc.repos, ctx, post_id)
+        text = await posts_domain.full_text(call.svc.repos, view) if full_text else None
         await call.done(items=1, labels=[view.post.sensitivity], post_ids=[view.post.id])
-        return out.PostDetail(**_post_out(view).model_dump())
+        return out.PostDetail(**_post_out(view).model_dump(), full_text=text.text if text else None,
+                              full_text_note=text.note if text else None)
     return await call.run(body)
 
 

@@ -19,7 +19,7 @@ from brain.web import session
 from brain.web.app import create_app
 from brain.web.auth import Auth0Login
 from tests.conftest import make_settings
-from tests.fixtures.sample_data import USERS, load_samples
+from tests.fixtures.sample_data import P_DRONES, SRC_RU, USERS, _post, load_samples
 
 ISS = "https://tenant.example.auth0.com/"
 BASE = "https://app.example.com"
@@ -164,6 +164,27 @@ async def test_dev_mode_needs_no_login(db):
         assert (await c.get("/api/me")).json()["dev"] is True
         assert (await c.get("/api/profile")).json()["goals"] == ["ціль"]
         assert (await c.get("/login", params={"next": "//evil.example"})).headers["location"] == "/"
+
+
+async def test_a_russian_posts_full_text_on_request(db):
+    doc = copy.deepcopy(USERS[0])
+    doc.update({"_id": DEV_UID, "feedback": [], "insights": []})
+    await db.users.insert_one(doc)
+    ru, removed = ObjectId(), ObjectId()
+    await db.posts.insert_many([
+        _post(ru, summary="Заява", side="ru", category="ru_front", channel=SRC_RU, clean_text="Наши войска продвинулись."),
+        _post(removed, summary="Заява", side="ru", category="ru_front", channel=SRC_RU, text_removed=True)])
+    settings = make_settings(DEV_USER_ID=DEV_UID)
+    app = create_app(settings, Services(settings=settings, repos=Repos(db), audit=AuditLog(db), token=lambda: None))
+    async with web(app) as c:
+        plain = (await c.get(f"/api/posts/{ru}")).json()
+        assert plain["full_text"] is None and plain["is_russian_source_claim"]
+        full = (await c.get(f"/api/posts/{ru}", params={"full_text": 1})).json()
+        assert full["full_text"] == "Наши войска продвинулись." and full["full_text_note"] is None
+        gone = (await c.get(f"/api/posts/{removed}", params={"full_text": 1})).json()
+        assert gone["full_text"] is None and gone["full_text_note"] == "Повний текст уже видалено за терміном зберігання."
+        ua = (await c.get(f"/api/posts/{P_DRONES}", params={"full_text": 1})).json()
+        assert ua["full_text"] is None and ua["full_text_note"] is None                  # its link works
 
 
 def test_signed_values_expire_and_cant_be_changed():

@@ -95,13 +95,16 @@ def register_tools(mcp: MCPServer, svc: Services) -> dict[str, ToolSpec]:
     async def get_digest(
         mcp_ctx: Context,
         user_message: UserMessage,
-        side: Annotated[Literal["ua", "ru", "topics", "both"], Field(
-            description="ua: Ukrainian sources; ru: Russian sources (claims, not facts); topics: only news on the "
+        side: Annotated[Literal["ua", "ru", "world", "topics", "both"], Field(
+            description="ua: Ukrainian sources; ru: Russian sources (claims, not facts); world: foreign sources; topics: only news on the "
                         "topics the user follows; both: all of it (the default)")] = "both",
         date: Annotated[str | None, Field(
             description="Kyiv date YYYY-MM-DD; omit for the latest digest")] = None,
         as_text: Annotated[bool, Field(description=(
             "true only if the user asks for the digest as text (e.g. the cards didn't show up)"))] = False,
+        unseen_only: Annotated[bool, Field(description=(
+            "true: only today's items the user hasn't been shown yet, in any app («що нового», «що я ще не бачив»); "
+            "today only, so omit date"))] = False,
         signals: Signals = None,
     ) -> Annotated[CallToolResult, out.DigestResult]:
         """Get the user's daily news digest: sections ordered by the user's interests, every item with its
@@ -114,7 +117,8 @@ def register_tools(mcp: MCPServer, svc: Services) -> dict[str, ToolSpec]:
         items with is_russian_source_claim=true as claims of Russian channels ("Russian channels claim..."),
         never as facts; cite source_urls; show every item with its ref number (#1, #2, …) so the user can refer
         to it and rate it. Offer short follow-ups: more detail on item N (get_post with its source_post_ids),
-        a shorter version, or the sources."""
+        a shorter version, or the sources. When the user asks what is new or what they haven't seen yet
+        («що нового», «що я ще не бачив»), call it with unseen_only=true; if nothing is left, say so (the note)."""
         return await _run(svc, "get_digest", mcp_ctx, locals())
 
     @tool(title="Morning digest, if new", meta=widgets.tool_meta(widgets.DIGEST_UI),
@@ -165,9 +169,13 @@ def register_tools(mcp: MCPServer, svc: Services) -> dict[str, ToolSpec]:
         mcp_ctx: Context,
         user_message: UserMessage,
         post_id: Annotated[str, Field(description="A post_id / source_post_ids value from another tool")],
+        full_text: Annotated[bool, Field(description=(
+            "Only when the user asks for the text of a Russian post (source_side ru): its Telegram link doesn't "
+            "open in Ukraine. Ignored for other posts"))] = False,
         signals: Signals = None,
     ) -> out.PostDetail:
-        """Get one news post (summary, tags, channel, link) by id. Cite its post_url."""
+        """Get one news post (summary, tags, channel, link) by id. Cite its post_url. With full_text=true, a
+        Russian post also comes with its own text: present it as the channel's claims, not as facts."""
         return await _run(svc, "get_post", mcp_ctx, locals())
 
     @tool(title="The user's interests", annotations=READ_ONLY)
