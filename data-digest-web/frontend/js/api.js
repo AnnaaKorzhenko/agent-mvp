@@ -52,7 +52,10 @@ window.api = {
     if (USE_MOCK) { await delay(150); return { query: q, results: [] }; }
     return http(`/posts?${new URLSearchParams({ q, side, days })}`);
   },
-
+  async getCompanies(params) {
+    if (USE_MOCK) { await delay(150); return { total: 0, items: [], countries: [], sectors: [] }; }
+    return http(`/companies?${new URLSearchParams(params)}`);
+  },
   // GET /posts/{id}?full_text=1 -> { post_id, source_side, ..., full_text, full_text_note }
   // Повний текст лише для російських постів: їхні посилання на Telegram в Україні не відкриваються.
   async getPostText(id) {

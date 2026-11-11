@@ -15,6 +15,7 @@ import dataclasses
 import json
 import logging
 import secrets
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -38,7 +39,7 @@ from brain.domain.identity import IdentityError, UserContext, resolve_user
 from brain.integrations.backends import AnthropicBackend, OpenAIBackend, chat_backend
 from brain.tools import catalog
 from brain.tools.base import Origin, Services
-from brain.web import admin, session
+from brain.web import admin, session, companies
 from brain.web.chat import Chat, new_chat_id, valid_chat_id
 from brain.web.auth import Auth0Login, LoginError, WebUser
 
@@ -318,6 +319,20 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
         result = await tool(user, "get_post", args, "відкрив повний текст поста" if full_text else "відкрив пост")
         result["my_reaction"] = (await earlier(user)).posts.get(result.get("post_id"))
         return result
+
+    # ---- brain/web/companies.py) ---------------------------------------------
+    @app.get("/api/companies")
+    async def company_list(q: str = Query("", max_length=100), country: str = Query("", max_length=60),
+                           sector: str = Query("", max_length=60), skip: int = Query(0, ge=0, le=10_000),
+                           limit: int = Query(24, ge=1, le=60), user: WebUser = Depends(web_user)):
+        return await companies.list_companies(svc.repos.db, q, country, sector, skip, limit)
+
+    @app.get("/api/companies/{slug}")
+    async def company_page(slug: str, user: WebUser = Depends(web_user)):
+        doc = await companies.get_company(svc.repos.db, slug)
+        if doc is None:
+            raise HTTPException(404, "Немає такої компанії")
+        return doc
 
     @app.get("/api/profile")
     async def profile(user: WebUser = Depends(web_user)):
