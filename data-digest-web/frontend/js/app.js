@@ -392,11 +392,11 @@ async function toggleFullText(key) {
 }
 
 // ---------- Дайджести ----------
-const SIDES = [['both', 'Усе'], ['ua', 'Українські джерела'], ['ru', 'Російські джерела'], ['world', 'Світові джерела'], ['topics', 'Ваші теми й інтереси']];
-const SIDE_LABEL = { ua: 'Українські джерела', ru: 'Російські джерела', world: 'Світові джерела', topics: 'Ваші теми й інтереси' };
-const SIDE_NOTE = { ru: 'Заяви російських каналів, а не перевірені факти.' };
+const SIDES = [['both', 'Усе'], ['ua', 'Українські джерела'], ['ru', 'Російські джерела'], ['world', 'Світові джерела'], ['youtube', 'Відео'], ['topics', 'Ваші теми й інтереси']];
+const SIDE_LABEL = { ua: 'Українські джерела', ru: 'Російські джерела', world: 'Світові джерела', youtube: 'Відео, які можуть зацікавити', topics: 'Ваші теми й інтереси' };
+const SIDE_NOTE = { ru: 'Заяви російських каналів, а не перевірені факти.', youtube: 'Найцікавіше з YouTube: короткий зміст кожного відео.' };
 // Емодзі з назв розділів пайплайна: на ноутбуці директора вони сірі квадрати
-const noEmoji = (s) => String(s || '').replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, '').trim();
+const noEmoji = (s) => String(s || '').replace(/[\p{Extended_Pictographic}\p{Regional_Indicator}\u{FE0F}\u{200D}]/gu, '').trim();
 // Розділ про інвестиції впізнаємо за category або назвою: на нього веде кнопка зі сторінки «Інвестиції».
 const INVEST_RE = /invest|інвест|фінанс|funding/i;
 const isInvest = (s) => INVEST_RE.test(s.category || '') || INVEST_RE.test(s.title || '');
@@ -407,6 +407,39 @@ function host(url) {
 
 // Джерело-відео (YouTube) підписуємо як відео, а не просто доменом
 const isVideo = (u) => /^(m\.|music\.)?(youtube\.com|youtu\.be)$/.test(host(u));
+
+// Ідентифікатор відео з посилання YouTube (watch?v=, youtu.be/, shorts/), щоб показати обкладинку
+function videoId(u) {
+  try {
+    const url = new URL(u);
+    if (!isVideo(u)) return '';
+    const id = url.hostname.endsWith('youtu.be') ? url.pathname.slice(1)
+      : url.searchParams.get('v') || (url.pathname.match(/^\/(?:shorts|embed|live)\/([^/]+)/) || [])[1] || '';
+    return /^[\w-]{6,20}$/.test(id) ? id : '';
+  } catch (e) { return ''; }
+}
+
+function durationText(sec) {
+  if (!sec) return '';
+  const m = Math.floor(sec / 60), s = String(sec % 60).padStart(2, '0');
+  return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}:${s}` : `${m}:${s}`;
+}
+
+// Пункт розділу «Відео»: обкладинка, назва відео, канал і тривалість; текст пункту — короткий зміст
+function videoHeadHtml(it) {
+  const url = (it.source_urls || []).find(isVideo) || '';
+  const id = videoId(url);
+  const meta = [it.channel, id ? '' : durationText(it.duration_sec)].filter(Boolean).map(esc).join(' · ');   // тривалість уже на обкладинці
+  const thumb = id ? `<a class="video-thumb" href="${esc(url)}" target="_blank" rel="noopener noreferrer" aria-label="Дивитися на YouTube">
+        <img src="https://i.ytimg.com/vi/${esc(id)}/mqdefault.jpg" alt="" loading="lazy" referrerpolicy="no-referrer">
+        ${it.duration_sec ? `<span class="video-time">${esc(durationText(it.duration_sec))}</span>` : ''}
+      </a>` : '';
+  return `${thumb}
+      <div class="video-head">
+        ${it.title ? `<h2>${esc(it.title)}</h2>` : ''}
+        ${meta ? `<span class="sub">${meta}</span>` : ''}
+      </div>`;
+}
 
 function sourcesHtml(urls) {
   return (urls || []).slice(0, 6).map((u) =>
@@ -419,7 +452,8 @@ function whyHtml(why) {
 
 function itemHtml(it, side, digestId) {
   // «Пояснити»: з бази новин, без інтернету (дешево); «Глибше»: повне дослідження з пошуком в інтернеті.
-  const about = it.text.slice(0, 160);
+  const video = side === 'youtube' || !!it.title;
+  const about = ((it.title ? it.title + ': ' : '') + it.text).slice(0, 160);
   const item = digestId ? esc(JSON.stringify({ digest_id: digestId, item_n: it.n })) : '';
   return `
     <article class="story">
@@ -428,6 +462,7 @@ function itemHtml(it, side, digestId) {
         ${it.is_russian_source_claim ? '<span class="tag high">Заява російських каналів</span>' : ''}
         ${whyHtml(it.why)}
       </div>
+      ${video ? `<div class="video">${videoHeadHtml(it)}</div>` : ''}
       <p>${esc(it.text)}</p>
       <div class="story-foot">
         <div class="row">${sourcesHtml(it.source_urls)}</div>

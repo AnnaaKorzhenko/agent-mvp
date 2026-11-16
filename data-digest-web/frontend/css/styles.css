@@ -298,3 +298,15 @@ a.company:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px;
 }
 #companies { display: flex; flex-direction: column; gap: 14px; }
 .companies-more { align-self: center; }
+
+/* Розділ «Відео» в дайджесті: обкладинка ліворуч, назва й канал праворуч */
+.video { display: flex; gap: 14px; align-items: flex-start; }
+.video-thumb { position: relative; flex: 0 0 168px; border-radius: 10px; overflow: hidden; background: var(--border); aspect-ratio: 16 / 9; }
+.video-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.video-time { position: absolute; right: 6px; bottom: 6px; font-size: 12px; line-height: 1; color: #fff; background: rgba(0, 0, 0, .75); border-radius: 4px; padding: 3px 5px; }
+.video-head { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.video-head h2 { font-size: 17px; overflow-wrap: anywhere; }
+@media (max-width: 560px) {
+  .video { flex-direction: column; }
+  .video-thumb { flex-basis: auto; width: 100%; }
+}

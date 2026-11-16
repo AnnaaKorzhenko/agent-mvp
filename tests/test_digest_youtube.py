@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import itertools
+import re
 
 import pytest
 from bson import ObjectId
@@ -13,6 +14,7 @@ from brain.db.repositories import Repos, news_sides
 from brain.domain import digests
 from brain.mcp_server import schemas, widgets
 from brain.tools import handlers
+from brain.web.app import FRONTEND
 from tests.fixtures.sample_data import USERS
 from tests.test_digest_news_shape import ctx, kyiv, news_doc, web
 
@@ -141,3 +143,14 @@ def test_claudes_digest_cards_show_the_video_title_and_channel():
     assert 'youtube: "Відео, які можуть зацікавити"' in html
     card = html[html.index("function itemCard("):html.index("function render(")]
     assert 'el("b", {}, item.title)' in card and "item.channel" in card and "duration(item.duration_sec)" in card
+
+
+def test_the_web_app_has_a_video_tab_and_draws_a_video_card():
+    js = (FRONTEND / "js" / "app.js").read_text(encoding="utf-8")
+    assert "['youtube', 'Відео']" in js and "youtube: 'Відео, які можуть зацікавити'" in js
+    item = js[js.index("function itemHtml("):js.index("function digestHtml(")]
+    assert "side === 'youtube'" in item and "videoHeadHtml(it)" in item
+    head = js[js.index("function videoHeadHtml("):js.index("function sourcesHtml(")]
+    assert "esc(it.title)" in head and "it.channel" in head and "i.ytimg.com/vi/${esc(id)}" in head
+    assert "\\p{Regional_Indicator}" in js         # the 🇺🇦 of the section title isn't drawn as two letters
+    assert re.search(r"\.video-thumb\s*\{", (FRONTEND / "css" / "styles.css").read_text(encoding="utf-8"))
