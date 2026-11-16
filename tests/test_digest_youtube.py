@@ -11,6 +11,8 @@ from bson import ObjectId
 
 from brain.db.repositories import Repos, news_sides
 from brain.domain import digests
+from brain.mcp_server import schemas, widgets
+from brain.tools import handlers
 from tests.fixtures.sample_data import USERS
 from tests.test_digest_news_shape import ctx, kyiv, news_doc, web
 
@@ -122,3 +124,20 @@ async def test_a_video_can_be_rated_and_found_by_its_item_id(world):
         assert r.status_code == 200, r.text
         yt = (await w.get("/api/digest", params={"side": "youtube"})).json()["digests"][0]
         assert [i.get("my_reaction") for i in yt["sections"][0]["items"] if i["n"] == 2] == ["useful"]
+
+
+async def test_claude_reads_videos_as_video_with_their_titles(world):
+    db, uid = world
+    await db.digests.insert_one(youtube_doc(kyiv(6)))
+    res = await digests.get_digests(Repos(db), ctx(uid), "youtube", kyiv(6).date().isoformat())
+    result = handlers._digest_out(res)
+    assert result.digests[0].side == "youtube" and "youtube" in str(schemas.DigestOut.model_fields["side"].annotation)
+    text = widgets.digest_index(result)
+    assert " VIDEO · video_ua · " in text and "«Tsar Rockets Are Coming: Аналітик" in text
+
+
+def test_claudes_digest_cards_show_the_video_title_and_channel():
+    html = widgets.widget_html("digest.html")
+    assert 'youtube: "Відео, які можуть зацікавити"' in html
+    card = html[html.index("function itemCard("):html.index("function render(")]
+    assert 'el("b", {}, item.title)' in card and "item.channel" in card and "duration(item.duration_sec)" in card
