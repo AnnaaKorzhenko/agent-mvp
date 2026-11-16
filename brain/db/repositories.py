@@ -25,7 +25,8 @@ M = TypeVar("M", bound=BaseModel)
 # What a post search may return; raw_text / clean_text are only read by PostsRepo.own_text.
 POST_FIELDS = {"post_url": 1, "channel_id": 1, "published_at": 1, "processed": 1, "summary": 1,
                "source_side": 1, "category": 1, "tags": 1, "importance": 1, "is_ad": 1,
-               "is_duplicate": 1, "views": 1, "sensitivity": 1}
+               "is_duplicate": 1, "views": 1, "sensitivity": 1, "video.video_id": 1, "video.channel": 1,
+               "video.duration_sec": 1, "video.is_short": 1}
 
 
 def parse(model: type[M], doc: dict | None, collection: str) -> M | None:
@@ -146,7 +147,7 @@ class SourcesRepo:
 
 NEWS_SIDE = "news"      # one document per pipeline run with every side in it (since 2026-11-11)
 SIDE_ID_SEP = "-"       # a side of a "news" document is the digest "<_id>-<side>"
-NEWS_SIDES = ("ua", "ru", "world")   # the sides a "news" document may hold
+NEWS_SIDES = ("ua", "ru", "world", "youtube")   # the sides a "news" document may hold
 
 
 def news_sides(doc: dict) -> list[dict]:

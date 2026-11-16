@@ -12,8 +12,10 @@ their own followed topics, else one of their lasting interests (its names), regr
 («⭐ Спектр-К»), each story once (the pipeline repeats a story under every search it matched), before the ua and
 ru digests. It never counts as a side's digest, and the morning delivery doesn't wait for it.
 
-News sides: ua, ru and world. Since 2026-11-11 the pipeline writes one document per run with every side in it
-(side "news", sides.<side>); the repository gives each side as a digest of its own, id "<_id>-<side>".
+News sides: ua, ru, world and youtube. Since 2026-11-11 the pipeline writes one document per run with every side in it
+(side "news", sides.<side>); the repository gives each side as a digest of its own, id "<_id>-<side>". A youtube
+item is one video: its title, a short summary as the text, the link; its source post's `video` gives the channel
+and the length.
 """
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from brain.db.models import DigestDoc, DigestItemDoc, DigestSectionDoc, PostDoc, UserProfileDoc
+from brain.db.models import DigestDoc, DigestItemDoc, DigestSectionDoc, PostDoc, UserProfileDoc, VideoDoc
 from brain.db.repositories import Repos
 from brain.domain import relevance, scoring, sensitivity
 from brain.domain.relevance import Interests, Relevance
@@ -32,8 +34,9 @@ KYIV = ZoneInfo("Europe/Kyiv")
 RU_NOTE = "Claims of Russian sources, not verified facts."
 TOPICS = "topics"            # the result's `side` for the topics-and-interests digest (and its old trigger)
 INTERESTS_SIDE = "interests"  # the pipeline's side for it
-SIDES = ("ua", "ru", "world")  # the news sides, in the order shown (world: foreign sources, since 2026-11-11)
-REQUIRED_SIDES = ("ua", "ru")  # the morning delivery waits for these; world comes when it comes
+YOUTUBE = "youtube"            # the side of video summaries (since 2026-11-11)
+SIDES = ("ua", "ru", "world", YOUTUBE)  # the news sides, in the order shown (world: foreign sources)
+REQUIRED_SIDES = ("ua", "ru")  # the morning delivery waits for these; world and youtube come when they come
 
 
 def is_topics_digest(d: DigestDoc) -> bool:
@@ -52,6 +55,7 @@ class DigestView:
     relevance: dict[int, "Relevance"] = field(default_factory=dict)     # id(item) -> personal relevance
     kind: str | None = None                                   # TOPICS for the tracked-topics digest
     claims: set[int] = field(default_factory=set)             # id(item) of Russian-source items (topics digest)
+    videos: dict[int, VideoDoc] = field(default_factory=dict)  # id(item) -> its source video (channel, length)
 
     @property
     def side(self) -> str:
@@ -62,6 +66,9 @@ class DigestView:
 
     def number(self, item: DigestItemDoc) -> int:
         return self.numbers[id(item)]
+
+    def video(self, item: DigestItemDoc) -> VideoDoc | None:
+        return self.videos.get(id(item))
 
     def why(self, item: DigestItemDoc) -> "Relevance":
         return self.relevance.get(id(item)) or Relevance()
@@ -110,12 +117,13 @@ def order_sections(sections: list[DigestSectionDoc], profile: UserProfileDoc | N
 
 
 async def get_digests(repos: Repos, ctx: UserContext, side: str = "both", day: str | None = None) -> DigestResultView:
-    """both: the user's tracked-topics items first (if any), then ua, ru and world (world only when the pipeline
-    made one: it is never missing); ua / ru / world: that side only; topics: the tracked-topics items only."""
+    """both: the user's tracked-topics items first (if any), then ua, ru, world and youtube (the last two only when
+    the pipeline made them: they are never missing); ua / ru / world / youtube: that side only; topics: the
+    tracked-topics items only."""
     both = side in ("both", "all", None)
     sides = list(SIDES) if both else [] if side == TOPICS else [side]
     if any(s not in SIDES for s in sides):
-        raise InvalidInput("side must be 'ua', 'ru', 'world', 'topics' or 'both'")
+        raise InvalidInput("side must be 'ua', 'ru', 'world', 'youtube', 'topics' or 'both'")
     wanted = parse_date(day)
     start, end = kyiv_day_bounds(wanted) if wanted else (None, None)
     profile = await repos.users.get_profile(ctx.user_id)
@@ -361,6 +369,8 @@ async def _view(repos: Repos, ctx: UserContext, digest: DigestDoc, profile: User
                 view.hidden_items += 1
                 continue
             kept.append(item)
+            if video := next((posts[p].video for p in item.source_post_ids if p in posts and posts[p].video), None):
+                view.videos[id(item)] = video
             if prefs is not None:
                 tags = [t for pid in item.source_post_ids if pid in posts for t in posts[pid].tags]
                 view.relevance[id(item)] = prefs.score(side=digest.side, category=section.category,

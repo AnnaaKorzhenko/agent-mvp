@@ -288,8 +288,8 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
         return await feedback_domain.earlier_reactions(svc.repos, await context(user))
 
     @app.get("/api/digest")
-    async def digest(side: Literal["ua", "ru", "world", "topics", "both"] = "both", date: str | None = None,
-                     unseen_only: bool = False, user: WebUser = Depends(web_user)):
+    async def digest(side: Literal["ua", "ru", "world", "youtube", "topics", "both"] = "both",
+                     date: str | None = None, unseen_only: bool = False, user: WebUser = Depends(web_user)):
         args = {"side": side, "date": date} | ({"unseen_only": True} if unseen_only else {})
         result = await tool(user, "get_digest", args,
                             f"відкрив дайджест ({side}{', лише нове' if unseen_only else ''})")

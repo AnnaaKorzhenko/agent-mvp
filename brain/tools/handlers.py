@@ -44,7 +44,9 @@ def _digest_out(res: digests_domain.DigestResultView, cls: type[out.DigestResult
             created_at=v.digest.created_at.isoformat(), period_start=v.digest.period_start,
             period_end=v.digest.period_end, hidden_items=v.hidden_items,
             sections=[out.DigestSectionOut(category=s.category, title=s.title, items=[
-                out.DigestItemOut(ref=next(refs), n=v.number(i), text=i.text, source_urls=i.source_urls,
+                out.DigestItemOut(ref=next(refs), n=v.number(i), text=i.text, title=i.title,
+                                  channel=(vid := v.video(i)) and vid.channel,
+                                  duration_sec=vid and vid.duration_sec, source_urls=i.source_urls,
                                   source_post_ids=i.source_post_ids, is_russian_source_claim=v.claim(i),
                                   why=v.why(i).why, relevance=v.why(i).score) for i in items])
                 for s, items in v.sections])
