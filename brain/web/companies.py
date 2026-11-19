@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import re
@@ -9,8 +8,9 @@ from pymongo.asynchronous.database import AsyncDatabase
 
 COMPANIES = "defence_companies"
 COMPANY_OK = {"collection_status": "success"}
-COMPANY_CARD = {"_id": 0, "name": 1, "slug": 1, "description": 1, "location": 1, "country": 1, "sector": 1,
-                "card_metadata": 1, "website": 1, "facts.website": 1}
+# Для мапи у вкладці «Інвестиції» потрібен увесь профіль (раунди, інвестори, джерела, 🔥 Dealroom, призначення),
+# тож віддаємо документ цілком, без службових і важких полів.
+COMPANY_CARD = {"_id": 0, "data_name": 0, "faq": 0}
 COMPANY_HIDDEN = {"_id": 0, "data_name": 0}
 SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$")
 SECTOR_LABELS = ("Advanced Materials", "Autonomy & AI", "Counter-Drone", "Cyber", "Drones", "Electronic Warfare",
@@ -35,20 +35,21 @@ def split_card_metadata(meta: str | None) -> tuple[str | None, str]:
 def company_out(doc: dict) -> dict:
     """Документ для браузера: + sector_label і stage з card_metadata; ObjectId і дати — у рядки."""
     label, stage = split_card_metadata(doc.get("card_metadata"))
-    doc["sector_label"] = label or titled(doc.get("sector"))
+    doc["sector_label"] = label or doc.get("sector_label") or titled(doc.get("sector"))
     doc["stage"] = stage
     return jsonable_encoder(doc, custom_encoder={ObjectId: str})
 
 
 async def facets(db: AsyncDatabase) -> dict:
-    """Країни й категорії для фільтрів, з кількістю компаній: [{id, label, count}]."""
+
     sectors: dict[str, dict] = {}
     countries: dict[str, int] = {}
-    async for d in db[COMPANIES].find(COMPANY_OK, {"_id": 0, "sector": 1, "country": 1, "card_metadata": 1}):
+    async for d in db[COMPANIES].find(COMPANY_OK, {"_id": 0, "sector": 1, "country": 1, "card_metadata": 1,
+                                                   "sector_label": 1}):
         if isinstance(d.get("sector"), str) and d["sector"]:
             s = sectors.setdefault(d["sector"], {"id": d["sector"], "label": None, "count": 0})
             s["count"] += 1
-            s["label"] = s["label"] or split_card_metadata(d.get("card_metadata"))[0]
+            s["label"] = s["label"] or split_card_metadata(d.get("card_metadata"))[0] or d.get("sector_label")
         if isinstance(d.get("country"), str) and d["country"]:
             countries[d["country"]] = countries.get(d["country"], 0) + 1
     for s in sectors.values():
@@ -60,14 +61,14 @@ async def facets(db: AsyncDatabase) -> dict:
 
 async def list_companies(db: AsyncDatabase, q: str = "", country: str = "", sector: str = "",
                          skip: int = 0, limit: int = 24) -> dict:
-    """{total, items}; на першій сторінці (skip=0) ще й списки для фільтрів — з усієї колекції."""
+
     flt = dict(COMPANY_OK)
     if country:
         flt["country"] = country
     if sector:
         flt["sector"] = sector
     q = q.strip()
-    if q:                               # пошук за назвою, описом і містом; re.escape: текст, а не регулярний вираз
+    if q:
         rx = {"$regex": re.escape(q), "$options": "i"}
         flt["$or"] = [{"name": rx}, {"description": rx}, {"location": rx}]
     col = db[COMPANIES]
@@ -80,7 +81,7 @@ async def list_companies(db: AsyncDatabase, q: str = "", country: str = "", sect
 
 
 async def get_company(db: AsyncDatabase, slug: str) -> dict | None:
-    """Увесь документ компанії, крім службових полів; None — немає такої (або slug не схожий на slug)."""
+
     if not SLUG.match(slug or ""):
         return None
     doc = await db[COMPANIES].find_one({"slug": slug, **COMPANY_OK}, COMPANY_HIDDEN)
