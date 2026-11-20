@@ -62,13 +62,29 @@ async def test_the_first_page_lists_collected_companies_by_name_with_the_filters
     first = body["items"][0]
     assert (first["sector_label"], first["stage"]) == ("Drones", "Pre-seed / Jun 2026")
     assert body["items"][1]["sector_label"] == "Autonomy & AI"
-    assert "_id" not in first and "data_name" not in first and "funding" not in first      # a card, not the page
+    # The map needs the whole profile (rounds, investors, sources): everything but the internal and heavy fields
+    assert first["funding"] == [{"round": "Seed"}] and first["description"] == "Acodyne builds things."
+    assert "_id" not in first and "data_name" not in first and "faq" not in first
     assert body["countries"] == [{"id": "denmark", "label": "Denmark", "count": 1},
                                  {"id": "germany", "label": "Germany", "count": 2},
                                  {"id": "united-kingdom", "label": "United Kingdom", "count": 1}]
     assert [(s["id"], s["label"]) for s in body["sectors"]] == [
         ("autonomy-ai", "Autonomy & AI"), ("drones", "Drones"), ("electronic-warfare", "Electronic Warfare"),
         ("maritime", "Maritime")]
+
+
+async def test_a_company_without_card_metadata_keeps_its_own_sector_label(test_db):
+    db = test_db.client[f"{test_db.name}_co{next(_ids)}"]
+    await db.defence_companies.insert_one(company("Foxtrot", "poland", "cyber", None, sector_label="Cyber & Intel"))
+    settings = make_settings(DEV_USER_ID=next(_ids))
+    app = create_app(settings, Services(settings=settings, repos=Repos(db), audit=AuditLog(db), token=lambda: None))
+    try:
+        async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://127.0.0.1:8001") as c:
+            body = await get(c)
+        assert body["items"][0]["sector_label"] == "Cyber & Intel"
+        assert body["sectors"] == [{"id": "cyber", "label": "Cyber & Intel", "count": 1}]
+    finally:
+        await test_db.client.drop_database(db.name)
 
 
 async def test_search_filters_and_paging(ui):
