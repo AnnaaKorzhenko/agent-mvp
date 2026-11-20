@@ -74,9 +74,9 @@ class DigestItemOut(BaseModel):
                                  "«третя» = ref 3")
     n: int = Field(description="The item's number inside its digest; pass it as item_n to record_feedback")
     text: str
-    title: str | None = Field(None, description="youtube side: the video's title (text is its short summary)")
-    channel: str | None = Field(None, description="youtube side: the YouTube channel's name")
-    duration_sec: int | None = Field(None, description="youtube side: the video's length in seconds")
+    title: str | None = Field(None, description="video side: the video's title (text is its short summary)")
+    channel: str | None = Field(None, description="video side: the channel's name (YouTube or Rutube)")
+    duration_sec: int | None = Field(None, description="video side: the video's length in seconds")
     source_urls: list[str]
     source_post_ids: list[str] = Field(description="Ids usable with get_post and record_feedback")
     is_russian_source_claim: bool
@@ -91,8 +91,9 @@ class DigestSectionOut(BaseModel):
 
 
 class DigestOut(BaseModel):
-    side: Literal["ua", "ru", "world", "youtube", "topics"] | str = Field(description=(
-        "world: foreign sources; youtube: summaries of videos worth watching; topics: today's news on the topics "
+    side: Literal["ua", "ru", "world", "video", "topics"] | str = Field(description=(
+        "world: foreign sources; video: summaries of videos worth watching (Russian channels' videos are marked as "
+        "claims); topics: today's news on the topics "
         "the user follows (sections per topic), shown first"))
     side_note: str | None = None
     digest_id: str
@@ -333,7 +334,7 @@ class TopicSaved(MemoryOut):
 class AnalysisItem(BaseModel):
     id: str = Field(description="digest_id/n of the item")
     date: str
-    side: Literal["ua", "ru", "world", "youtube", "topics"] | str
+    side: Literal["ua", "ru", "world", "video", "topics"] | str
     is_russian_source_claim: bool
     category: str
     text: str

@@ -89,13 +89,12 @@ def digest_index(result: out.DigestResult) -> str:
         "Index (ref · side · category · digest_id/n · source post ids · opening words · why it matters to the "
         "user). Items are ordered by the user's goals and interests; items marked RU are claims of Russian "
         "channels, not facts; items marked TOPIC are news on topics the user follows (category = the topic); items "
-        "marked VIDEO are summaries of YouTube videos (title: summary):",
+        "marked VIDEO are summaries of videos (title: summary; VIDEO RU: a Russian channel's, a claim):",
     ]
     for d, s, i in items:
         why = f" · для користувача: {'; '.join(i.why)}" if i.why else ""
-        origin = ("TOPIC " if d.side == "topics" else "") + ("RU" if i.is_russian_source_claim else
-                                                               "WORLD" if d.side == "world" else
-                                                               "VIDEO" if d.side == "youtube" else "UA")
+        origin = ("TOPIC " if d.side == "topics" else "VIDEO " if d.side == "video" else "") + (
+            "RU" if i.is_russian_source_claim else "WORLD" if d.side == "world" else "UA")
         lines.append(f"#{i.ref} {origin} · {s.title if d.side == 'topics' else s.category} · {d.digest_id}/{i.n} · "
                      f"{','.join(i.source_post_ids[:3])} · «{_short(f'{i.title}: {i.text}' if i.title else i.text)}»{why}")
     for d in result.digests:

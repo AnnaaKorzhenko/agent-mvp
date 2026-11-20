@@ -147,19 +147,27 @@ class SourcesRepo:
 
 NEWS_SIDE = "news"      # one document per pipeline run with every side in it (since 2026-11-11)
 SIDE_ID_SEP = "-"       # a side of a "news" document is the digest "<_id>-<side>"
-NEWS_SIDES = ("ua", "ru", "world", "youtube")   # the sides a "news" document may hold
+NEWS_SIDES = ("ua", "ru", "world", "video", "youtube")   # the sides a "news" document may hold (keys of `sides`)
+# Older names of a side: the pipeline wrote the videos under sides.youtube until 2026-11-18, under sides.video since.
+# Such a part reads as the new side; its id keeps the stored key ("<_id>-youtube"), so earlier ratings still match.
+SIDE_ALIASES = {"youtube": "video"}
+
+
+def side_keys(side: str) -> list[str]:
+    """The keys of `sides` a side may be stored under: its name, then its older names."""
+    return [side, *(old for old, new in SIDE_ALIASES.items() if new == side)]
 
 
 def news_sides(doc: dict) -> list[dict]:
     """A digests document as per-side digest documents. The pipeline's "news" shape ({side: "news", sides: {ua:
     {period_start, sections, …}, ru: …, world: …}}) gives one per side, each with the run's period, trigger,
-    created_at and the side's own fields, and the id "<_id>-<side>" (each side numbers its items from 1). Any
-    other document is itself."""
+    created_at and the side's own fields, and the id "<_id>-<key>" (each side numbers its items from 1). A side
+    stored under an older name (SIDE_ALIASES) reads as the new one. Any other document is itself."""
     if doc.get("side") != NEWS_SIDE:
         return [doc]
     top = {k: v for k, v in doc.items() if k not in ("sides", "sides_done", "side", "_id")}
-    return [{**top, **(part or {}), "_id": f"{doc['_id']}{SIDE_ID_SEP}{side}", "side": side}
-            for side, part in (doc.get("sides") or {}).items() if isinstance(part, dict)]
+    return [{**top, **(part or {}), "_id": f"{doc['_id']}{SIDE_ID_SEP}{key}", "side": SIDE_ALIASES.get(key, key)}
+            for key, part in (doc.get("sides") or {}).items() if isinstance(part, dict)]
 
 
 class DigestsRepo:
@@ -170,7 +178,8 @@ class DigestsRepo:
                      end: datetime | None = None) -> DigestDoc | None:
         """Latest digest of a side, its own document or its part of a "news" one; scheduled first, any trigger as
         a fallback. start/end bound created_at."""
-        base: dict = {"period": period, "$or": [{"side": side}, {"side": NEWS_SIDE, f"sides.{side}": {"$type": "object"}}]}
+        base: dict = {"period": period, "$or": [{"side": side}, *({"side": NEWS_SIDE, f"sides.{key}": {"$type": "object"}}
+                                                                 for key in side_keys(side))]}
         if start or end:
             base["created_at"] = {**({"$gte": start} if start else {}), **({"$lt": end} if end else {})}
         # The pipeline's digest of users' topics and interests (side "interests"; earlier trigger "topics") is never a
@@ -216,7 +225,7 @@ class DigestsRepo:
         doc = await self.col.find_one({"_id": oid})
         if doc is None or (doc.get("side") == NEWS_SIDE) != bool(side):
             return None
-        part = next((p for p in news_sides(doc) if not side or p["side"] == side), None)
+        part = next((p for p in news_sides(doc) if not side or p["_id"] == f"{oid}{SIDE_ID_SEP}{side}"), None)
         return parse(DigestDoc, part, "digests") if part else None
 
 

@@ -39,7 +39,7 @@ def _seconds(v):
 
 
 class VideoDoc(_Doc):
-    """A YouTube post's `video` (the pipeline keeps more: handle, channel id, how it was found)."""
+    """A video post's `video` (YouTube or Rutube; the pipeline keeps more: handle, channel id, how it was found)."""
     video_id: str | None = None
     channel: str | None = None
     duration_sec: Annotated[int | None, BeforeValidator(_seconds)] = None
@@ -64,13 +64,13 @@ class PostDoc(_Doc):
     is_duplicate: bool = False
     views: int | None = None
     sensitivity: str = "internal"
-    video: VideoDoc | None = None        # platform "youtube" only
+    video: VideoDoc | None = None        # videos only (platform "youtube" or "rutube")
 
 
 class DigestItemDoc(_Doc):
     n: int | None = None
     text: str
-    title: str | None = None             # the video's title (items of the youtube side)
+    title: str | None = None             # the video's title (items of the video side)
     source_urls: Annotated[list[str], BeforeValidator(_as_list)] = []
     source_post_ids: Annotated[list[Id], BeforeValidator(_as_list)] = []
 

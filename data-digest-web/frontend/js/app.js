@@ -386,9 +386,9 @@ async function toggleFullText(key) {
   repaintFullText(key);
 }
 
-const SIDES = [['both', 'Усе'], ['ua', 'Українські джерела'], ['ru', 'Російські джерела'], ['world', 'Світові джерела'], ['youtube', 'Відео'], ['topics', 'Ваші теми й інтереси']];
-const SIDE_LABEL = { ua: 'Українські джерела', ru: 'Російські джерела', world: 'Світові джерела', youtube: 'Відео, які можуть зацікавити', topics: 'Ваші теми й інтереси' };
-const SIDE_NOTE = { ru: 'Заяви російських каналів, а не перевірені факти.', youtube: 'Найцікавіше з YouTube: короткий зміст кожного відео.' };
+const SIDES = [['both', 'Усе'], ['ua', 'Українські джерела'], ['ru', 'Російські джерела'], ['world', 'Світові джерела'], ['video', 'Відео'], ['topics', 'Ваші теми й інтереси']];
+const SIDE_LABEL = { ua: 'Українські джерела', ru: 'Російські джерела', world: 'Світові джерела', video: 'Відео, які можуть зацікавити', topics: 'Ваші теми й інтереси' };
+const SIDE_NOTE = { ru: 'Заяви російських каналів, а не перевірені факти.', video: 'Короткий зміст кожного відео; відео російських каналів — їхні заяви, а не факти.' };
 
 const noEmoji = (s) => String(s || '').replace(/[\p{Extended_Pictographic}\p{Regional_Indicator}\u{FE0F}\u{200D}]/gu, '').trim();
 
@@ -433,9 +433,11 @@ function videoHeadHtml(it) {
       </div>`;
 }
 
+const isRutube = (u) => /(^|\.)rutube\.ru$/.test(host(u));
+
 function sourcesHtml(urls) {
   return (urls || []).slice(0, 6).map((u) =>
-    `<a class="source" href="${esc(u)}" target="_blank" rel="noopener noreferrer">${isVideo(u) ? '▶ YouTube' : esc(host(u))}</a>`).join('');
+    `<a class="source" href="${esc(u)}" target="_blank" rel="noopener noreferrer">${isVideo(u) ? '▶ YouTube' : isRutube(u) ? '▶ Rutube' : esc(host(u))}</a>`).join('');
 }
 
 function whyHtml(why) {
@@ -444,7 +446,7 @@ function whyHtml(why) {
 
 function itemHtml(it, side, digestId) {
 
-  const video = side === 'youtube' || !!it.title;
+  const video = side === 'video' || !!it.title;
   const about = ((it.title ? it.title + ': ' : '') + it.text).slice(0, 160);
   const item = digestId ? esc(JSON.stringify({ digest_id: digestId, item_n: it.n })) : '';
   return `
@@ -463,7 +465,7 @@ function itemHtml(it, side, digestId) {
           <button class="btn-text" data-ask="${esc('Глибше про #' + it.ref + ': ' + about)}" data-item="${item}">Глибше, з інтернетом</button>
         </div>
       </div>
-      ${side === 'ru' || it.is_russian_source_claim ? fullTextHtml(it.source_post_ids) : ''}
+      ${!video && (side === 'ru' || it.is_russian_source_claim) ? fullTextHtml(it.source_post_ids) : ''}
       ${digestId ? rateHtml(`d:${digestId}/${it.n}`, 'news', { target_type: 'digest_item', digest_id: digestId, item_n: it.n }) : ''}
     </article>`;
 }

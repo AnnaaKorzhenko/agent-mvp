@@ -19,7 +19,7 @@
 <script type="module">
 /*__COMMON_JS__*/
 
-const SIDE = { topics: "Ваші теми й інтереси", ua: "Українські джерела", ru: "Російські джерела", world: "Світові джерела", youtube: "Відео, які можуть зацікавити" };
+const SIDE = { topics: "Ваші теми й інтереси", ua: "Українські джерела", ru: "Російські джерела", world: "Світові джерела", video: "Відео, які можуть зацікавити" };
 const FIRST = 6;                // items shown per side before «Показати ще»
 const widget = createWidget({ name: "News brain digest", where: "у віджеті зведення" });
 
@@ -32,8 +32,8 @@ function duration(sec) {
 function itemCard(digest, item) {
   return widget.card({
     key: `${digest.digest_id}:${item.n}`, ref: item.ref, text: item.text,
-    // In the topics digest sources are mixed: mark each Russian-source item (the ru side is marked as a whole).
-    body: [digest.side === "topics" && item.is_russian_source_claim
+    // In the topics and video digests sources are mixed: mark each Russian-source item (the ru side as a whole).
+    body: [(digest.side === "topics" || digest.side === "video") && item.is_russian_source_claim
              ? el("div", { class: "meta" }, el("span", { class: "claim" }, "заява рос. джерела, не факт")) : null,
            item.title ? el("b", {}, item.title) : null,
            item.title && (item.channel || item.duration_sec)
