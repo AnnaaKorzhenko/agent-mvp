@@ -11,6 +11,9 @@ TrustLevel = Literal["cloud", "local"]
 Sensitivity = Literal["public", "internal", "confidential", "restricted"]
 # The web chat's models when WEB_CHAT_MODEL / WEB_CHAT_RESEARCH_MODEL aren't set: (chat, web research)
 CHAT_DEFAULTS = {"anthropic": ("claude-sonnet-5-5", "claude-haiku-5-5"), "openai": ("gpt-5-mini", "gpt-5-mini")}
+Provider = Literal["anthropic", "openai"]
+# An agent's backend: the local model, or a cloud one (MODEL_PROVIDER's when set, else the one named)
+AgentBackend = Literal["local", "anthropic", "openai"]
 
 
 class Settings(BaseSettings):
@@ -64,9 +67,9 @@ class Settings(BaseSettings):
     web_frontend_dir: str | None = Field(None, alias="WEB_FRONTEND_DIR")
     # The web chat (brain/web/chat.py). WEB_CHAT_PROVIDER: anthropic (Claude) or openai (OpenAI, or any
     # OpenAI-compatible API at WEB_CHAT_BASE_URL: OpenRouter, Groq, Mistral, DeepSeek, Together, Ollama, …). Unset:
-    # anthropic with ANTHROPIC_API_KEY, else openai with OPENAI_API_KEY. The key: WEB_CHAT_API_KEY, else the
+    # MODEL_PROVIDER, else anthropic with ANTHROPIC_API_KEY, else openai with OPENAI_API_KEY. The key: WEB_CHAT_API_KEY, else the
     # provider's own (ANTHROPIC_API_KEY / OPENAI_API_KEY). The models default per provider (CHAT_DEFAULTS).
-    web_chat_provider: Literal["anthropic", "openai"] | None = Field(None, alias="WEB_CHAT_PROVIDER")
+    web_chat_provider: Provider | None = Field(None, alias="WEB_CHAT_PROVIDER")
     web_chat_api_key: SecretStr | None = Field(None, alias="WEB_CHAT_API_KEY")
     web_chat_base_url: str | None = Field(None, alias="WEB_CHAT_BASE_URL")
     web_chat_model: str | None = Field(None, alias="WEB_CHAT_MODEL")
@@ -85,13 +88,19 @@ class Settings(BaseSettings):
     morning_push: bool = Field(False, alias="MORNING_PUSH")
 
     # --- Model backends (not used by v0 tools) ---
-    model_backend: Literal["local", "anthropic"] = Field("local", alias="MODEL_BACKEND")
+    # MODEL_PROVIDER: the one switch for every cloud model, the web chat's (unless WEB_CHAT_PROVIDER says
+    # otherwise) and the agents' (an agent's "anthropic" or "openai" backend is then this provider's). Unset: the
+    # chat takes the provider whose key is set, and an agent the backend it names.
+    model_provider: Provider | None = Field(None, alias="MODEL_PROVIDER")
+    model_backend: AgentBackend = Field("local", alias="MODEL_BACKEND")
     anthropic_api_key: SecretStr | None = Field(None, alias="ANTHROPIC_API_KEY")
     openai_api_key: SecretStr | None = Field(None, alias="OPENAI_API_KEY")
     anthropic_model: str = Field("claude-opus-5-5", alias="ANTHROPIC_MODEL")
+    # The agents' model on OpenAI when theirs is a Claude name (LEARNING_MODEL's default is one)
+    openai_model: str = Field("gpt-5-mini", alias="OPENAI_MODEL")
 
     # --- Agents' backend and model (brain/agents/common.py): an agent's own setting, else these ---
-    agent_backend: Literal["local", "anthropic"] | None = Field(None, alias="AGENT_BACKEND")
+    agent_backend: AgentBackend | None = Field(None, alias="AGENT_BACKEND")
     agent_model: str | None = Field(None, alias="AGENT_MODEL")
 
     # --- Where the agents run (brain/agents/setup.py): the MCP service, or the agents' worker of their own
@@ -109,7 +118,7 @@ class Settings(BaseSettings):
     learning_goal_delay_minutes: int = Field(2, ge=0, alias="LEARNING_GOAL_DELAY_MINUTES")
     learning_cooldown_minutes: int = Field(30, ge=0, alias="LEARNING_COOLDOWN_MINUTES")
     learning_max_runs_per_day: int = Field(20, ge=0, alias="LEARNING_MAX_RUNS_PER_DAY")
-    learning_backend: Literal["local", "anthropic"] | None = Field(None, alias="LEARNING_BACKEND")
+    learning_backend: AgentBackend | None = Field(None, alias="LEARNING_BACKEND")
     # A merge of a profile doesn't need the largest model (ANTHROPIC_MODEL's default).
     learning_model: str | None = Field("claude-sonnet-5-5", alias="LEARNING_MODEL")
     # Agents (docs/AGENT_PLAN.md): tokens one user's runs of one agent may use per UTC day.
@@ -118,10 +127,10 @@ class Settings(BaseSettings):
     # SCOUT_BACKEND, else AGENT_BACKEND, else LEARNING_BACKEND; SCOUT_MODEL can name a smaller one (claude-haiku-5-5).
     scout_auto: bool = Field(False, alias="SCOUT_AUTO")
     scout_every_hours: int = Field(6, ge=1, le=48, alias="SCOUT_EVERY_HOURS")
-    scout_backend: Literal["local", "anthropic"] | None = Field(None, alias="SCOUT_BACKEND")
+    scout_backend: AgentBackend | None = Field(None, alias="SCOUT_BACKEND")
     scout_model: str | None = Field(None, alias="SCOUT_MODEL")
     # The web scout (phase 3): searches the web around users' goals and interests, once a day by default, within
-    # a daily search budget (searches are billed per search). Anthropic backend only.
+    # a daily search budget (searches are billed per search). A cloud backend: MODEL_PROVIDER's, else anthropic.
     scout_web: bool = Field(False, alias="SCOUT_WEB")
     scout_web_every_hours: int = Field(24, ge=6, le=168, alias="SCOUT_WEB_EVERY_HOURS")
     scout_web_model: str | None = Field(None, alias="SCOUT_WEB_MODEL")       # default: SCOUT_MODEL
@@ -186,9 +195,10 @@ class Settings(BaseSettings):
 
     @property
     def chat_provider(self) -> str | None:
-        """The web chat's provider: WEB_CHAT_PROVIDER, else the one whose key is set; None: no chat."""
-        if self.web_chat_provider:
-            return self.web_chat_provider
+        """The web chat's provider: WEB_CHAT_PROVIDER, else MODEL_PROVIDER, else the one whose key is set; None: no
+        chat."""
+        if self.web_chat_provider or self.model_provider:
+            return self.web_chat_provider or self.model_provider
         if self.anthropic_api_key:
             return "anthropic"
         if self.openai_api_key or self.web_chat_api_key:
@@ -210,6 +220,13 @@ class Settings(BaseSettings):
         if name and not self.web_chat_base_url and claude != (provider == "anthropic"):
             name = None
         return name or CHAT_DEFAULTS[provider][1 if research else 0]
+
+    @property
+    def openai_key(self) -> str | None:
+        """The agents' OpenAI key: OPENAI_API_KEY, else the chat's key when the chat is on OpenAI itself."""
+        key = self.openai_api_key or (self.web_chat_api_key if self.chat_provider == "openai"
+                                      and not self.web_chat_base_url else None)
+        return key.get_secret_value() if key else None
 
     @property
     def resource_url(self) -> str | None:

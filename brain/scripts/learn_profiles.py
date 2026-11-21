@@ -81,7 +81,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--db")
     ap.add_argument("--user")
-    ap.add_argument("--backend", choices=["anthropic", "local"])
+    ap.add_argument("--backend", choices=["anthropic", "openai", "local"])
     ap.add_argument("--since", type=lambda d: datetime.fromisoformat(d).replace(tzinfo=timezone.utc))
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--show-payload", action="store_true")

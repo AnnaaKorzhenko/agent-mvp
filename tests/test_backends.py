@@ -7,7 +7,7 @@ import pytest
 
 from brain.domain.sensitivity import SensitivityError
 from brain.integrations import local_models
-from brain.integrations.backends import AnthropicBackend, LocalPipelineBackend, get_backend
+from brain.integrations.backends import AnthropicBackend, LocalPipelineBackend, OpenAIBackend, get_backend
 
 
 class FakeAudit:
@@ -54,6 +54,8 @@ def test_switch(settings_factory):
     assert isinstance(get_backend(settings_factory(), audit), LocalPipelineBackend)
     assert isinstance(get_backend(settings_factory(MODEL_BACKEND="anthropic", ANTHROPIC_API_KEY="test"), audit),
                       AnthropicBackend)
+    oa = get_backend(settings_factory(MODEL_BACKEND="openai", OPENAI_API_KEY="test", OPENAI_MODEL="gpt-5"), audit)
+    assert isinstance(oa, OpenAIBackend) and oa.model == "gpt-5" and oa.trust == "cloud"
 
 
 async def test_cloud_backend_refuses_confidential_before_any_call(settings_factory):
@@ -110,3 +112,30 @@ async def test_adapter_reports_missing_client(monkeypatch):
     monkeypatch.setitem(sys.modules, "summarizer", types.ModuleType("summarizer"))
     with pytest.raises(local_models.LocalModelUnavailable, match="A1"):
         await local_models.local_chat([{"role": "user", "content": "x"}])
+
+
+async def test_openai_search_for_the_web_scout_keeps_every_result_and_caps_the_searches():
+    """The web scout checks the model's URLs against every page the searches returned, not only the cited ones."""
+    created = []
+    search = SimpleNamespace(type="web_search_call", action=SimpleNamespace(type="search", sources=[
+        SimpleNamespace(type="url", url="https://a.example/x"), SimpleNamespace(type="url", url="https://b.example/y")]))
+    message = SimpleNamespace(type="message", content=[SimpleNamespace(type="output_text", annotations=[
+        SimpleNamespace(type="url_citation", url="https://a.example/x", title="A")])])
+
+    async def respond(**kw):
+        created.append(kw)
+        return SimpleNamespace(output=[search, search, message], output_text=' {"finds": []} ', model="gpt-5-mini-1",
+                               status="completed", usage=SimpleNamespace(input_tokens=50, output_tokens=9))
+
+    audit = FakeAudit()
+    backend = OpenAIBackend(audit, "gpt-5-mini", client=SimpleNamespace(responses=SimpleNamespace(create=respond)))
+    r = await backend.search([{"role": "user", "content": "drones"}], system="sys", max_uses=3)
+    [req] = created
+    assert req["tools"] == [{"type": "web_search"}] and req["max_tool_calls"] == 3
+    assert req["include"] == ["web_search_call.action.sources"] and req["instructions"] == "sys"
+    assert (r.text, r.web_searches, r.backend) == ('{"finds": []}', 2, "openai")
+    assert [(s["url"], s["title"]) for s in r.sources] == [("https://a.example/x", "A"), ("https://b.example/y", "")]
+    assert audit.calls[-1]["web_searches"] == 2 and audit.calls[-1]["backend"] == "openai"
+    with pytest.raises(SensitivityError):
+        await backend.search([{"role": "user", "content": "x"}], sensitivity="confidential")
+    assert len(created) == 1

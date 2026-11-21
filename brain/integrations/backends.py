@@ -309,8 +309,9 @@ class OpenAIBackend(_AuditedBackend):
     """OpenAI, or any OpenAI-compatible API at `base_url` (OpenRouter, Groq, Mistral, DeepSeek, Together, Ollama,
     …): Chat Completions for complete() and the web chat's stream(). stream() yields what AnthropicBackend.stream()
     yields (text deltas, then a message with content blocks text / tool_use, stop_reason and usage the Anthropic
-    way), so the chat's loop doesn't depend on the provider. search() uses the Responses API's web_search tool:
-    OpenAI itself only; elsewhere it fails and the chat answers from the news base."""
+    way), so the chat's loop doesn't depend on the provider. search() uses the Responses API's web_search tool
+    (the chat's web research, the web scout): OpenAI itself only; elsewhere it fails and the chat answers from the
+    news base."""
     name = "openai"
     trust = "cloud"
     SEARCH_TOOLS = ("web_search", "web_search_preview")
@@ -350,9 +351,11 @@ class OpenAIBackend(_AuditedBackend):
         convo = [{"role": m["role"], "content": _text_of(m.get("content"))} for m in messages]
         resp = None
         for tool in self.SEARCH_TOOLS:          # the older name for accounts or models without the current one
+            # every page the searches returned (not only the ones cited), so a caller can check the model's URLs
+            extra = {"include": ["web_search_call.action.sources"]} if tool == "web_search" else {}
             try:
                 resp = await self.client.responses.create(model=self.model, instructions=system, input=convo,
-                                                          tools=[{"type": tool}])
+                                                          tools=[{"type": tool}], max_tool_calls=max_uses, **extra)
                 break
             except openai.BadRequestError as e:
                 if tool == self.SEARCH_TOOLS[-1] or "web_search" not in str(e):
@@ -363,12 +366,17 @@ class OpenAIBackend(_AuditedBackend):
             kind = _get(item, "type")
             if kind == "web_search_call":
                 searches += 1
+                for r in _get(_get(item, "action"), "sources") or []:
+                    if _get(r, "url"):
+                        sources.setdefault(_get(r, "url"), {"url": _get(r, "url"), "title": _get(r, "title") or "",
+                                                            "page_age": None})
             elif kind == "message":
                 for part in _get(item, "content") or []:
                     for a in _get(part, "annotations") or []:
                         if _get(a, "type") == "url_citation" and _get(a, "url"):
-                            sources.setdefault(_get(a, "url"), {"url": _get(a, "url"), "title": _get(a, "title") or "",
-                                                                "page_age": None})
+                            src = sources.setdefault(_get(a, "url"), {"url": _get(a, "url"), "title": "",
+                                                                      "page_age": None})
+                            src["title"] = src["title"] or _get(a, "title") or ""
         usage = resp.usage
         return ModelResult((resp.output_text or "").strip(), getattr(usage, "input_tokens", 0) or 0,
                            getattr(usage, "output_tokens", 0) or 0, resp.model or self.model, self.name,
@@ -461,4 +469,6 @@ def _input_tokens(usage) -> int:
 def get_backend(settings: Settings, audit: AuditLog) -> ModelBackend:
     if settings.model_backend == "anthropic":
         return AnthropicBackend(audit, settings)
+    if settings.model_backend == "openai":
+        return OpenAIBackend(audit, settings.openai_model, api_key=settings.openai_key)
     return LocalPipelineBackend(audit, settings.max_sensitivity_local)

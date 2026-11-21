@@ -56,7 +56,7 @@ if __name__ == "__main__":
     ap.add_argument("--db")
     ap.add_argument("--user", required=True)
     ap.add_argument("--advise", action="store_true")
-    ap.add_argument("--backend", choices=["anthropic", "local"])
+    ap.add_argument("--backend", choices=["anthropic", "openai", "local"])
     ap.add_argument("--model")
     a = ap.parse_args()
     asyncio.run(main(a.db, a.user, a.advise, a.backend, a.model))

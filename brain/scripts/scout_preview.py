@@ -118,7 +118,7 @@ if __name__ == "__main__":
     ap.add_argument("--db")
     ap.add_argument("--review", action="store_true")
     ap.add_argument("--user")
-    ap.add_argument("--backend", choices=["anthropic", "local"])
+    ap.add_argument("--backend", choices=["anthropic", "openai", "local"])
     ap.add_argument("--model", help="anthropic backend: the model, e.g. claude-haiku-5-5")
     ap.add_argument("--web", action="store_true")
     ap.add_argument("--search", type=int, default=0)
