@@ -510,6 +510,9 @@ ul.plain { margin: 0; padding-left: 18px; display: flex; flex-direction: column;
 button.notice:hover { background: #D6E4DE; }
 .notice.static { border-color: var(--border-2); background: var(--surface); color: var(--ink-2); margin: 0; }
 ul.plain.editable li { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+ul.plain.editable li > .inline-form { margin-top: 0; }
+.row-actions { display: flex; flex-shrink: 0; gap: 2px; }
+.inline-form textarea { flex: 1 1 100%; min-height: 96px; padding: 8px 12px; border: 1px solid var(--border-2); border-radius: 8px; background: var(--surface); font: inherit; font-size: 14px; color: var(--ink); resize: vertical; }
 .pref { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 6px 0; }
 .segmented.small button { min-height: 30px; padding: 0 12px; }
 .nav-item .badge[hidden] { display: none; }
