@@ -1,19 +1,19 @@
+
 const state = {
   screen: 'chat',
   chat: { id: null, title: 'Новий чат', messages: [], loading: false },
   // digest: { side: 'both', data: null, loading: false, error: '' },
-  digest: { side: 'both', unseen: false, week: false, data: null, loading: false, error: '', jump: null, jumpNote: '' },
+  digest: { side: 'both', unseen: false, data: null, loading: false, error: '', jump: null, jumpNote: '' },
   search: { q: '', side: 'all', days: 7, items: [], note: '', error: '', loading: false },
   proposals: { items: [], loading: false, error: '', answered: {}, reasonFor: null },
   profile: null,
   profileNote: '',
-  profileEditing: null,     // 'goal:2', 'preferences:0', 'summary:0': рядок профілю, який зараз змінюють
-  push: { checked: false, key: null, on: false, busy: false, note: '' },
+  push: { checked: false, key: null, on: false, busy: false, note: '' },   // сповіщення в цьому браузері
   agents: { days: 7, data: null, error: '', note: '' },
   ratings: {},
   rateError: {},
-  fullText: {},
-  commentFor: null,
+  fullText: {},        // повний текст російських постів: id через кому -> { open, loading, posts, error }
+  commentFor: null,     // після «Не корисно»: де показати поле «Чому?»
   companies: { q: '', country: '', sector: '', items: [], total: 0, countries: [], sectors: [], loading: false, error: '' },
 };
 
@@ -25,10 +25,10 @@ const ICON_BOT = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" st
 const ICON_SEARCH = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>';
 
 
-
+// ---------- Навігація ----------
 function go(screen) {
   state.screen = screen;
-  if (screen === 'profile') { state.profileNote = ''; state.profileEditing = null; }
+  if (screen === 'profile') state.profileNote = '';
   document.querySelectorAll('.nav-item').forEach((b) => b.classList.toggle('active', b.dataset.screen === screen));
   render();
   if (screen === 'digests') loadDigest();
@@ -51,8 +51,7 @@ function render() {
   }
 }
 
-// ---------- Оцінки (новини й відповіді аналітика) ----------
-// key: d:<digest>/<n> | p:<post> | r:<message>; ціль запам'ятовується під час малювання.
+
 const rateTargets = {};
 
 function rateHtml(key, kind, target) {
@@ -109,7 +108,7 @@ async function onComment(key, text) {
   catch (e) { state.rateError[key] = 'Коментар не зберігся: ' + e.message; repaintRate(key); }
 }
 
-
+// ---------- Нещодавні чати ----------
 let recentChats = [];
 
 function renderRecent() {
@@ -125,7 +124,7 @@ async function loadRecent() {
   renderRecent();
 }
 
-
+// ---------- Чат ----------
 const TOOL_LABEL = {
   search_posts: 'Шукаю в постах…', get_digest: 'Відкриваю дайджест…', get_morning_digest: 'Відкриваю ранковий дайджест…',
   get_post: 'Читаю пост…', get_profile: 'Дивлюсь ваш профіль…', get_insights: 'Згадую, що знаю про вас…',
@@ -136,7 +135,7 @@ const TOOL_LABEL = {
 };
 const ICON_STOP = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
 
-
+// Невеликий безпечний markdown: спершу екрануємо все, потім — посилання (лише http/https), жирний, курсив, списки, заголовки.
 function inline(s) {
   return s
     .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
@@ -255,7 +254,7 @@ function renderChat() {
     </div>`;
 }
 
-
+// Під час відповіді оновлюємо лише останнє повідомлення, щоб не перемальовувати весь екран на кожен шматок тексту.
 function paintLast() {
   const last = state.chat.messages[state.chat.messages.length - 1];
   const el = $main.querySelector('.thread .msg-bot:last-child');
@@ -343,6 +342,9 @@ async function openChat(id) {
   if (state.screen === 'chat') render();
 }
 
+// ---------- Повний текст російських постів ----------
+// Посилання на російські канали в Україні не відкриваються, тож текст поста показуємо тут, згорнутим під карткою.
+// key: id постів через кому (у пункті дайджесту їх може бути кілька); { open, loading, posts, error }.
 const FULL_TEXT_MAX = 3;
 const RU_CLAIM_NOTE = 'Заява російського каналу, не перевірений факт.';
 
@@ -387,12 +389,13 @@ async function toggleFullText(key) {
   repaintFullText(key);
 }
 
-const SIDES = [['both', 'Усе'], ['ua', 'Українські джерела'], ['ru', 'Російські джерела'], ['world', 'Світові джерела'], ['video', 'Відео'], ['topics', 'Ваші теми й інтереси']];
-const SIDE_LABEL = { ua: 'Українські джерела', ru: 'Російські джерела', world: 'Світові джерела', video: 'Відео, які можуть зацікавити', topics: 'Ваші теми й інтереси' };
-const SIDE_NOTE = { ru: 'Заяви російських каналів, а не перевірені факти.', video: 'Короткий зміст кожного відео; відео російських каналів — їхні заяви, а не факти.' };
-
+// ---------- Дайджести ----------
+const SIDES = [['both', 'Усе'], ['ua', 'Українські джерела'], ['ru', 'Російські джерела'], ['world', 'Світові джерела'], ['youtube', 'Відео'], ['topics', 'Ваші теми й інтереси']];
+const SIDE_LABEL = { ua: 'Українські джерела', ru: 'Російські джерела', world: 'Світові джерела', youtube: 'Відео, які можуть зацікавити', topics: 'Ваші теми й інтереси' };
+const SIDE_NOTE = { ru: 'Заяви російських каналів, а не перевірені факти.', youtube: 'Найцікавіше з YouTube: короткий зміст кожного відео.' };
+// Емодзі з назв розділів пайплайна: на ноутбуці директора вони сірі квадрати
 const noEmoji = (s) => String(s || '').replace(/[\p{Extended_Pictographic}\p{Regional_Indicator}\u{FE0F}\u{200D}]/gu, '').trim();
-
+// Розділ про інвестиції впізнаємо за category або назвою: на нього веде кнопка зі сторінки «Інвестиції».
 const INVEST_RE = /invest|інвест|фінанс|funding/i;
 const isInvest = (s) => INVEST_RE.test(s.category || '') || INVEST_RE.test(s.title || '');
 
@@ -400,8 +403,10 @@ function host(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch (e) { return 'джерело'; }
 }
 
+// Джерело-відео (YouTube) підписуємо як відео, а не просто доменом
 const isVideo = (u) => /^(m\.|music\.)?(youtube\.com|youtu\.be)$/.test(host(u));
 
+// Ідентифікатор відео з посилання YouTube (watch?v=, youtu.be/, shorts/), щоб показати обкладинку
 function videoId(u) {
   try {
     const url = new URL(u);
@@ -418,7 +423,7 @@ function durationText(sec) {
   return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}:${s}` : `${m}:${s}`;
 }
 
-
+// Пункт розділу «Відео»: обкладинка, назва відео, канал і тривалість; текст пункту — короткий зміст
 function videoHeadHtml(it) {
   const url = (it.source_urls || []).find(isVideo) || '';
   const id = videoId(url);
@@ -434,11 +439,9 @@ function videoHeadHtml(it) {
       </div>`;
 }
 
-const isRutube = (u) => /(^|\.)rutube\.ru$/.test(host(u));
-
 function sourcesHtml(urls) {
   return (urls || []).slice(0, 6).map((u) =>
-    `<a class="source" href="${esc(u)}" target="_blank" rel="noopener noreferrer">${isVideo(u) ? '▶ YouTube' : isRutube(u) ? '▶ Rutube' : esc(host(u))}</a>`).join('');
+    `<a class="source" href="${esc(u)}" target="_blank" rel="noopener noreferrer">${isVideo(u) ? '▶ YouTube' : esc(host(u))}</a>`).join('');
 }
 
 function whyHtml(why) {
@@ -446,8 +449,8 @@ function whyHtml(why) {
 }
 
 function itemHtml(it, side, digestId) {
-
-  const video = side === 'video' || !!it.title;
+  // «Пояснити»: з бази новин, без інтернету (дешево); «Глибше»: повне дослідження з пошуком в інтернеті.
+  const video = side === 'youtube' || !!it.title;
   const about = ((it.title ? it.title + ': ' : '') + it.text).slice(0, 160);
   const item = digestId ? esc(JSON.stringify({ digest_id: digestId, item_n: it.n })) : '';
   return `
@@ -466,7 +469,7 @@ function itemHtml(it, side, digestId) {
           <button class="btn-text" data-ask="${esc('Глибше про #' + it.ref + ': ' + about)}" data-item="${item}">Глибше, з інтернетом</button>
         </div>
       </div>
-      ${!video && (side === 'ru' || it.is_russian_source_claim) ? fullTextHtml(it.source_post_ids) : ''}
+      ${side === 'ru' || it.is_russian_source_claim ? fullTextHtml(it.source_post_ids) : ''}
       ${digestId ? rateHtml(`d:${digestId}/${it.n}`, 'news', { target_type: 'digest_item', digest_id: digestId, item_n: it.n }) : ''}
     </article>`;
 }
@@ -486,21 +489,7 @@ function digestHtml(data) {
   const n = (data.proposals || []).length;
   const offer = n ? `<button class="notice" data-go="proposals">Система має для вас пропозицій: ${n}. Переглянути</button>` : '';
   if (data.proposals) setBadge(n);
-  const empty = data.period === 'week' ? 'Тижневого дайджесту ще немає.' : 'Дайджесту за цей день немає.';
-  return offer + notes + (blocks || `<p class="sub">${empty}</p>`);
-}
-
-// The weekly digest's week, e.g. «16.11–23.11», from its period_start / period_end
-function weekText(data) {
-  const d = (data?.digests || []).find((x) => x.period_start && x.period_end);
-  if (!d) return '';
-  const day = (iso) => new Date(iso).toLocaleDateString('uk-UA', { day: '2-digit', month: '2-digit', timeZone: 'Europe/Kyiv' });
-  return `${day(d.period_start)}–${day(d.period_end)}`;
-}
-
-function digestSubtitle(data) {
-  if (data?.period === 'week') return 'Тиждень' + (weekText(data) ? ' ' + weekText(data) : '') + ' · ';
-  return data?.date ? data.date + ' · ' : '';
+  return offer + notes + (blocks || '<p class="sub">Дайджесту за цей день немає.</p>');
 }
 
 function renderDigests() {
@@ -512,13 +501,12 @@ function renderDigests() {
       <div class="head-row">
         <div>
           <h1 class="h1">Дайджест</h1>
-          <span class="sub">${esc(digestSubtitle(d.data))}упорядковано за вашими цілями та інтересами</span>
+          <span class="sub">${d.data?.date ? esc(d.data.date) + ' · ' : ''}упорядковано за вашими цілями та інтересами</span>
         </div>
       </div>
       <div class="row">
         <div class="segmented" role="group" aria-label="Джерела">${seg}</div>
         <button class="chip ${d.unseen ? 'on' : ''}" role="switch" aria-checked="${d.unseen}" data-unseen-digest="${d.unseen ? '0' : '1'}">Лише нове за сьогодні</button>
-        <button class="chip ${d.week ? 'on' : ''}" role="switch" aria-checked="${d.week}" data-week-digest="${d.week ? '0' : '1'}">За тиждень</button>
       </div>
       ${d.loading ? '<p class="sub">Завантаження…</p>' : d.error ? `<p class="sub">${esc(d.error)}</p>` : digestHtml(d.data)}
     </div></div>`;
@@ -529,7 +517,7 @@ async function loadDigest() {
   state.digest.error = '';
   if (state.screen === 'digests') render();
   try {
-    state.digest.data = await api.getDigest(state.digest.side, null, state.digest.unseen, state.digest.week ? 'week' : 'day');
+    state.digest.data = await api.getDigest(state.digest.side, null, state.digest.unseen);
     (state.digest.data.digests || []).forEach((d) => (d.sections || []).forEach((sec) => (sec.items || []).forEach((it) => {
       if (it.my_reaction) state.ratings[`d:${d.digest_id}/${it.n}`] = it.my_reaction;
     })));
@@ -623,7 +611,7 @@ function onSearchInput(value) {
   searchTimer = setTimeout(loadSearch, 350);
 }
 
-
+// ---------- Пропозиції ----------
 const KIND_LABEL = { goal: 'Ціль', topic: 'Тема', advice: 'Порада' };
 
 function setBadge(n) {
@@ -708,7 +696,7 @@ async function answerProposal(id, answer, reason) {
   if (state.screen === 'proposals') render();
 }
 
-
+// ---------- Профіль ----------
 const ABOUT_LABEL = {
   summary: 'Коротко про вас', interest: 'Інтереси', intent: 'Над чим ви зараз працюєте', preference: 'Як ви хочете отримувати новини',
   goal: 'Цілі, які ви згадували', tracked: 'Що ви відстежуєте', known: 'Що ви вже знаєте', avoid: 'Чого уникати',
@@ -722,60 +710,10 @@ function listHtml(items, empty) {
   return items.length ? `<ul class="plain">${items.map((t) => `<li>${esc(t)}</li>`).join('')}</ul>` : `<span class="sub">${esc(empty)}</span>`;
 }
 
-// Що з профілю, який склала система, можна змінити самому (brain/domain/profile_edits.py), у порядку на екрані
-const EDIT_LISTS = [
-  ['interests', 'Інтереси', 'Новий інтерес, наприклад: морські дрони', 80],
-  ['preferences', 'Як ви хочете отримувати новини', 'Наприклад: коротко, з посиланнями на джерела', 300],
-  ['known', 'Що ви вже знаєте', 'Наприклад: як влаштований Brave1', 300],
-  ['avoid', 'Чого уникати', 'Наприклад: новини про космос', 120],
-];
-const EDITED_KINDS = new Set(['summary', 'interest', 'preference', 'known', 'avoid']);   // показані з editable
-const EDIT_NOTE = 'Зміна профілю:';          // власні зміни користувача: лише для системи, на екрані не дублюємо
-
-function editValue(field, i) {
-  const p = state.profile || {};
-  if (field === 'goal') return (p.goals || [])[i];
-  if (field === 'summary') return p.editable?.summary || '';
-  return (p.editable?.[field] || [])[i];
-}
-
-function editFormHtml(key, value, max, multiline) {
-  const input = multiline
-    ? `<textarea name="text" maxlength="${max}" rows="4" aria-label="Новий текст">${esc(value)}</textarea>`
-    : `<input name="text" maxlength="${max}" autocomplete="off" value="${esc(value)}" aria-label="Новий текст">`;
-  return `<form class="inline-form" data-form="edit" data-edit="${key}">${input}
-    <button class="btn-outline" type="submit">Зберегти</button>
-    <button class="btn-text" type="button" data-edit-cancel="1">Скасувати</button></form>`;
-}
-
-function editableRows(field, items, max) {
-  return items.map((t, i) => state.profileEditing === `${field}:${i}` ? `<li>${editFormHtml(`${field}:${i}`, t, max)}</li>` : `
-    <li><span>${esc(t)}</span><span class="row-actions">
-      <button class="btn-text" data-edit-start="${field}:${i}">Змінити</button>
-      <button class="btn-text" data-edit-remove="${field}:${i}">Прибрати</button></span></li>`).join('');
-}
-
-function editableListHtml(field, items, placeholder, max) {
-  return `
-    ${items.length ? `<ul class="plain editable">${editableRows(field, items, max)}</ul>` : '<span class="sub">Поки порожньо.</span>'}
-    <form class="inline-form" data-form="edit" data-edit="${field}:new">
-      <input name="text" maxlength="${max}" autocomplete="off" placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}">
-      <button class="btn-outline" type="submit">Додати</button>
-    </form>`;
-}
-
-function summaryHtml(text) {
-  if (state.profileEditing === 'summary:0') return editFormHtml('summary:0', text, 700, true);
-  return `${text ? `<p>${esc(text)}</p>` : '<span class="sub">Ще нічого. Напишіть, хто ви і що вам потрібно від сервісу.</span>'}
-    <div class="row"><button class="btn-text" data-edit-start="summary:0">${text ? 'Змінити' : 'Написати'}</button></div>`;
-}
-
 function goalsHtml(goals) {
   return `
-    ${goals.length ? `<ul class="plain editable">${goals.map((g, i) => state.profileEditing === `goal:${i}` ? `<li>${editFormHtml(`goal:${i}`, g, 300)}</li>` : `
-      <li><span>${esc(g)}</span><span class="row-actions">
-        <button class="btn-text" data-edit-start="goal:${i}">Змінити</button>
-        <button class="btn-text" data-goal-remove="${esc(g)}">Прибрати</button></span></li>`).join('')}</ul>`
+    ${goals.length ? `<ul class="plain editable">${goals.map((g) => `
+      <li><span>${esc(g)}</span><button class="btn-text" data-goal-remove="${esc(g)}">Прибрати</button></li>`).join('')}</ul>`
       : '<span class="sub">Цілей ще немає.</span>'}
     <form class="inline-form" data-form="goal">
       <label for="goal-new" class="sr-only">Нова ціль</label>
@@ -785,19 +723,13 @@ function goalsHtml(goals) {
 }
 
 function topicsHtml(topics) {
-  const add = `
-    <form class="inline-form" data-form="topic">
-      <label for="topic-new" class="sr-only">Нова тема</label>
-      <input id="topic-new" name="name" minlength="2" maxlength="80" autocomplete="off" placeholder="Нова тема, наприклад: Спектр-К">
-      <button class="btn-outline" type="submit">Відстежувати</button>
-    </form>`;
-  if (!topics.length) return '<span class="sub">Ви ще нічого не відстежуєте.</span>' + add;
+  if (!topics.length) return '<span class="sub">Ви ще нічого не відстежуєте. Тему можна додати з пропозицій або попросити аналітика.</span>';
   return `<ul class="plain editable">${topics.map((t) => {
     const until = t.expires_at && t.status === 'active' ? ' до ' + esc(new Date(t.expires_at).toLocaleDateString('uk-UA')) : '';
     const btn = t.status === 'active' ? `<button class="btn-text" data-topic="${esc(t.name)}" data-topic-action="stop">Припинити</button>`
       : t.status === 'expired' ? `<button class="btn-text" data-topic="${esc(t.name)}" data-topic-action="follow">Продовжити на 30 днів</button>` : '';
     return `<li><span><b>${esc(t.name)}</b> <span class="sub">· ${esc(TOPIC_STATUS[t.status] || t.status)}${until}</span></span>${btn}</li>`;
-  }).join('')}</ul>` + add;
+  }).join('')}</ul>`;
 }
 
 function aboutHtml(kind, texts) {
@@ -825,10 +757,7 @@ function renderProfile() {
   if (!p) return '<div class="page"><div class="page-inner narrow"><p class="sub">Завантаження…</p></div></div>';
   if (p.error) return `<div class="page"><div class="page-inner narrow"><p class="sub">${esc(p.error)}</p></div></div>`;
   const topics = (p.topics || []).filter((t) => t.status !== 'stopped');
-  const mine = p.editable;          // null: профіль не можна змінити тут (дані вище за дозволене цьому клієнту)
-  const about = Object.entries(p.about_user || {})
-    .filter(([k]) => k !== 'tracked' && k !== 'goal' && !(mine && EDITED_KINDS.has(k)))
-    .map(([k, texts]) => [k, texts.filter((t) => !t.startsWith(EDIT_NOTE))]).filter(([, texts]) => texts.length);
+  const about = Object.entries(p.about_user || {}).filter(([k]) => k !== 'tracked' && k !== 'goal');
   return `
     <div class="page"><div class="page-inner narrow">
       <div style="display:flex;flex-direction:column;gap:6px">
@@ -840,20 +769,10 @@ function renderProfile() {
         <h2>Цілі</h2>
         ${goalsHtml(p.goals || [])}
       </section>
-      ${mine ? `
-      <section class="card">
-        <h2>Коротко про вас</h2>
-        ${summaryHtml(mine.summary)}
-      </section>` : ''}
       <section class="card">
         <h2>Теми, які ви відстежуєте</h2>
         ${topicsHtml(topics)}
       </section>
-      ${mine ? EDIT_LISTS.map(([field, title, placeholder, max]) => `
-      <section class="card">
-        <h2>${esc(title)}</h2>
-        ${editableListHtml(field, mine[field] || [], placeholder, max)}
-      </section>`).join('') : ''}
       ${about.map(([kind, texts]) => `
         <section class="card">
           <h2>${esc(ABOUT_LABEL[kind] || kind)}</h2>
@@ -873,7 +792,8 @@ function renderProfile() {
     </div></div>`;
 }
 
-
+// ---------- Сповіщення про ранковий дайджест (Web Push) ----------
+// Підписка належить браузеру: у кожному браузері її вмикають окремо, сервер лише зберігає адресу.
 const PUSH_SUPPORTED = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 
 function pushHtml() {
@@ -949,10 +869,9 @@ async function loadProfile() {
   if (state.screen === 'profile') render();
 }
 
-
+// Дія в профілі: виконати, показати підтвердження, перечитати профіль.
 async function profileAction(run, note) {
   state.profileNote = 'Зберігаю…';
-  state.profileEditing = null;
   render();
   try { const r = await run(); state.profileNote = typeof note === 'function' ? note(r) : note; }
   catch (e) { state.profileNote = 'Не вдалося: ' + e.message; }
@@ -966,11 +885,13 @@ function correctedNote(r) {
 }
 
 
+// ---------- Інвестиції: карта Defense Valley (згортається) + мапа компаній за сегментами ----------
 
 const MAP_SRC = 'https://defense-valley.news/embed/map/';
 let mapOpen = true;
-try { mapOpen = localStorage.getItem('mapOpen') !== '0'; } catch (e) {  }
+try { mapOpen = localStorage.getItem('mapOpen') !== '0'; } catch (e) { /* без сховища: карта розгорнута */ }
 
+// Сегменти: id з бази → [назва, англ. назва, колір 1..18]. Невідомий сегмент покажеться з назвою з бази.
 const MM_SECTORS = {
   'space-isr': ['Космос і розвідка', 'Space & ISR', 1], 'autonomy-ai': ['ШІ та автономія', 'Autonomy & AI', 2],
   'counter-drone': ['Протидія дронам', 'Counter-drone', 3], 'maritime': ['Морські системи', 'Maritime', 4],
@@ -986,6 +907,7 @@ const MM_SECTORS = {
   'robot-training': ['Навчання й симуляція роботів', 'Robot training', 12], 'soft-robotics': ['М’яка робототехніка', 'Soft robotics', 8],
   'prosthetics': ['Біонічні протези', 'Prosthetics', 3], 'robot-hardware': ['Сенсори й компоненти роботів', 'Robot hardware', 13],
   'exoskeletons': ['Екзоскелети', 'Exoskeletons', 6], 'construction': ['Будівельні роботи', 'Construction robotics', 10],
+  'resilience': ['Стійкість і готовність до криз', 'Resilience & crisis preparedness', 16],
 };
 const MM_STAGES = [['preseed', 'Pre-seed'], ['seed', 'Seed'], ['a', 'Series A'], ['b', 'Series B'], ['c', 'Series C+ / growth'],
   ['grant', 'Гранти, EIC'], ['other', 'Інше: борг, частки'], ['nd', 'Невідомо']];
@@ -1041,21 +963,29 @@ function mmNorm(c, countryLabels) {
   const total = (fm ? (/^[~≥>]?[€$£][\d.,\-–]+\s*[KMB]?/.exec(fm[2]) || [''])[0] : '') || c.dealroom_funding || '';
   const why = (c.funding?.details || []).filter((d) => /^why/i.test(d.heading || '')).flatMap((d) => d.content || []).join(' ');
   const dm = /(?:\d{1,2} )?([A-Z][a-z]{2}) (\d{4})/.exec(dateRaw);
-  const date = dm ? new Date(+dm[2], MM_MON[dm[1]] - 1, 15) : null;
+  let date = dm ? new Date(+dm[2], MM_MON[dm[1]] - 1, 15) : null;
+  // остання подія з щотижневого скрипта (invest_weekly.py): якщо вона новіша — показуємо її
+  const ev = c.last_event || null;
+  const evDate = ev ? new Date(ev.date || ev.published_at || 0) : null;
+  const evNewer = ev && !isNaN(evDate) && (!date || evDate > date);
+  if (evNewer) date = evDate;
   const text = [c.description, why].join(' ');
   const words = String(c.name || '?').replace(/[^\p{L}\p{N} ]/gu, ' ').trim().split(/\s+/);
   return {
     raw: c, name: c.name || '?', id: c.slug || c.name, desc: c.description || '', loc: c.location || facts.hq || '',
     country: c.country || '', countryLabel: countryLabels[c.country] || String(c.country || '').replace(/-/g, ' '),
     sector: c.sector || 'other', sectorLabel: (MM_SECTORS[c.sector] || [c.sector_label || c.sector || 'Інше'])[0],
-    stage: stage || 'n/d', sg: mmStageGroup(stage), dateText: dateRaw, date,
+    stage: (evNewer && ev.round) || stage || 'n/d', sg: mmStageGroup((evNewer && ev.round) || stage),
+    dateText: evNewer ? evDate.toISOString().slice(0, 10) : dateRaw, date, event: ev,
     when: date ? `${MM_MON_UA[date.getMonth()]} ${date.getFullYear()}` : '',
     fresh: date ? (Date.now() - date) / 864e5 <= 183 : false,
-    latest, latestEur: mmAmount(latest), total, totalEur: mmAmount(total),
+    latest: evNewer && ev.amount ? ev.amount : latest,
+    latestEur: mmAmount(evNewer && ev.amount ? ev.amount : latest), total, totalEur: mmAmount(total),
     founded: facts.founded || '', investors: facts.investors || '', website: c.website || facts.website || '',
     why, conf: c.verification?.confidence || '', sources: c.sources || [], profile: c.profile_url || '',
     hot: !!c.hot, signal: c.signal ?? c.dealroom_signal ?? null, drSegment: c.dealroom_segment || '',
     maps: c.maps || ['def'], use: mmUse(c, text),
+    news: c.dealroom_news || [], news30: c.news_30d || 0, drSlug: c.dealroom_slug || '',
     mg: (words.length > 1 ? words[0][0] + words[1][0] : String(c.name || '?').slice(0, 2)).toUpperCase(),
     hay: [c.name, c.description, facts.investors, c.location, why].join(' ').toLowerCase(),
   };
@@ -1089,6 +1019,7 @@ function renderMap() {
         <p class="note">Дані: <a href="https://defense-valley.news" target="_blank" rel="noopener noreferrer">Defense Valley News — European defense-tech funding tracker</a></p>
       </details>
       <button class="notice" data-invest-digest="1">Новини про інвестиції з нашої бази: перейти до розділу «Інвестиції» в дайджесті →</button>
+      <section class="radar" id="radar">${radarHtml()}</section>
       ${companiesSectionHtml()}
     </div></div>`;
 }
@@ -1100,13 +1031,14 @@ function mmFiltered() {
     && (!mm.hot || c.hot) && (!mm.fresh || c.fresh) && (!mm.stages.size || mm.stages.has(c.sg)));
 }
 function mmSorter(a, b) {
-  const by = { name: 0, amount: 'latestEur', total: 'totalEur', signal: 'signal' }[mm.sort];
+  const by = { name: 0, amount: 'latestEur', total: 'totalEur', signal: 'signal', news: 'news30' }[mm.sort];
   if (by === 0) return a.name.localeCompare(b.name);
   if (by) return (b[by] ?? -1) - (a[by] ?? -1) || a.name.localeCompare(b.name);
   return (b.date ? +b.date : 0) - (a.date ? +a.date : 0) || a.name.localeCompare(b.name);
 }
 const mmColor = (sec) => `var(--mm-s${(MM_SECTORS[sec] || [0, 0, 7])[2]})`;
-const mmMeta = (c) => [c.sg === 'nd' ? '' : c.stage, c.latest].filter(Boolean).join(' · ') || (c.total ? `усього ${c.total}` : 'раунд невідомий');
+const mmMeta = (c) => ([c.sg === 'nd' ? '' : c.stage, c.latest].filter(Boolean).join(' · ') || (c.total ? `усього ${c.total}` : 'раунд невідомий'))
+  + (c.news30 ? ` · 📰 ${c.news30}` : '');
 const mmHas = (key) => mm.all.some((c) => key(c));
 
 function mmKpisHtml(list) {
@@ -1114,6 +1046,7 @@ function mmKpisHtml(list) {
   const kpis = [[list.length, 'компаній'], [new Set(list.map((c) => c.country)).size, 'країн'],
     [new Set(list.map((c) => c.sector)).size, 'сегментів']];
   if (mmHas((c) => c.hot)) kpis.push([n((c) => c.hot), '🔥 гарячих']);
+  if (mmHas((c) => c.news30)) kpis.push([n((c) => c.news30 > 0), '📰 у новинах за 30 днів']);
   kpis.push([n((c) => c.use === 'def'), 'оборонних'], [n((c) => c.use === 'dual'), 'подвійного призн.'],
     [n((c) => c.use === 'civ'), 'цивільних'], [n((c) => c.fresh), 'раундів за 6 міс.']);
   return kpis.map(([v, l]) => `<div class="mm-kpi"><b>${v}</b><span>${l}</span></div>`).join('');
@@ -1178,7 +1111,8 @@ function companyFiltersHtml() {
     ${sel('company-sector', 'Сегмент', opts(sectorsUa, s.sector, 'Усі сегменти'))}
     ${sel('mm-use', 'Призначення', own(MM_USE, mm.use, 'Будь-яке', (k) => mm.all.filter((c) => c.use === k).length))}
     ${sel('mm-sort', 'Сортування', [['recent', 'Найсвіжіший раунд'], ['amount', 'Найбільший раунд'], ['total', 'Найбільше залучено'],
-      ...(mmHas((c) => c.signal != null) ? [['signal', 'Dealroom Signal']] : []), ['name', 'За назвою']]
+      ...(mmHas((c) => c.signal != null) ? [['signal', 'Signal (динаміка росту)']] : []),
+      ...(mmHas((c) => c.news30) ? [['news', 'Найбільше новин за 30 днів']] : []), ['name', 'За назвою']]
       .map(([k, l]) => `<option value="${k}" ${mm.sort === k ? 'selected' : ''}>${l}</option>`).join(''))}
     ${mmHas((c) => c.hot) ? `<label class="mm-check"><input type="checkbox" id="mm-hot" ${mm.hot ? 'checked' : ''}> 🔥 Гарячі</label>` : ''}
     <label class="mm-check"><input type="checkbox" id="mm-fresh" ${mm.fresh ? 'checked' : ''}> Раунд за 6 міс.</label>
@@ -1196,7 +1130,8 @@ function companiesHtml() {
     : mm.view === 'table' ? mmTableHtml(list) : mmMapHtml(list);
   return `<div class="mm-kpis">${mmKpisHtml(list)}</div>${mmMixHtml(list)}${body}
     <p class="note">Позначка <span class="mm-dot-inline"></span> — раунд за останні 6 місяців.
-    ${mmHas((c) => c.hot) ? '🔥 — за Dealroom: Signal понад 80 і залучено менше $40M (рання стадія, швидке зростання). ' : ''}
+    ${mmHas((c) => c.hot) ? '🔥 — Signal понад 80 і залучено менше $40M (рання стадія, швидке зростання). ' : ''}
+    ${mmHas((c) => c.news30) ? '📰 N — скільки новин про компанію за 30 днів. ' : ''}
     Призначення визначено автоматично за описом компанії і може помилятися. Сортування за сумою приблизне (у євро).</p>`;
 }
 
@@ -1235,11 +1170,11 @@ function paintCompanies(filters) {
   if (f && filters) f.innerHTML = companyFiltersHtml();
 }
 
-
+// Усі компанії одним списком (мапа фільтрує й групує сама): сторінками, доки не отримаємо всі
 let companiesLoad = 0;
 async function loadCompanies() {
   const s = state.companies;
-  if (mm.loaded) return paintCompanies(true);       // уже є — лише перемалювати з новими фільтрами
+  if (mm.loaded) { paintCompanies(true); return radarStart(); }   // уже є — лише перемалювати з новими фільтрами
   const mine = ++companiesLoad;
   s.loading = true; s.error = '';
   paintCompanies(false);
@@ -1259,6 +1194,7 @@ async function loadCompanies() {
     mm.all = items.map((c) => mmNorm(c, labels));
     mm.loaded = true; s.loading = false; s.total = mm.all.length;
     paintCompanies(true);
+    radarStart();                                   // радар Dealroom: з кешу або у фоні
   } catch (e) {
     if (mine !== companiesLoad) return;
     s.loading = false;
@@ -1274,7 +1210,7 @@ function onCompanySearch(value) {
   companyTimer = setTimeout(() => paintCompanies(false), 200);
 }
 
-
+// ---- Профіль компанії (бічна панель) ----
 function mmDrawerHtml() {
   const c = mm.open && mm.all.find((x) => x.id === mm.open);
   if (!c) return '';
@@ -1296,8 +1232,14 @@ function mmDrawerHtml() {
         ${row('Сайт', site ? `<a href="${esc(site)}" target="_blank" rel="noopener noreferrer">${esc(c.website)}</a>` : '')}
         ${row('Останній раунд', esc([c.latest, c.sg === 'nd' ? '' : c.stage, c.dateText].filter(Boolean).join(' · ')))}
         ${row('Залучено всього', esc(c.total))}${row('Інвестори', esc(c.investors))}${row('Перевірка', esc(c.conf))}
-        ${c.signal != null ? row('Dealroom', esc(`Signal ${c.signal}/100${c.drSegment ? ` · «${c.drSegment}»` : ''}`)) : ''}</dl>
-      ${c.hot ? '<p class="note">🔥 Dealroom вважає компанію гарячою: Signal понад 80 і залучено менше $40M.</p>' : ''}
+        ${c.signal != null ? row('Signal', esc(`${c.signal}/100${c.drSegment ? ` · «${c.drSegment}»` : ''}`)) : ''}</dl>
+      ${c.hot ? '<p class="note">🔥 Гаряча компанія: Signal понад 80 і залучено менше $40M.</p>' : ''}
+      ${c.event?.what_happened ? `<div><span class="section-label">Остання подія</span><p class="mm-desc">${esc(c.event.what_happened)}${c.event.technology ? ` Технологія: ${esc(c.event.technology)}.` : ''}${safeUrl(c.event.url) ? ` <a href="${esc(safeUrl(c.event.url))}" target="_blank" rel="noopener noreferrer">Джерело</a>` : ''}</p></div>` : ''}
+      ${c.news.length ? `<div><span class="section-label">Новини${c.news30 ? ` · ${c.news30} за 30 днів` : ''}</span>
+        <div class="mm-srcs">${c.news.slice(0, 6).map((n) => `<span>${esc(String(n.published_at || '').slice(0, 10))} ·
+          ${safeUrl(n.url) ? `<a href="${esc(safeUrl(n.url))}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a>` : esc(n.title)}</span>`).join('')}</div>
+        </div>` : ''}
+      ${mmRadarHtml(c)}
       ${c.why ? `<div><span class="section-label">Чому це важливо</span><p class="mm-desc">${esc(c.why)}</p></div>` : ''}
       ${srcs ? `<div><span class="section-label">Джерела</span><div class="mm-srcs">${srcs}</div></div>` : ''}
       ${safeUrl(c.profile) ? `<p class="note"><a href="${esc(safeUrl(c.profile))}" target="_blank" rel="noopener noreferrer">Профіль на europedefencetech.com</a>${en ? ' · ' + esc(en) : ''}</p>` : ''}
@@ -1367,6 +1309,383 @@ const safeUrl = (u) => {
   if (/^https?:\/\//i.test(v)) return v;
   return /^[\w.-]+\.[a-z]{2,}(\/|$)/i.test(v) ? 'https://' + v : '';   // «fieldmade.com» → https://fieldmade.com
 };
+
+// ---------- Радар Dealroom: огляд, компанії та конкуренти, угоди та інвестори, нові ----------
+// Те саме, що dealroom-radar.html, але всередині вкладки «Інвестиції», без кнопки «Завантажити».
+// Лише читає відкритий API Dealroom (dealroom.co/for-agents) з браузера; у базу нічого не пише.
+// Результат кешується в браузері на 24 год: повне сканування — раз на добу, далі все миттєво.
+const DR_API = 'https://dealroom.co/api';
+const DR_MAPS = ['landscape-47424', 'landscape-50938', 'landscape-59103'];   // оборонні мапи Європи + anti-drone
+const DR_SEARCH = ['defence', 'defense', 'drone', 'security', 'military'];
+const DR_TTL = 24 * 3600e3, DR_CONC = 4, DR_CACHE = 'dr-radar-v3';
+const rd = { status: 'idle', note: '', done: 0, total: 0, at: 0, maps: [], companies: [], deals: [], news: {}, seen: {}, baseline: false,
+  tab: 'overview', open: null, q: '', map: '', seg: '', country: '', dq: '', days: '180', round: '' };
+
+const drNorm = (s) => String(s || '').toLowerCase().replace(/\b(gmbh|ltd|limited|inc|llc|sas|ag|ab|oy|bv|plc|corp)\b\.?/g, '').replace(/[^\p{L}\p{N}]/gu, '');
+const drMoney = (usd) => !usd ? '—' : usd >= 1e9 ? `$${(usd / 1e9).toFixed(1)}B` : usd >= 1e6 ? `$${Math.round(usd / 1e6)}M` : `$${Math.round(usd / 1e3)}K`;
+const drSince = (days) => new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
+const drYear = new Date().getFullYear();
+const drIsNew = (c) => c.founded && c.founded >= drYear - 1;
+const drFind = (key) => rd.companies.find((x) => x.key === key);
+
+async function drGet(path, params) {
+  for (let attempt = 0; ; attempt++) {            // Dealroom іноді відповідає 429/5xx — пробуємо ще, щоб не губити компанії
+    let r = null;
+    try { r = await fetch(`${DR_API}/${path}?${new URLSearchParams(params)}`); } catch (e) { if (attempt >= 3) throw e; }
+    if (r && r.ok) return r.json();
+    if (r && r.status !== 429 && r.status < 500) throw new Error(`${path}: ${r.status}`);
+    if (attempt >= 3) throw new Error(`${path}: ${r ? r.status : 'мережа'}`);
+    await new Promise((ok) => setTimeout(ok, 1500 * (attempt + 1)));
+  }
+}
+function drMapIds(m) {
+  const u = String(m.url || ''), ids = [m.id];
+  const land = u.match(/landscape-\d+/); if (land) ids.push(land[0]);
+  return [...new Set(ids.filter(Boolean))];
+}
+
+// --- угоди з новин ---
+const DR_MONEY = /(?:([$€£])\s?(\d+(?:[.,]\d+)?)\s?(billion|bn|million|mn|m|b|k)\b|(\d+(?:[.,]\d+)?)\s?(million|billion)\s?(euros?|dollars?|pounds?|usd|eur|gbp))/i;
+const DR_VERB = /\b(raises?|raised|secures?|secured|closes?|closed|lands?|landed|bags?|nets?|attracts?|completes?|announces?)\b[^.]{0,60}\b(funding|round|investment|seed|series|financing|capital|grant)|\b(seed|series [a-f]|pre-seed|funding round|investment round)\b|\bacquir(es|ed|ing)\b|\binvests?\b|\binvested\b/i;
+const DR_ROUND = /\b(pre-seed|seed|series [a-f]|growth|bridge|grant|debt|acquisition|acquires|acquired)\b/i;
+const DR_LEAD = /\b(?:[Ll]ed by|[Cc]o-led by|[Bb]acked by|participation (?:of|from)|[Ii]nvestment from|[Ff]unding from|[Gg]rant from|[Ii]nvestors? (?:including|include))\s+([A-Z][\w&'-]+(?:(?:,\s*|\s+)(?:[A-Z][\w&'-]+|&|and|of|de|la))*)/g;
+function drUsd(cur, num, unit) {
+  const n = parseFloat(String(num).replace(',', '.'));
+  const u = { billion: 1e9, bn: 1e9, b: 1e9, million: 1e6, mn: 1e6, m: 1e6, k: 1e3 }[String(unit).toLowerCase()] || 1;
+  return n * u * (/€|eur/i.test(cur) ? 1.16 : /£|gbp|pound/i.test(cur) ? 1.27 : 1);   // приблизно, лише для порівняння
+}
+function drDeal(c, it) {
+  const title = it.title || '', text = `${title}. ${(it.summary || '').slice(0, 900)}`;
+  if (!DR_VERB.test(title) && !DR_VERB.test(text.slice(0, 400))) return null;
+  const inTitle = drNorm(title).includes(c.key);
+  if (!inTitle && !drNorm(text.slice(0, 400)).includes(c.key)) return null;
+  const m = DR_MONEY.exec(title) || DR_MONEY.exec(text);
+  const amount = m ? (m[1] ? drUsd(m[1], m[2], m[3]) : drUsd(m[6], m[4], m[5])) : null;
+  const round = ((DR_ROUND.exec(title) || DR_ROUND.exec(text) || [])[1] || '').toLowerCase();
+  const inv = new Set();
+  for (const lm of text.matchAll(DR_LEAD)) {
+    for (let name of lm[1].split(/\s*,\s*|\s+and\s+|\s*&\s*(?=[A-Z][a-z]+\s+[A-Z])/)) {   // «Plural and Lakestar» → два інвестори
+      name = name.replace(/^(and|&)\s+/i, '').replace(/\s+(and|&|of|de|la)$/i, '').trim();
+      if (/^(and|&|of|de|la|the)$/i.test(name)) continue;          // «and» з «A, and B» — не інвестор
+      if (name.length > 2 && drNorm(name) !== c.key && !/^(The|This|It|Ukraine|Europe|Germany|NATO|Its|Existing)$/.test(name)) inv.add(name);
+    }
+  }
+  if (!amount && !round) return null;
+  return { company: c.name, key: c.key, date: String(it.published_at || '').slice(0, 10), title, url: it.url,
+           amount, raw: m ? m[0] : '', round, investors: [...inv].slice(0, 5), confident: inTitle && !!amount };
+}
+
+// --- завантаження (само, без кнопки) ---
+function drLoadCache() {
+  try { const c = JSON.parse(localStorage.getItem(DR_CACHE) || 'null'); if (c) Object.assign(rd, c); } catch (e) { /* без сховища */ }
+  try { const s = localStorage.getItem('dr-seen'); rd.seen = s ? JSON.parse(s) : {}; rd.baseline = !s; } catch (e) { rd.seen = {}; rd.baseline = true; }
+  drTokenize();
+}
+function drSaveCache() {
+  try { localStorage.setItem(DR_CACHE, JSON.stringify({ at: rd.at, maps: rd.maps, companies: rd.companies.map(({ words, ...c }) => c), deals: rd.deals, news: rd.news })); } catch (e) { /* завелике або без сховища */ }
+  try { localStorage.setItem('dr-seen', JSON.stringify(rd.seen)); } catch (e) { /* не критично */ }
+}
+function radarStart() {
+  if (rd.status === 'loading') return radarPaint();
+  if (!rd.at) drLoadCache();
+  if (rd.at && Date.now() - rd.at < DR_TTL) { rd.status = 'ready'; return radarPaint(); }
+  radarLoad();
+}
+async function radarLoad() {
+  rd.status = 'loading'; rd.note = 'Шукаю оборонні мапи…'; rd.done = 0; rd.total = 0; radarPaint();
+  try {
+    const found = {};
+    for (const id of DR_MAPS) found[id] = { id, title: id };
+    for (const w of DR_SEARCH) {
+      try {
+        const r = await drGet('marketmaps', { q: w, limit: 100 });
+        for (const m of r.results || []) if (m.id && (m.tags || []).some((t) => /defen[cs]e/i.test(t))
+          && !Object.values(found).some((f) => drMapIds(m).includes(f.id))) found[m.id] = m;
+      } catch (e) { /* пошук не критичний: є DR_MAPS */ }
+    }
+    const byKey = {}, maps = [];
+    for (const m of Object.values(found)) {
+      rd.note = `Мапа ${maps.length + 1}: ${m.title}…`; radarPaint();
+      let d = null;
+      for (const id of drMapIds(m)) { try { d = await drGet('marketmap', { id }); if (d && d.companies) break; } catch (e) { d = null; } }
+      if (!d || !d.companies) continue;                 // мапа, яку API не віддає (404) — пропускаємо
+      maps.push({ title: d.title || m.title, url: d.url || m.url, total: d.total_companies });
+      for (const c of d.companies) {
+        const key = drNorm(c.name);
+        if (!key) continue;
+        const hq = c.hq || {};
+        const x = byKey[key] ||= { key, name: c.name, slug: c.path, url: c.dealroomUrl, website: c.website, tagline: c.tagline || '',
+          country: hq.country?.name || '', city: hq.city?.name || '', founded: c.launchYear || null, employees: c.employees ?? null,
+          funding: c.totalFunding?.amount || 0, founders: c.founders || [], industries: c.industries || [], segments: [], maps: [] };
+        if (c.segment && !x.segments.includes(c.segment)) x.segments.push(c.segment);
+        if (!x.maps.includes(d.title)) x.maps.push(d.title);
+      }
+    }
+    if (!maps.length) throw new Error('жодна мапа не відкрилася');
+    const list = Object.values(byKey);
+    const today = new Date().toISOString().slice(0, 10);
+    for (const c of list) if (!(c.key in rd.seen)) rd.seen[c.key] = rd.baseline ? '' : today;   // «нові» — з’явилися після першого відкриття
+
+    rd.total = list.length; rd.done = 0; rd.note = 'Читаю новини компаній…';
+    const deals = [], news = {};
+    let i = 0;
+    await Promise.all(Array.from({ length: DR_CONC }, async () => {
+      while (i < list.length) {
+        const c = list[i++];
+        try {
+          if (c.slug) {
+            const r = await drGet('entity-news', { path: c.slug, type: 'company' });
+            const items = r.items || [];
+            news[c.key] = items.slice(0, 10).map((it) => ({ title: it.title, url: it.url, published_at: String(it.published_at || '').slice(0, 10) }));
+            const sig = new Set();
+            for (const it of items) {
+              const d = drDeal(c, it);
+              if (!d) continue;
+              const s = `${d.round}|${Math.round((d.amount || 0) / 1e6)}`;      // та сама угода в кількох новинах — один раз
+              if (!sig.has(s)) { sig.add(s); deals.push(d); }
+            }
+          }
+        } catch (e) { /* одна компанія не завадить решті */ }
+        rd.done++;
+        if (rd.done % 10 === 0) radarPaint();
+      }
+    }));
+    deals.sort((a, b) => b.date.localeCompare(a.date));
+    Object.assign(rd, { maps, companies: list, deals, news, at: Date.now(), status: 'ready', note: '' });
+    drTokenize();
+    drSaveCache();
+  } catch (e) {
+    rd.status = rd.companies.length ? 'ready' : 'error';           // якщо є старий кеш — показуємо його
+    rd.note = `Не вдалося оновити дані радару (${e.message}).`;
+  }
+  radarPaint();
+  if (mm.open) mmOpen(mm.open);                                   // у відкритому профілі з’являться угоди
+}
+
+// --- конкуренти: той самий сегмент + схожий опис ---
+const DR_STOP = new Set('and the for with of to in a an on by from our we your their its is are as at that this solutions solution systems system platform company technology technologies based provider providing develops developing developer designs offers'.split(' '));
+const drWordSet = (t) => new Set(String(t || '').toLowerCase().match(/[a-z][a-z-]{2,}/g)?.filter((w) => !DR_STOP.has(w)) || []);
+function drTokenize() { for (const c of rd.companies) c.words = drWordSet(`${c.tagline} ${c.segments.join(' ')} ${(c.industries || []).join(' ')}`); }
+function drSimilar(c, list, sameSeg, n = 8) {
+  return list.filter((o) => o !== c).map((o) => {
+    let common = 0; for (const w of c.words) if (o.words.has(w)) common++;
+    return { o, score: common / (c.words.size + o.words.size - common || 1) + (sameSeg(o) ? 0.35 : 0) };
+  }).filter((x) => x.score > 0.12).sort((a, b) => b.score - a.score).slice(0, n).map((x) => x.o);
+}
+const drCompetitors = (c) => drSimilar(c, rd.companies, (o) => o.segments.some((s) => c.segments.includes(s)));
+
+// --- зв’язок з нашою базою ---
+let drIdx = null;
+function drOurs(key) {                      // наша компанія за назвою або за dealroom_slug
+  if (!drIdx || drIdx.n !== mm.all.length + rd.companies.length) {
+    const byName = new Map(), bySlug = new Map();
+    for (const c of mm.all) { byName.set(drNorm(c.name), c); if (c.drSlug) bySlug.set(c.drSlug, c); }
+    drIdx = { n: mm.all.length + rd.companies.length, byName, bySlug, slugOf: new Map(rd.companies.map((x) => [x.key, x.slug])) };
+  }
+  return drIdx.byName.get(key) || drIdx.bySlug.get(drIdx.slugOf.get(key)) || null;
+}
+
+// --- відображення ---
+const rdKpis = (items) => `<div class="mm-kpis">${items.map(([v, l]) => `<div class="mm-kpi"><b>${v}</b><span>${l}</span></div>`).join('')}</div>`;
+const rdOpts = (values, cur, all) => `<option value="">${all}</option>` + [...new Set(values)].filter(Boolean).sort()
+  .map((v) => `<option ${v === cur ? 'selected' : ''}>${esc(v)}</option>`).join('');
+const rdSel = (id, label, html) => `<label><span class="filter-label">${label}</span><select id="${id}">${html}</select></label>`;
+const rdCo = (key, name) => `<button class="rd-link" data-rd-company="${esc(key)}">${esc(name)}</button>`;
+function rdBars(rows) {
+  const mx = rows[0]?.[1] || 1;
+  return rows.map(([k, n]) => `<div><div class="rd-row"><span>${esc(k)}</span><span class="mm-num">${n}</span></div><div class="rd-hbar"><i style="width:${n / mx * 100}%"></i></div></div>`).join('');
+}
+const rdTop = (arr, key, n = 8) => Object.entries(arr.reduce((a, x) => { for (const k of [].concat(key(x))) if (k) a[k] = (a[k] || 0) + 1; return a; }, {}))
+  .sort((a, b) => b[1] - a[1]).slice(0, n);
+
+function rdDealsTable(list, opt = {}) {
+  return `<div class="mm-tablebox"><table class="mm-table rd-table"><thead><tr><th>Дата</th>${opt.noCompany ? '' : '<th>Компанія</th>'}<th>Сума</th><th>Раунд</th>${opt.short ? '' : '<th>Інвестори</th>'}<th>Новина</th></tr></thead><tbody>
+    ${list.map((d) => `<tr><td class="mm-num">${esc(d.date)}</td>${opt.noCompany ? '' : `<td>${rdCo(d.key, d.company)}</td>`}
+      <td class="mm-num">${d.amount ? `<span class="rd-tag money">${esc(d.raw || drMoney(d.amount))}</span>` : '—'}</td><td>${esc(d.round || '—')}</td>
+      ${opt.short ? '' : `<td>${d.investors.map((x) => `<span class="rd-tag">${esc(x)}</span>`).join('') || '—'}</td>`}
+      <td>${safeUrl(d.url) ? `<a href="${esc(safeUrl(d.url))}" target="_blank" rel="noopener noreferrer">${esc(d.title.slice(0, 110))}</a>` : esc(d.title.slice(0, 110))}
+        ${d.confident ? '' : ' <span class="rd-tag warn">перевірити</span>'}</td></tr>`).join('')}
+  </tbody></table></div>`;
+}
+
+function rdOverview() {
+  const d90 = rd.deals.filter((d) => d.date >= drSince(90));
+  const total90 = d90.reduce((s, d) => s + (d.amount || 0), 0);
+  const fresh = rd.companies.filter((c) => rd.seen[c.key] && rd.seen[c.key] >= drSince(30));
+  return `${rdKpis([[rd.companies.length, 'компаній'], [rd.maps.length, 'оборонних мап'], [rd.deals.length, 'угод у новинах'],
+      [d90.length, 'угод за 90 днів'], [total90 ? drMoney(total90) : '—', 'сума за 90 днів'],
+      [rd.companies.filter(drIsNew).length, `засновані ${drYear - 1}–${drYear}`], [fresh.length, 'нові на мапах за 30 днів']])}
+    <div class="rd-grid">
+      <div class="rd-box"><h3 class="rd-h">Останні угоди</h3>${rd.deals.length ? rdDealsTable(rd.deals.slice(0, 8), { short: true }) : '<p class="sub">Угод у новинах не знайдено.</p>'}</div>
+      <div class="rd-box"><h3 class="rd-h">Найактивніші інвестори</h3><div class="rd-list">${rdBars(rdTop(rd.deals, (d) => d.investors)) || '<p class="sub">Інвесторів у новинах не знайдено.</p>'}</div></div>
+      <div class="rd-box"><h3 class="rd-h">Компанії за країнами</h3><div class="rd-list">${rdBars(rdTop(rd.companies, (c) => c.country || 'невідомо'))}</div></div>
+      <div class="rd-box"><h3 class="rd-h">Тематичні мапи</h3><div class="rd-list">${rd.maps.map((m) => `<div class="rd-row">${safeUrl(m.url) ? `<a href="${esc(safeUrl(m.url))}" target="_blank" rel="noopener noreferrer">${esc(m.title)}</a>` : esc(m.title)}<span class="mm-num">${m.total ?? '?'}</span></div>`).join('')}</div>
+        <p class="note">Число — скільки всього компаній на мапі.</p></div>
+    </div>`;
+}
+function rdCompaniesList() {
+  const q = rd.q.trim().toLowerCase();
+  return rd.companies.filter((c) => (!q || `${c.name} ${c.tagline} ${c.city} ${c.country}`.toLowerCase().includes(q))
+    && (!rd.seg || c.segments.includes(rd.seg)) && (!rd.country || c.country === rd.country))
+    .sort((a, b) => (b.funding || 0) - (a.funding || 0));
+}
+function rdCompanies() {
+  const list = rdCompaniesList();
+  return `<div class="company-filters">
+      <label class="rd-search"><span class="filter-label">Пошук</span><input id="rd-q" value="${esc(rd.q)}" autocomplete="off" placeholder="Назва, технологія, місто…"></label>
+      ${rdSel('rd-seg', 'Сегмент', rdOpts(rd.companies.flatMap((c) => c.segments), rd.seg, 'Усі сегменти'))}
+      ${rdSel('rd-country', 'Країна', rdOpts(rd.companies.map((c) => c.country), rd.country, 'Усі країни'))}
+    </div>
+    <span class="sub">Показано ${list.length} з ${rd.companies.length}. Натисніть на компанію — побачите конкурентів, угоди й новини.</span>
+    <div class="mm-tablebox"><table class="mm-table"><thead><tr><th>Компанія</th><th>Що робить</th><th>Сегмент</th><th>Країна</th><th>Залучено</th><th>Заснована</th></tr></thead><tbody>
+    ${list.map((c) => `<tr tabindex="0" data-rd-company="${esc(c.key)}"><td><b>${esc(c.name)}</b>${drIsNew(c) ? ' <span class="rd-tag new">нова</span>' : ''}</td>
+      <td>${esc(c.tagline)}</td><td>${c.segments.map((s) => `<span class="rd-tag">${esc(s)}</span>`).join('')}</td>
+      <td>${esc([c.city, c.country].filter(Boolean).join(', '))}</td><td class="mm-num">${drMoney(c.funding)}</td><td class="mm-num">${c.founded || '—'}</td></tr>`).join('')}
+    </tbody></table></div>`;
+}
+function rdDeals() {
+  const q = rd.dq.trim().toLowerCase();
+  const list = rd.deals.filter((d) => (!rd.days || d.date >= drSince(+rd.days)) && (!rd.round || d.round.includes(rd.round))
+    && (!q || `${d.company} ${d.title} ${d.investors.join(' ')}`.toLowerCase().includes(q)));
+  const inv = {};
+  for (const d of list) for (const x of d.investors) (inv[x] ||= []).push(d);
+  const invRows = Object.entries(inv).sort((a, b) => b[1].length - a[1].length).slice(0, 20);
+  return `<div class="company-filters">
+      <label class="rd-search"><span class="filter-label">Пошук</span><input id="rd-dq" value="${esc(rd.dq)}" autocomplete="off" placeholder="Компанія, інвестор…"></label>
+      ${rdSel('rd-days', 'Період', [['30', '30 днів'], ['90', '90 днів'], ['180', '180 днів'], ['', 'увесь період']].map(([v, l]) => `<option value="${v}" ${rd.days === v ? 'selected' : ''}>${l}</option>`).join(''))}
+      ${rdSel('rd-round', 'Раунд', rdOpts(['pre-seed', 'seed', 'series a', 'series b', 'series c', 'growth', 'grant', 'acquisition'], rd.round, 'Будь-який'))}
+    </div>
+    ${rdKpis([[list.length, 'угод'], [drMoney(list.reduce((s, d) => s + (d.amount || 0), 0)), 'сума (≈ $)'], [Object.keys(inv).length, 'інвесторів']])}
+    ${list.length ? rdDealsTable(list) : '<p class="sub">За цей період угод не знайдено.</p>'}
+    <p class="note">«перевірити» — назви компанії немає в заголовку або сума не знайдена: угода може стосуватися іншої компанії. Суми в € і £ перераховано в $ приблизно.</p>
+    <h3 class="rd-h">Хто куди інвестував</h3>
+    ${invRows.length ? `<div class="rd-list">${invRows.map(([name, ds]) => {
+      const cos = [...new Map(ds.map((d) => [d.key, d])).values()];
+      return `<div class="rd-row"><span><b>${esc(name)}</b> → ${cos.map((d) => rdCo(d.key, d.company)).join(', ')}</span><span class="mm-num">${ds.length}</span></div>`;
+    }).join('')}</div>` : '<p class="sub">У новинах за цей період інвесторів не названо.</p>'}`;
+}
+function rdNew() {
+  const appeared = rd.companies.filter((c) => rd.seen[c.key]).sort((a, b) => rd.seen[b.key].localeCompare(rd.seen[a.key]));
+  const founded = rd.companies.filter(drIsNew).sort((a, b) => (b.founded || 0) - (a.founded || 0) || (b.funding || 0) - (a.funding || 0));
+  const rows = (list, col) => list.length ? `<div class="mm-tablebox"><table class="mm-table"><thead><tr><th>Компанія</th><th>Що робить</th><th>Країна</th><th>Залучено</th><th>${col[0]}</th></tr></thead><tbody>
+    ${list.map((c) => `<tr tabindex="0" data-rd-company="${esc(c.key)}"><td><b>${esc(c.name)}</b></td><td>${esc(c.tagline)}</td>
+      <td>${esc(c.country)}</td><td class="mm-num">${drMoney(c.funding)}</td><td class="mm-num">${esc(col[1](c))}</td></tr>`).join('')}
+    </tbody></table></div>` : '';
+  return `<h3 class="rd-h">Нові на мапах</h3>
+    ${rd.baseline || !Object.values(rd.seen).some(Boolean) ? '<p class="sub">Перше відкриття: зараз запам’ятано всі компанії. Наступного разу тут будуть ті, що додалися на мапи після сьогодні.</p>' : ''}
+    ${rows(appeared, ['Вперше побачено', (c) => rd.seen[c.key]]) || (!rd.baseline ? '<p class="sub">Нових компаній з минулого разу немає.</p>' : '')}
+    <h3 class="rd-h">Нещодавно засновані (${drYear - 1}–${drYear})</h3>
+    ${rows(founded, ['Заснована', (c) => c.founded]) || '<p class="sub">Немає.</p>'}`;
+}
+
+function radarHtml() {
+  const head = `<div style="display:flex;flex-direction:column;gap:6px"><h2 class="h2">Радар ринку</h2>
+    <span class="sub">Оборонні компанії, конкуренти, угоди та інвестори з новин, нові компанії. Оновлюється само раз на добу.</span></div>`;
+  if (rd.status === 'error' && !rd.companies.length) return `${head}<div class="card rd-card"><p class="sub">${esc(rd.note)}</p></div>`;
+  if (!rd.companies.length) {
+    const pct = rd.total ? Math.round(rd.done / rd.total * 100) : 4;
+    return `${head}<div class="card rd-card"><p class="sub">${esc(rd.note || 'Завантаження…')}${rd.total ? ` ${rd.done} з ${rd.total}.` : ''} Перший раз це займає 1–2 хвилини, далі дані беруться з кешу.</p>
+      <div class="rd-prog"><i style="width:${pct}%"></i></div></div>`;
+  }
+  const tab = (k, l) => `<button data-rd-tab="${k}" class="${rd.tab === k ? 'on' : ''}" aria-pressed="${rd.tab === k}">${l}</button>`;
+  const body = { overview: rdOverview, companies: rdCompanies, deals: rdDeals, new: rdNew }[rd.tab]();
+  return `${head}<div class="card rd-card">
+    <div class="segmented small rd-tabs" role="group" aria-label="Радар">${tab('overview', 'Огляд')}${tab('companies', 'Компанії та конкуренти')}${tab('deals', 'Угоди та інвестори')}${tab('new', 'Нові')}</div>
+    ${rd.status === 'loading' ? `<div class="rd-prog"><i style="width:${rd.total ? Math.round(rd.done / rd.total * 100) : 4}%"></i></div>` : ''}
+    ${body}
+    <p class="note">${rd.status === 'loading' ? `Оновлюю: ${rd.done} з ${rd.total}… · ` : ''}${rd.note ? esc(rd.note) + ' · ' : ''}Оновлено ${new Date(rd.at).toLocaleString('uk-UA', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })} · дані: Dealroom. Угоди знайдено автоматично в новинах, можливі помилки й пропуски.</p>
+  </div>
+  <div id="rd-drawer-box">${rdDrawerHtml()}</div>`;
+}
+
+// --- профіль компанії Dealroom (бічна панель, як у dealroom-radar.html) ---
+function rdDrawerHtml() {
+  const c = rd.open && drFind(rd.open);
+  if (!c) return '';
+  const comp = drCompetitors(c);
+  const deals = rd.deals.filter((d) => d.key === c.key);
+  const news = rd.news[c.key] || [];
+  const ours = drOurs(c.key);
+  const row = (k, v) => v ? `<dt>${k}</dt><dd>${v}</dd>` : '';
+  const site = safeUrl(c.website), dr = safeUrl(c.url);
+  return `
+    <div class="mm-shade" data-rd-close="1"></div>
+    <aside class="mm-drawer" role="dialog" aria-modal="true" aria-labelledby="rd-dname">
+      <div class="mm-dhead"><div><h3 id="rd-dname">${esc(c.name)}</h3>
+        <div class="row">${c.segments.map((s) => `<span class="pill">${esc(s)}</span>`).join('')}${drIsNew(c) ? '<span class="pill mm-fresh">нова</span>' : ''}</div></div>
+        <button class="mm-close" data-rd-close="1" aria-label="Закрити">×</button></div>
+      ${c.tagline ? `<p class="mm-desc">${esc(c.tagline)}</p>` : ''}
+      <dl class="mm-dl">${row('Штаб-квартира', esc([c.city, c.country].filter(Boolean).join(', ')))}${row('Заснована', esc(c.founded || ''))}
+        ${row('Працівників', esc(c.employees ?? ''))}${row('Залучено всього', c.funding ? drMoney(c.funding) : '')}
+        ${row('Засновники', esc((c.founders || []).join(', ')))}${row('Мапи', esc(c.maps.join('; ')))}
+        ${row('Посилання', [site && `<a href="${esc(site)}" target="_blank" rel="noopener noreferrer">сайт</a>`, dr && `<a href="${esc(dr)}" target="_blank" rel="noopener noreferrer">детальний профіль</a>`].filter(Boolean).join(' · '))}</dl>
+      ${ours ? `<button class="btn-outline" data-mm-company="${esc(ours.id)}">Відкрити профіль у нашій базі</button>` : ''}
+      <div><span class="section-label">Конкуренти (той самий сегмент і схожий опис)</span>
+        ${comp.length ? `<div class="rd-list">${comp.map((o) => `<div class="rd-row"><span>${rdCo(o.key, o.name)} — ${esc(o.tagline.slice(0, 90))}</span><span class="mm-num">${drMoney(o.funding)}</span></div>`).join('')}</div>` : '<p class="sub">Схожих компаній на мапах не знайдено.</p>'}</div>
+      <div><span class="section-label">Угоди з новин</span>${deals.length ? rdDealsTable(deals, { noCompany: true }) : `<p class="sub">${rd.status === 'loading' ? 'Ще шукаю…' : 'У новинах угод не знайдено.'}</p>`}</div>
+      <div><span class="section-label">Новини</span>${news.length ? `<div class="mm-srcs">${news.map((n) => `<span>${esc(n.published_at)} · ${safeUrl(n.url) ? `<a href="${esc(safeUrl(n.url))}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a>` : esc(n.title)}</span>`).join('')}</div>` : '<p class="sub">Новин немає.</p>'}</div>
+    </aside>`;
+}
+function rdOpen(key) {
+  rd.open = key;
+  if (key) mm.open = null;
+  const box = document.getElementById('rd-drawer-box');
+  if (box) box.innerHTML = rdDrawerHtml();
+  const close = box && box.querySelector('.mm-close');
+  if (close) close.focus();
+}
+function radarPaint() {
+  if (state.screen !== 'map') return;
+  const box = document.getElementById('radar');
+  if (!box) return;
+  const a = document.activeElement, id = a && box.contains(a) ? a.id : '', pos = id && a.selectionStart;
+  box.innerHTML = radarHtml();
+  if (id) { const el = document.getElementById(id); if (el) { el.focus(); if (pos != null && el.setSelectionRange) el.setSelectionRange(pos, pos); } }
+}
+
+// --- у профілі нашої компанії: конкуренти з нашої бази + угоди з новин Dealroom ---
+const drOwnWords = (c) => c._w ||= drWordSet(c.desc);
+function mmCompetitors(c, n = 6) {
+  const w = drOwnWords(c);
+  return mm.all.filter((o) => o !== c).map((o) => {
+    const ow = drOwnWords(o);
+    let common = 0; for (const x of w) if (ow.has(x)) common++;
+    return { o, score: common / (w.size + ow.size - common || 1) + (o.sector === c.sector ? 0.35 : 0) };
+  }).filter((x) => x.score > 0.12 && (x.score > 0.35 || x.o.sector !== c.sector)).sort((a, b) => b.score - a.score).slice(0, n).map((x) => x.o);
+}
+function mmRadarHtml(c) {
+  const key = drNorm(c.name);
+  const deals = rd.deals.filter((d) => d.key === key || (c.drSlug && drFind(d.key)?.slug === c.drSlug));
+  const comp = mmCompetitors(c);
+  return `${comp.length ? `<div><span class="section-label">Конкуренти (той самий сегмент і схожий опис)</span><div class="mm-srcs">${comp.map((o) =>
+      `<span><button class="rd-link" data-mm-company="${esc(o.id)}">${esc(o.name)}</button> · ${esc(o.countryLabel)}${o.total ? ` · ${esc(o.total)}` : ''}</span>`).join('')}</div></div>` : ''}
+    ${deals.length ? `<div><span class="section-label">Угоди з новин</span>${rdDealsTable(deals, { noCompany: true })}</div>` : ''}`;
+}
+
+const RD_FIELDS = { 'rd-q': 'q', 'rd-seg': 'seg', 'rd-country': 'country', 'rd-dq': 'dq', 'rd-days': 'days', 'rd-round': 'round' };
+$main.addEventListener('click', (e) => {
+  if (state.screen !== 'map') return;
+  const t = e.target.closest('[data-rd-tab],[data-rd-company],[data-rd-close],[data-mm-company]');
+  if (!t) return;
+  if (t.dataset.rdTab) { rd.tab = t.dataset.rdTab; rd.open = null; return radarPaint(); }
+  if (t.dataset.rdClose) return rdOpen(null);
+  if (t.dataset.rdCompany) { e.preventDefault(); return rdOpen(t.dataset.rdCompany); }
+  if (t.dataset.mmCompany && rd.open) rdOpen(null);            // «Відкрити профіль у нашій базі» — закрити панель радару
+});
+$main.addEventListener('input', (e) => {
+  if (state.screen !== 'map' || !RD_FIELDS[e.target.id] || e.target.tagName !== 'INPUT') return;
+  rd[RD_FIELDS[e.target.id]] = e.target.value; radarPaint();
+});
+$main.addEventListener('change', (e) => {
+  if (state.screen !== 'map' || !RD_FIELDS[e.target.id] || e.target.tagName !== 'SELECT') return;
+  rd[RD_FIELDS[e.target.id]] = e.target.value; radarPaint();
+});
+$main.addEventListener('keydown', (e) => {
+  if (state.screen !== 'map') return;
+  if (e.key === 'Escape' && rd.open) return rdOpen(null);
+  const r = e.target.closest && e.target.closest('tr[data-rd-company]');
+  if (r && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); rdOpen(r.dataset.rdCompany); }
+});
 
 // ---------- Агенти (лише для адміністраторів) ----------
 const RUN_STATUS = { done: 'готово', failed: 'помилка', skipped: 'пропущено', expired: 'обірвано', running: 'працює', queued: 'у черзі' };
@@ -1490,24 +1809,7 @@ $main.addEventListener('submit', (e) => {
     const text = form.text.value.trim();
     if (text) profileAction(() => api.setGoal('add', text), `Ціль додано: «${text}».`);
   }
-  if (form.dataset.form === 'topic') {
-    const name = form.name.value.trim();
-    if (name.length >= 2) profileAction(() => api.setTopic(name, 'follow'), (r) => r.confirmation || `Тему «${name}» додано.`);
-  }
-  if (form.dataset.form === 'edit') return onProfileEdit(form.dataset.edit, form.text.value.trim());
 });
-
-// Збереження рядка профілю: нова ціль-формулювання, опис, пункт списку (додати або змінити)
-function onProfileEdit(key, text) {
-  const [field, at] = key.split(':');
-  if (field === 'summary') return profileAction(() => api.editProfile('summary', 'set', text), 'Опис збережено.');
-  if (!text) return;
-  if (at === 'new') return profileAction(() => api.editProfile(field, 'add', text), `Додано: «${text}».`);
-  const old = editValue(field, +at);
-  if (old === text) { state.profileEditing = null; return render(); }
-  if (field === 'goal') return profileAction(() => api.editGoal(old, text), `Ціль змінено: «${text}».`);
-  return profileAction(() => api.editProfile(field, 'edit', text, old), `Змінено: «${text}».`);
-}
 
 // $main.addEventListener('input', (e) => {
 //   if (e.target.id === 'post-search') onSearchInput(e.target.value);
@@ -1529,7 +1831,7 @@ $main.addEventListener('click', async (e) => {
 
   if (d.action === 'stop') return stopAnswer();
   if (d.mapActivate) { el.hidden = true; return; }
-    if (d.chatDelete) {
+  if (d.chatDelete) {
     if (d.chatDelete === 'yes') return deleteChat();
     state.chat.confirmDelete = d.chatDelete === 'ask';
     state.chat.deleteError = '';
@@ -1558,18 +1860,6 @@ $main.addEventListener('click', async (e) => {
   if (d.cancelReason) { state.proposals.reasonFor = null; return render(); }
 
   // профіль
-  if (d.editStart) {
-    state.profileEditing = d.editStart;
-    render();
-    $main.querySelector(`[data-edit="${d.editStart}"] [name="text"]`)?.focus();
-    return;
-  }
-  if (d.editCancel) { state.profileEditing = null; return render(); }
-  if (d.editRemove) {
-    const [field, at] = d.editRemove.split(':');
-    const old = editValue(field, +at);
-    return profileAction(() => api.editProfile(field, 'remove', null, old), `Прибрано: «${old}».`);
-  }
   if (d.goalRemove) return profileAction(() => api.setGoal('remove', d.goalRemove), `Ціль прибрано: «${d.goalRemove}».`);
   if (d.topic) return profileAction(() => api.setTopic(d.topic, d.topicAction), (r) => r.confirmation || 'Збережено.');
   if (d.notMe) return profileAction(() => api.notInterested(d.notMe), correctedNote);
@@ -1581,10 +1871,8 @@ $main.addEventListener('click', async (e) => {
   }
   if (d.prefsMentions) return profileAction(() => api.setPrefs({ mentions: d.prefsMentions === '1' }), 'Збережено.');
   if (d.push) return setPush(d.push === '1');
-  if (d.investDigest) { state.digest.side = 'both'; state.digest.unseen = false; state.digest.week = false; state.digest.jump = 'invest'; return go('digests'); }
-  // «Лише нове за сьогодні» and «За тиждень» exclude each other: «нове» is about today's digest
-  if (d.unseenDigest) { state.digest.unseen = d.unseenDigest === '1'; if (state.digest.unseen) state.digest.week = false; return loadDigest(); }
-  if (d.weekDigest) { state.digest.week = d.weekDigest === '1'; if (state.digest.week) state.digest.unseen = false; return loadDigest(); }
+  if (d.investDigest) { state.digest.side = 'both'; state.digest.unseen = false; state.digest.jump = 'invest'; return go('digests'); }
+  if (d.unseenDigest) { state.digest.unseen = d.unseenDigest === '1'; return loadDigest(); }
   if (d.sideDigest) { state.digest.side = d.sideDigest; return loadDigest(); }
   if (d.searchSide) { state.search.side = d.searchSide; render(); return loadSearch(); }
   if (d.days) { state.search.days = +d.days; render(); return loadSearch(); }
