@@ -95,9 +95,11 @@ def register_tools(mcp: MCPServer, svc: Services) -> dict[str, ToolSpec]:
     async def get_digest(
         mcp_ctx: Context,
         user_message: UserMessage,
-        side: Annotated[Literal["ua", "ru", "world", "topics", "both"], Field(
-            description="ua: Ukrainian sources; ru: Russian sources (claims, not facts); world: foreign sources; topics: only news on the "
-                        "topics the user follows; both: all of it (the default)")] = "both",
+        side: Annotated[Literal["ua", "ru", "world", "video", "youtube", "topics", "both"], Field(
+            description="ua: Ukrainian sources; ru: Russian sources (claims, not facts); world: foreign sources; "
+                        "video: summaries of videos (youtube: the same, its old name); topics: only news on the "
+                        "topics the user follows; "
+                        "both: all of it (the default)")] = "both",
         date: Annotated[str | None, Field(
             description="Kyiv date YYYY-MM-DD; omit for the latest digest")] = None,
         as_text: Annotated[bool, Field(description=(
@@ -105,6 +107,9 @@ def register_tools(mcp: MCPServer, svc: Services) -> dict[str, ToolSpec]:
         unseen_only: Annotated[bool, Field(description=(
             "true: only today's items the user hasn't been shown yet, in any app («що нового», «що я ще не бачив»); "
             "today only, so omit date"))] = False,
+        period: Annotated[Literal["day", "week"], Field(description=(
+            "day: the daily digest (the default); week: the weekly digest, the week's main news («за тиждень», "
+            "«тижневий дайджест»), made on Mondays"))] = "day",
         signals: Signals = None,
     ) -> Annotated[CallToolResult, out.DigestResult]:
         """Get the user's daily news digest: sections ordered by the user's interests, every item with its

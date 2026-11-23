@@ -74,6 +74,9 @@ class DigestItemOut(BaseModel):
                                  "«третя» = ref 3")
     n: int = Field(description="The item's number inside its digest; pass it as item_n to record_feedback")
     text: str
+    title: str | None = Field(None, description="video side: the video's title (text is its short summary)")
+    channel: str | None = Field(None, description="video side: the channel's name (YouTube or Rutube)")
+    duration_sec: int | None = Field(None, description="video side: the video's length in seconds")
     source_urls: list[str]
     source_post_ids: list[str] = Field(description="Ids usable with get_post and record_feedback")
     is_russian_source_claim: bool
@@ -88,8 +91,10 @@ class DigestSectionOut(BaseModel):
 
 
 class DigestOut(BaseModel):
-    side: Literal["ua", "ru", "world", "topics"] | str = Field(description=(
-        "world: foreign sources; topics: today's news on the topics the user follows (sections per topic), shown first"))
+    side: Literal["ua", "ru", "world", "video", "topics"] | str = Field(description=(
+        "world: foreign sources; video: summaries of videos worth watching (Russian channels' videos are marked as "
+        "claims); topics: today's news on the topics "
+        "the user follows (sections per topic), shown first"))
     side_note: str | None = None
     digest_id: str
     created_at: str
@@ -135,6 +140,8 @@ class ProposalAnswer(MemoryOut):
 
 class DigestResult(MemoryOut):
     date: str | None = Field(description="Kyiv date of the digests (YYYY-MM-DD)")
+    period: Literal["day", "week"] = Field("day", description=(
+        "day: the daily digests; week: the weekly ones (each digest's period_start / period_end is its week)"))
     proposals: list[ProposalOut] = Field(default_factory=list, description=(
         "The system's suggestions for the user (goals it noticed, topics to follow, advice on what changed). In the "
         "widget they show as cards with Так / Не цікаво buttons; otherwise mention them in one line each and, on "
@@ -329,7 +336,7 @@ class TopicSaved(MemoryOut):
 class AnalysisItem(BaseModel):
     id: str = Field(description="digest_id/n of the item")
     date: str
-    side: Literal["ua", "ru", "world", "topics"] | str
+    side: Literal["ua", "ru", "world", "video", "topics"] | str
     is_russian_source_claim: bool
     category: str
     text: str

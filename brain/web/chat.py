@@ -3,7 +3,8 @@
 One user message is one turn:
 1. the earlier messages of this chat come back from `conversations` (the last WEB_CHAT_HISTORY, text only);
 2. the user's message is logged as it is (role "user", via "chat");
-3. rounds: the model is called through the Anthropic backend (gated by sensitivity, every round in audit_log),
+3. rounds: the model is called through the chat's backend, Anthropic or OpenAI(-compatible) as WEB_CHAT_PROVIDER says
+   (gated by sensitivity, every round in audit_log; the OpenAI one translates to and from the Anthropic shape),
    streaming its text out; the tools it asks for run in-process through the same handlers as Claude's connector
    (brain/tools), each logged as a role "tool" message linked to the user's message; at most WEB_CHAT_MAX_ROUNDS;
 4. the whole reply is logged (role "assistant", with the model, tokens, rounds, tools, latency, stop reason), also
@@ -42,7 +43,7 @@ from brain.audit.conversations import CallRecord, Said
 from brain.db.repositories import user_key
 from brain.domain import insights as insights_domain
 from brain.domain.identity import UserContext
-from brain.integrations.backends import AnthropicBackend
+from brain.integrations.backends import AnthropicBackend, OpenAIBackend
 from brain.tools import catalog
 from brain.tools.base import Origin, Services
 from brain.tools.catalog import ToolSpec
@@ -311,8 +312,8 @@ def web_description(spec: ToolSpec) -> str:
 
 
 class Chat:
-    def __init__(self, svc: Services, specs: dict[str, ToolSpec], backend: AnthropicBackend, client: dict,
-                 research: AnthropicBackend | None = None):
+    def __init__(self, svc: Services, specs: dict[str, ToolSpec], backend: AnthropicBackend | OpenAIBackend,
+                 client: dict, research: AnthropicBackend | OpenAIBackend | None = None):
         """research: the backend web_research searches with (none: the chat can't search the web)."""
         self.svc, self.specs, self.backend, self.client, self.research = svc, specs, backend, client, research
         self.tools: list[dict] = [{"name": spec.name, "description": web_description(spec),

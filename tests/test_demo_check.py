@@ -58,7 +58,7 @@ def test_all_checks_pass_on_a_healthy_pair(apps, capsys):
     transport = ByHost(apps)
     assert demo_check.main(["--web", WEB, "--mcp", MCP], transport=transport) == 0
     out = capsys.readouterr().out
-    assert "FAIL" not in out and out.count("ok  ") == 8 and "8 of 8 ok" in out
+    assert "FAIL" not in out and out.count("ok  ") == 9 and "9 of 9 ok" in out
     assert {m for m, _ in transport.seen} == {"GET", "POST"}
     assert [u for m, u in transport.seen if m == "POST"] == [f"{MCP}/mcp"]          # the one unauthenticated call
 
@@ -69,7 +69,7 @@ def test_a_missing_screen_and_a_wrong_mcp_url_fail_with_exit_1(apps, capsys, mon
     assert demo_check.main(["--web", WEB, "--mcp", "http://127.0.0.1:8766"], transport=ByHost(apps)) == 1
     out = capsys.readouterr().out
     assert "FAIL web: the UI and its screens: no screen nowhere" in out
-    assert "FAIL mcp: the OAuth metadata names the MCP URL" in out and "6 of 8 ok, 2 failed" in out
+    assert "FAIL mcp: the OAuth metadata names the MCP URL" in out and "7 of 9 ok, 2 failed" in out
 
 
 def test_an_unreachable_service_is_a_failure_not_a_crash(capsys):

@@ -345,6 +345,6 @@ class WebScout:
 
 
 def web_scout(db: AsyncDatabase, settings, runtime: Runtime) -> WebScout | None:
-    """The web scout (always the anthropic backend: only it can search)."""
+    """The web scout (a cloud backend: it searches the web; see common.backend_settings)."""
     return WebScout(db, common.backend_for(db, settings, AGENT), runtime, timedelta(hours=settings.scout_web_every_hours),
                     searches_per_day=settings.scout_web_searches_per_day, max_areas=settings.scout_web_areas)

@@ -4,9 +4,12 @@ the agents serve, and the context an agent acts in for a user.
 Backend and model per agent, the first one set:
 - backend: the agent's own (LEARNING_BACKEND for the learner, SCOUT_BACKEND for the scout and the advisor), else
   AGENT_BACKEND, else LEARNING_BACKEND (what the scout and the advisor used before AGENT_BACKEND), else
-  MODEL_BACKEND. The web scout is always anthropic (only it can search).
-- model (anthropic): the agent's own (LEARNING_MODEL, SCOUT_MODEL, SCOUT_WEB_MODEL, ADVISOR_MODEL; the web scout
-  and the advisor fall back to SCOUT_MODEL), else AGENT_MODEL, else ANTHROPIC_MODEL.
+  MODEL_PROVIDER, else MODEL_BACKEND. A cloud backend ("anthropic" or "openai") is MODEL_PROVIDER's when that is set,
+  so the one switch moves every agent. The web scout always runs on a cloud one (it searches the web): MODEL_PROVIDER,
+  else anthropic.
+- model: the agent's own (LEARNING_MODEL, SCOUT_MODEL, SCOUT_WEB_MODEL, ADVISOR_MODEL; the web scout and the advisor
+  fall back to SCOUT_MODEL), else AGENT_MODEL, else the provider's (ANTHROPIC_MODEL, OPENAI_MODEL). A Claude name on
+  OpenAI (LEARNING_MODEL's default is one) is left out there: OPENAI_MODEL is used.
 """
 from __future__ import annotations
 
@@ -35,13 +38,19 @@ AGENT_SETTINGS = {
 
 
 def backend_settings(settings, agent: str):
-    """The settings with model_backend / anthropic_model set as this agent's (see the module docstring)."""
+    """The settings with model_backend and the provider's model set as this agent's (see the module docstring)."""
     own_backend, own_models = AGENT_SETTINGS[agent]
-    backend = "anthropic" if own_backend is None else (
+    named = "anthropic" if own_backend is None else (
         getattr(settings, own_backend) or settings.agent_backend or settings.learning_backend
-        or settings.model_backend)
+        or settings.model_provider or settings.model_backend)
+    backend = named if named == "local" else (settings.model_provider or named)
     model = next((m for m in (getattr(settings, n) for n in own_models) if m), None) or settings.agent_model
-    update = {"model_backend": backend, **({"anthropic_model": model} if model else {})}
+    update: dict = {"model_backend": backend}
+    if backend == "openai":
+        if model and not model.startswith("claude"):
+            update["openai_model"] = model
+    elif model:
+        update["anthropic_model"] = model
     return settings.model_copy(update=update)
 
 

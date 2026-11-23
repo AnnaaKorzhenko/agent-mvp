@@ -30,6 +30,22 @@ class SourceDoc(_Doc):
     category: str | None = None
 
 
+def _seconds(v):
+    """A length in whole seconds; anything else (a float, a string, a bad value) never breaks the post."""
+    try:
+        return round(float(v)) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+class VideoDoc(_Doc):
+    """A video post's `video` (YouTube or Rutube; the pipeline keeps more: handle, channel id, how it was found)."""
+    video_id: str | None = None
+    channel: str | None = None
+    duration_sec: Annotated[int | None, BeforeValidator(_seconds)] = None
+    is_short: bool = False
+
+
 class PostDoc(_Doc):
     """The pipeline also keeps the post's own text (`clean_text`, else `raw_text`) until cleanup.py strips it after
     MAX_DAYS (then `text_removed: true`). Not a field here: only get_post(full_text=True) reads it, for `ru` posts
@@ -48,11 +64,13 @@ class PostDoc(_Doc):
     is_duplicate: bool = False
     views: int | None = None
     sensitivity: str = "internal"
+    video: VideoDoc | None = None        # videos only (platform "youtube" or "rutube")
 
 
 class DigestItemDoc(_Doc):
     n: int | None = None
     text: str
+    title: str | None = None             # the video's title (items of the video side)
     source_urls: Annotated[list[str], BeforeValidator(_as_list)] = []
     source_post_ids: Annotated[list[Id], BeforeValidator(_as_list)] = []
 

@@ -1,20 +1,18 @@
-// Data Digest — фронтенд без збірки (vanilla JS).
-
 const state = {
   screen: 'chat',
   chat: { id: null, title: 'Новий чат', messages: [], loading: false },
   // digest: { side: 'both', data: null, loading: false, error: '' },
-  digest: { side: 'both', unseen: false, data: null, loading: false, error: '', jump: null, jumpNote: '' },
+  digest: { side: 'both', unseen: false, week: false, data: null, loading: false, error: '', jump: null, jumpNote: '' },
   search: { q: '', side: 'all', days: 7, items: [], note: '', error: '', loading: false },
   proposals: { items: [], loading: false, error: '', answered: {}, reasonFor: null },
   profile: null,
   profileNote: '',
-  push: { checked: false, key: null, on: false, busy: false, note: '' },   // сповіщення в цьому браузері
+  push: { checked: false, key: null, on: false, busy: false, note: '' },
   agents: { days: 7, data: null, error: '', note: '' },
-  ratings: {},         // що оцінено -> useful | not_useful
+  ratings: {},
   rateError: {},
-  fullText: {},        // повний текст російських постів: id через кому -> { open, loading, posts, error }
-  commentFor: null,     // після «Не корисно»: де показати поле «Чому?»
+  fullText: {},
+  commentFor: null,
   companies: { q: '', country: '', sector: '', items: [], total: 0, countries: [], sectors: [], loading: false, error: '' },
 };
 
@@ -26,7 +24,7 @@ const ICON_BOT = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" st
 const ICON_SEARCH = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>';
 
 
-// ---------- Навігація ----------
+
 function go(screen) {
   state.screen = screen;
   if (screen === 'profile') state.profileNote = '';
@@ -110,7 +108,7 @@ async function onComment(key, text) {
   catch (e) { state.rateError[key] = 'Коментар не зберігся: ' + e.message; repaintRate(key); }
 }
 
-// ---------- Нещодавні чати ----------
+
 let recentChats = [];
 
 function renderRecent() {
@@ -126,7 +124,7 @@ async function loadRecent() {
   renderRecent();
 }
 
-// ---------- Чат ----------
+
 const TOOL_LABEL = {
   search_posts: 'Шукаю в постах…', get_digest: 'Відкриваю дайджест…', get_morning_digest: 'Відкриваю ранковий дайджест…',
   get_post: 'Читаю пост…', get_profile: 'Дивлюсь ваш профіль…', get_insights: 'Згадую, що знаю про вас…',
@@ -137,7 +135,7 @@ const TOOL_LABEL = {
 };
 const ICON_STOP = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
 
-// Невеликий безпечний markdown: спершу екрануємо все, потім — посилання (лише http/https), жирний, курсив, списки, заголовки.
+
 function inline(s) {
   return s
     .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
@@ -256,7 +254,7 @@ function renderChat() {
     </div>`;
 }
 
-// Під час відповіді оновлюємо лише останнє повідомлення, щоб не перемальовувати весь екран на кожен шматок тексту.
+
 function paintLast() {
   const last = state.chat.messages[state.chat.messages.length - 1];
   const el = $main.querySelector('.thread .msg-bot:last-child');
@@ -344,9 +342,6 @@ async function openChat(id) {
   if (state.screen === 'chat') render();
 }
 
-// ---------- Повний текст російських постів ----------
-// Посилання на російські канали в Україні не відкриваються, тож текст поста показуємо тут, згорнутим під карткою.
-// key: id постів через кому (у пункті дайджесту їх може бути кілька); { open, loading, posts, error }.
 const FULL_TEXT_MAX = 3;
 const RU_CLAIM_NOTE = 'Заява російського каналу, не перевірений факт.';
 
@@ -391,13 +386,12 @@ async function toggleFullText(key) {
   repaintFullText(key);
 }
 
-// ---------- Дайджести ----------
-const SIDES = [['both', 'Усе'], ['ua', 'Українські джерела'], ['ru', 'Російські джерела'], ['world', 'Світові джерела'], ['topics', 'Ваші теми й інтереси']];
-const SIDE_LABEL = { ua: 'Українські джерела', ru: 'Російські джерела', world: 'Світові джерела', topics: 'Ваші теми й інтереси' };
-const SIDE_NOTE = { ru: 'Заяви російських каналів, а не перевірені факти.' };
-// Емодзі з назв розділів пайплайна: на ноутбуці директора вони сірі квадрати
-const noEmoji = (s) => String(s || '').replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, '').trim();
-// Розділ про інвестиції впізнаємо за category або назвою: на нього веде кнопка зі сторінки «Інвестиції».
+const SIDES = [['both', 'Усе'], ['ua', 'Українські джерела'], ['ru', 'Російські джерела'], ['world', 'Світові джерела'], ['video', 'Відео'], ['topics', 'Ваші теми й інтереси']];
+const SIDE_LABEL = { ua: 'Українські джерела', ru: 'Російські джерела', world: 'Світові джерела', video: 'Відео, які можуть зацікавити', topics: 'Ваші теми й інтереси' };
+const SIDE_NOTE = { ru: 'Заяви російських каналів, а не перевірені факти.', video: 'Короткий зміст кожного відео; відео російських каналів — їхні заяви, а не факти.' };
+
+const noEmoji = (s) => String(s || '').replace(/[\p{Extended_Pictographic}\p{Regional_Indicator}\u{FE0F}\u{200D}]/gu, '').trim();
+
 const INVEST_RE = /invest|інвест|фінанс|funding/i;
 const isInvest = (s) => INVEST_RE.test(s.category || '') || INVEST_RE.test(s.title || '');
 
@@ -405,12 +399,45 @@ function host(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); } catch (e) { return 'джерело'; }
 }
 
-// Джерело-відео (YouTube) підписуємо як відео, а не просто доменом
 const isVideo = (u) => /^(m\.|music\.)?(youtube\.com|youtu\.be)$/.test(host(u));
+
+function videoId(u) {
+  try {
+    const url = new URL(u);
+    if (!isVideo(u)) return '';
+    const id = url.hostname.endsWith('youtu.be') ? url.pathname.slice(1)
+      : url.searchParams.get('v') || (url.pathname.match(/^\/(?:shorts|embed|live)\/([^/]+)/) || [])[1] || '';
+    return /^[\w-]{6,20}$/.test(id) ? id : '';
+  } catch (e) { return ''; }
+}
+
+function durationText(sec) {
+  if (!sec) return '';
+  const m = Math.floor(sec / 60), s = String(sec % 60).padStart(2, '0');
+  return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}:${s}` : `${m}:${s}`;
+}
+
+
+function videoHeadHtml(it) {
+  const url = (it.source_urls || []).find(isVideo) || '';
+  const id = videoId(url);
+  const meta = [it.channel, id ? '' : durationText(it.duration_sec)].filter(Boolean).map(esc).join(' · ');   // тривалість уже на обкладинці
+  const thumb = id ? `<a class="video-thumb" href="${esc(url)}" target="_blank" rel="noopener noreferrer" aria-label="Дивитися на YouTube">
+        <img src="https://i.ytimg.com/vi/${esc(id)}/mqdefault.jpg" alt="" loading="lazy" referrerpolicy="no-referrer">
+        ${it.duration_sec ? `<span class="video-time">${esc(durationText(it.duration_sec))}</span>` : ''}
+      </a>` : '';
+  return `${thumb}
+      <div class="video-head">
+        ${it.title ? `<h2>${esc(it.title)}</h2>` : ''}
+        ${meta ? `<span class="sub">${meta}</span>` : ''}
+      </div>`;
+}
+
+const isRutube = (u) => /(^|\.)rutube\.ru$/.test(host(u));
 
 function sourcesHtml(urls) {
   return (urls || []).slice(0, 6).map((u) =>
-    `<a class="source" href="${esc(u)}" target="_blank" rel="noopener noreferrer">${isVideo(u) ? '▶ YouTube' : esc(host(u))}</a>`).join('');
+    `<a class="source" href="${esc(u)}" target="_blank" rel="noopener noreferrer">${isVideo(u) ? '▶ YouTube' : isRutube(u) ? '▶ Rutube' : esc(host(u))}</a>`).join('');
 }
 
 function whyHtml(why) {
@@ -418,8 +445,9 @@ function whyHtml(why) {
 }
 
 function itemHtml(it, side, digestId) {
-  // «Пояснити»: з бази новин, без інтернету (дешево); «Глибше»: повне дослідження з пошуком в інтернеті.
-  const about = it.text.slice(0, 160);
+
+  const video = side === 'video' || !!it.title;
+  const about = ((it.title ? it.title + ': ' : '') + it.text).slice(0, 160);
   const item = digestId ? esc(JSON.stringify({ digest_id: digestId, item_n: it.n })) : '';
   return `
     <article class="story">
@@ -428,6 +456,7 @@ function itemHtml(it, side, digestId) {
         ${it.is_russian_source_claim ? '<span class="tag high">Заява російських каналів</span>' : ''}
         ${whyHtml(it.why)}
       </div>
+      ${video ? `<div class="video">${videoHeadHtml(it)}</div>` : ''}
       <p>${esc(it.text)}</p>
       <div class="story-foot">
         <div class="row">${sourcesHtml(it.source_urls)}</div>
@@ -436,7 +465,7 @@ function itemHtml(it, side, digestId) {
           <button class="btn-text" data-ask="${esc('Глибше про #' + it.ref + ': ' + about)}" data-item="${item}">Глибше, з інтернетом</button>
         </div>
       </div>
-      ${side === 'ru' || it.is_russian_source_claim ? fullTextHtml(it.source_post_ids) : ''}
+      ${!video && (side === 'ru' || it.is_russian_source_claim) ? fullTextHtml(it.source_post_ids) : ''}
       ${digestId ? rateHtml(`d:${digestId}/${it.n}`, 'news', { target_type: 'digest_item', digest_id: digestId, item_n: it.n }) : ''}
     </article>`;
 }
@@ -456,7 +485,21 @@ function digestHtml(data) {
   const n = (data.proposals || []).length;
   const offer = n ? `<button class="notice" data-go="proposals">Система має для вас пропозицій: ${n}. Переглянути</button>` : '';
   if (data.proposals) setBadge(n);
-  return offer + notes + (blocks || '<p class="sub">Дайджесту за цей день немає.</p>');
+  const empty = data.period === 'week' ? 'Тижневого дайджесту ще немає.' : 'Дайджесту за цей день немає.';
+  return offer + notes + (blocks || `<p class="sub">${empty}</p>`);
+}
+
+// The weekly digest's week, e.g. «16.11–23.11», from its period_start / period_end
+function weekText(data) {
+  const d = (data?.digests || []).find((x) => x.period_start && x.period_end);
+  if (!d) return '';
+  const day = (iso) => new Date(iso).toLocaleDateString('uk-UA', { day: '2-digit', month: '2-digit', timeZone: 'Europe/Kyiv' });
+  return `${day(d.period_start)}–${day(d.period_end)}`;
+}
+
+function digestSubtitle(data) {
+  if (data?.period === 'week') return 'Тиждень' + (weekText(data) ? ' ' + weekText(data) : '') + ' · ';
+  return data?.date ? data.date + ' · ' : '';
 }
 
 function renderDigests() {
@@ -468,12 +511,13 @@ function renderDigests() {
       <div class="head-row">
         <div>
           <h1 class="h1">Дайджест</h1>
-          <span class="sub">${d.data?.date ? esc(d.data.date) + ' · ' : ''}упорядковано за вашими цілями та інтересами</span>
+          <span class="sub">${esc(digestSubtitle(d.data))}упорядковано за вашими цілями та інтересами</span>
         </div>
       </div>
       <div class="row">
         <div class="segmented" role="group" aria-label="Джерела">${seg}</div>
         <button class="chip ${d.unseen ? 'on' : ''}" role="switch" aria-checked="${d.unseen}" data-unseen-digest="${d.unseen ? '0' : '1'}">Лише нове за сьогодні</button>
+        <button class="chip ${d.week ? 'on' : ''}" role="switch" aria-checked="${d.week}" data-week-digest="${d.week ? '0' : '1'}">За тиждень</button>
       </div>
       ${d.loading ? '<p class="sub">Завантаження…</p>' : d.error ? `<p class="sub">${esc(d.error)}</p>` : digestHtml(d.data)}
     </div></div>`;
@@ -484,7 +528,7 @@ async function loadDigest() {
   state.digest.error = '';
   if (state.screen === 'digests') render();
   try {
-    state.digest.data = await api.getDigest(state.digest.side, null, state.digest.unseen);
+    state.digest.data = await api.getDigest(state.digest.side, null, state.digest.unseen, state.digest.week ? 'week' : 'day');
     (state.digest.data.digests || []).forEach((d) => (d.sections || []).forEach((sec) => (sec.items || []).forEach((it) => {
       if (it.my_reaction) state.ratings[`d:${d.digest_id}/${it.n}`] = it.my_reaction;
     })));
@@ -578,7 +622,7 @@ function onSearchInput(value) {
   searchTimer = setTimeout(loadSearch, 350);
 }
 
-// ---------- Пропозиції ----------
+
 const KIND_LABEL = { goal: 'Ціль', topic: 'Тема', advice: 'Порада' };
 
 function setBadge(n) {
@@ -663,7 +707,7 @@ async function answerProposal(id, answer, reason) {
   if (state.screen === 'proposals') render();
 }
 
-// ---------- Профіль ----------
+
 const ABOUT_LABEL = {
   summary: 'Коротко про вас', interest: 'Інтереси', intent: 'Над чим ви зараз працюєте', preference: 'Як ви хочете отримувати новини',
   goal: 'Цілі, які ви згадували', tracked: 'Що ви відстежуєте', known: 'Що ви вже знаєте', avoid: 'Чого уникати',
@@ -759,8 +803,7 @@ function renderProfile() {
     </div></div>`;
 }
 
-// ---------- Сповіщення про ранковий дайджест (Web Push) ----------
-// Підписка належить браузеру: у кожному браузері її вмикають окремо, сервер лише зберігає адресу.
+
 const PUSH_SUPPORTED = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 
 function pushHtml() {
@@ -836,7 +879,7 @@ async function loadProfile() {
   if (state.screen === 'profile') render();
 }
 
-// Дія в профілі: виконати, показати підтвердження, перечитати профіль.
+
 async function profileAction(run, note) {
   state.profileNote = 'Зберігаю…';
   render();
@@ -852,18 +895,111 @@ function correctedNote(r) {
 }
 
 
-// ---------- Інвестиції: карта (згортається) + дайджест по інвестиціях ----------
 
 const MAP_SRC = 'https://defense-valley.news/embed/map/';
 let mapOpen = true;
-try { mapOpen = localStorage.getItem('mapOpen') !== '0'; } catch (e) { /* без сховища: карта розгорнута */ }
+try { mapOpen = localStorage.getItem('mapOpen') !== '0'; } catch (e) {  }
+
+const MM_SECTORS = {
+  'space-isr': ['Космос і розвідка', 'Space & ISR', 1], 'autonomy-ai': ['ШІ та автономія', 'Autonomy & AI', 2],
+  'counter-drone': ['Протидія дронам', 'Counter-drone', 3], 'maritime': ['Морські системи', 'Maritime', 4],
+  'drones': ['Дрони', 'Drones', 5], 'electronic-warfare': ['РЕБ', 'Electronic warfare', 6],
+  'cyber': ['Кібербезпека', 'Cyber', 7], 'loitering-munitions': ['Баражуючі боєприпаси', 'Loitering munitions', 8],
+  'hypersonics-propulsion': ['Гіперзвук і рушії', 'Hypersonics & propulsion', 9], 'materials': ['Матеріали', 'Advanced materials', 10],
+  'ground-robotics': ['Наземні роботи (НРК)', 'Ground robotics', 11], 'training-simulation': ['Навчання й симуляція', 'Training & simulation', 12],
+  'c4isr': ['Командування, зв’язок, розвідка', 'C4ISR', 13], 'weapons': ['Озброєння й системи захисту', 'Weapons & defence systems', 14],
+  'quantum': ['Квантові технології', 'Quantum', 15], 'energy': ['Енергетика й інфраструктура', 'Energy & infrastructure', 16],
+  'semiconductors': ['Напівпровідники', 'Semiconductors', 17], 'robotics': ['Робототехніка', 'Robotics', 18],
+  'humanoids': ['Гуманоїдні роботи', 'Humanoids', 2], 'robot-ai': ['ШІ для роботів', 'Robot intelligence', 15],
+  'cobots': ['Колаборативні роботи', 'Collaborative robotics', 4], 'legged': ['Чотириногі роботи', 'Legged robots', 11],
+  'robot-training': ['Навчання й симуляція роботів', 'Robot training', 12], 'soft-robotics': ['М’яка робототехніка', 'Soft robotics', 8],
+  'prosthetics': ['Біонічні протези', 'Prosthetics', 3], 'robot-hardware': ['Сенсори й компоненти роботів', 'Robot hardware', 13],
+  'exoskeletons': ['Екзоскелети', 'Exoskeletons', 6], 'construction': ['Будівельні роботи', 'Construction robotics', 10],
+};
+const MM_STAGES = [['preseed', 'Pre-seed'], ['seed', 'Seed'], ['a', 'Series A'], ['b', 'Series B'], ['c', 'Series C+ / growth'],
+  ['grant', 'Гранти, EIC'], ['other', 'Інше: борг, частки'], ['nd', 'Невідомо']];
+const MM_USE = { def: 'Оборонна', dual: 'Подвійного призначення', civ: 'Цивільна' };
+const MM_USE_SHORT = { dual: 'подв.', civ: 'цив.' };
+const MM_MAPS = { def: 'Оборонтех', rob: 'Нова робототехніка' };
+const MM_MON = { Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6, Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12 };
+const MM_MON_UA = ['січ', 'лют', 'бер', 'квіт', 'трав', 'черв', 'лип', 'серп', 'вер', 'жовт', 'лист', 'груд'];
+const MM_RATE = { '€': 1, '$': 0.86, '£': 1.15 };       // лише для сортування за сумою
+const MM_PAGE = 60;                                     // стільки дозволяє /api/companies (limit ≤ 60)
+
+// Призначення, якщо в базі його ще немає: за словами в описі (див. скрипт import_dealroom.py — там те саме)
+const MM_DEF = /defen[cs]e|military|armed forces|army|navy|naval|battlefield|warfare|munition|weapon|missile|c-uas|counter[- ]?(drone|uas)|intercept|\bisr\b|surveillance|reconnaissance|nato|\bmod\b|\bdod\b|tactical|combat|national security|border|soldier|police|ballistic|jamming|command and control|targeting|loitering/i;
+const MM_CIV = /commercial|civil|industrial|enterprise|consumer|offshore|energy|agricultur|logistics|warehouse|retail|medical|health|amputee|construction|food|culinary|entertainment|automotive|home/i;
+const MM_STRONG = /intercept|munition|battlefield|armed forces|military vehicle|weapon|missile|c-uas|counter[- ]?(drone|uas)|loitering|electronic warfare|jamming|combat|soldier|ministry of defence|front ?line|strike/i;
+
+function mmAmount(s) {
+  const m = /([€$£])\s?([\d.,]+)\s*([KMB])?/.exec(s || '');
+  if (!m) return null;
+  const v = parseFloat(m[2].replace(/,/g, '')) * ({ K: 1e-3, M: 1, B: 1e3 }[m[3]] ?? 1e-6);
+  return v * MM_RATE[m[1]];
+}
+function mmStageGroup(st) {
+  const l = String(st || '').toLowerCase();
+  if (!l || l === 'n/d') return 'nd';
+  if (l.includes('pre-seed')) return 'preseed';
+  if (l.includes('pre-series a') || l.includes('seed')) return 'seed';
+  if (l.includes('series a')) return 'a';
+  if (l.includes('series b')) return 'b';
+  if (/series [c-z]|pre-ipo|growth/.test(l)) return 'c';
+  if (l.includes('grant') || l.includes('eic')) return 'grant';
+  return 'other';
+}
+function mmUse(c, text) {
+  if (c.use && MM_USE[c.use]) return c.use;
+  const dk = MM_DEF.test(text), ck = MM_CIV.test(text);
+  if (MM_STRONG.test(text)) return 'def';
+  if (c.maps && !c.maps.includes('def')) return dk ? 'dual' : 'civ';
+  return dk && !ck ? 'def' : (dk || ck || c.origin?.includes('dealroom')) ? 'dual' : 'def';
+}
+
+// Документ з бази → поля для мапи. Розуміє формат europedefencetech і додаткові поля з Dealroom.
+function mmNorm(c, countryLabels) {
+  const facts = c.facts || {};
+  const secName = facts.sector || '';
+  const meta = String(c.card_metadata || '');
+  const rest = secName && meta.startsWith(secName) ? meta.slice(secName.length).trim() : meta;
+  const [stageRaw, dateRaw = ''] = rest.split(' / ');
+  const stage = (stageRaw || String(c.stage || '').split(' / ')[0] || '').trim();   // сервер дає stage разом з датою
+  const summary = String((c.funding?.summary || [])[0] || '');
+  const fm = /Latest round (.*?) Total raised (.*)$/.exec(summary);
+  const latest = fm ? (/^[~≥>]?[€$£][\d.,]+\s*[KMB]?/.exec(fm[1]) || [''])[0] : '';
+  const total = (fm ? (/^[~≥>]?[€$£][\d.,\-–]+\s*[KMB]?/.exec(fm[2]) || [''])[0] : '') || c.dealroom_funding || '';
+  const why = (c.funding?.details || []).filter((d) => /^why/i.test(d.heading || '')).flatMap((d) => d.content || []).join(' ');
+  const dm = /(?:\d{1,2} )?([A-Z][a-z]{2}) (\d{4})/.exec(dateRaw);
+  const date = dm ? new Date(+dm[2], MM_MON[dm[1]] - 1, 15) : null;
+  const text = [c.description, why].join(' ');
+  const words = String(c.name || '?').replace(/[^\p{L}\p{N} ]/gu, ' ').trim().split(/\s+/);
+  return {
+    raw: c, name: c.name || '?', id: c.slug || c.name, desc: c.description || '', loc: c.location || facts.hq || '',
+    country: c.country || '', countryLabel: countryLabels[c.country] || String(c.country || '').replace(/-/g, ' '),
+    sector: c.sector || 'other', sectorLabel: (MM_SECTORS[c.sector] || [c.sector_label || c.sector || 'Інше'])[0],
+    stage: stage || 'n/d', sg: mmStageGroup(stage), dateText: dateRaw, date,
+    when: date ? `${MM_MON_UA[date.getMonth()]} ${date.getFullYear()}` : '',
+    fresh: date ? (Date.now() - date) / 864e5 <= 183 : false,
+    latest, latestEur: mmAmount(latest), total, totalEur: mmAmount(total),
+    founded: facts.founded || '', investors: facts.investors || '', website: c.website || facts.website || '',
+    why, conf: c.verification?.confidence || '', sources: c.sources || [], profile: c.profile_url || '',
+    hot: !!c.hot, signal: c.signal ?? c.dealroom_signal ?? null, drSegment: c.dealroom_segment || '',
+    maps: c.maps || ['def'], use: mmUse(c, text),
+    mg: (words.length > 1 ? words[0][0] + words[1][0] : String(c.name || '?').slice(0, 2)).toUpperCase(),
+    hay: [c.name, c.description, facts.investors, c.location, why].join(' ').toLowerCase(),
+  };
+}
+
+const mm = { all: [], loaded: false, view: 'map', sort: 'recent', map: '', use: '', hot: false, fresh: false,
+  stages: new Set(), open: null };
+try { const v = localStorage.getItem('mmView'); if (v === 'map' || v === 'table') mm.view = v; } catch (e) { /* не критично */ }
 
 function renderMap() {
   return `
-    <div class="page"><div class="page-inner">
+    <div class="page"><div class="page-inner wide">
       <div style="display:flex;flex-direction:column;gap:6px">
         <h1 class="h1">Інвестиції в мілтех</h1>
-                <span class="sub">Карта європейського фінансування оборонних стартапів.</span>
+        <span class="sub">Карта європейського фінансування оборонних стартапів і мапа компаній за сегментами.</span>
       </div>
 
       <details class="card fold" id="map-fold" ${mapOpen ? 'open' : ''}>
@@ -886,74 +1022,135 @@ function renderMap() {
     </div></div>`;
 }
 
-const COMPANIES_PAGE = 24;
-const safeUrl = (u) => {
-  const v = String(u || '').trim();
-  if (!v) return '';
-  if (/^https?:\/\//i.test(v)) return v;
-  return /^[\w.-]+\.[a-z]{2,}(\/|$)/i.test(v) ? 'https://' + v : '';   // «fieldmade.com» → https://fieldmade.com
-};
+function mmFiltered() {
+  const s = state.companies, q = s.q.trim().toLowerCase();
+  return mm.all.filter((c) => (!q || c.hay.includes(q)) && (!s.country || c.country === s.country)
+    && (!s.sector || c.sector === s.sector) && (!mm.map || c.maps.includes(mm.map)) && (!mm.use || c.use === mm.use)
+    && (!mm.hot || c.hot) && (!mm.fresh || c.fresh) && (!mm.stages.size || mm.stages.has(c.sg)));
+}
+function mmSorter(a, b) {
+  const by = { name: 0, amount: 'latestEur', total: 'totalEur', signal: 'signal' }[mm.sort];
+  if (by === 0) return a.name.localeCompare(b.name);
+  if (by) return (b[by] ?? -1) - (a[by] ?? -1) || a.name.localeCompare(b.name);
+  return (b.date ? +b.date : 0) - (a.date ? +a.date : 0) || a.name.localeCompare(b.name);
+}
+const mmColor = (sec) => `var(--mm-s${(MM_SECTORS[sec] || [0, 0, 7])[2]})`;
+const mmMeta = (c) => [c.sg === 'nd' ? '' : c.stage, c.latest].filter(Boolean).join(' · ') || (c.total ? `усього ${c.total}` : 'раунд невідомий');
+const mmHas = (key) => mm.all.some((c) => key(c));
 
-function companyHtml(c) {
-  // Клік по картці: сайт компанії в новій вкладці; без сайту — її профіль на europedefencetech.com
-  const href = safeUrl(c.website || c.facts?.website) || safeUrl(c.profile_url);
-  const tag = href ? 'a' : 'div';
-  return `
-    <${tag} class="company" ${href ? `href="${esc(href)}" target="_blank" rel="noopener noreferrer" title="${esc(href)}"` : ''}>
-      <div class="company-head">
-        <div class="company-logo" aria-hidden="true">${esc(String(c.name || '?').trim().charAt(0).toUpperCase())}</div>
-        <h3>${esc(c.name)}</h3>
-      </div>
-      ${c.description ? `<p>${esc(c.description)}</p>` : ''}
-      <div class="company-foot">
-        <span>${esc(c.sector_label || '')}</span>
-        <span>${esc(c.stage || '')}</span>
-      </div>
-    </${tag}>`;
+function mmKpisHtml(list) {
+  const n = (f) => list.filter(f).length;
+  const kpis = [[list.length, 'компаній'], [new Set(list.map((c) => c.country)).size, 'країн'],
+    [new Set(list.map((c) => c.sector)).size, 'сегментів']];
+  if (mmHas((c) => c.hot)) kpis.push([n((c) => c.hot), '🔥 гарячих']);
+  kpis.push([n((c) => c.use === 'def'), 'оборонних'], [n((c) => c.use === 'dual'), 'подвійного призн.'],
+    [n((c) => c.use === 'civ'), 'цивільних'], [n((c) => c.fresh), 'раундів за 6 міс.']);
+  return kpis.map(([v, l]) => `<div class="mm-kpi"><b>${v}</b><span>${l}</span></div>`).join('');
+}
+function mmMixHtml(list) {
+  const cnt = Object.fromEntries(MM_STAGES.map(([k]) => [k, 0]));
+  list.forEach((c) => cnt[c.sg]++);
+  const tot = list.length || 1;
+  const bar = MM_STAGES.filter(([k]) => cnt[k]).map(([k, l]) =>
+    `<i style="width:${cnt[k] / tot * 100}%;background:var(--mm-g-${k})" title="${esc(l)}: ${cnt[k]}"></i>`).join('');
+  const legend = MM_STAGES.map(([k, l]) => {
+    const on = mm.stages.has(k), off = mm.stages.size && !on;
+    return `<button class="mm-leg ${off ? 'off' : ''}" data-mm-stage="${k}" aria-pressed="${on}"><span class="mm-sw" style="background:var(--mm-g-${k})"></span>${esc(l)} <b>${cnt[k]}</b></button>`;
+  }).join('');
+  return `<div class="mm-bar">${bar}</div><div class="mm-legend">${legend}</div>`;
+}
+function mmTile(c) {
+  return `<button class="mm-tile ${c.use}" data-mm-company="${esc(c.id)}" style="--sc:${mmColor(c.sector)}" title="${esc(c.name)} — ${esc(c.desc)}">
+    <span class="mm-mg" aria-hidden="true">${esc(c.mg)}</span>${c.fresh ? '<span class="mm-dot" aria-label="свіжий раунд"></span>' : ''}
+    <span class="mm-t"><span class="mm-nm">${MM_USE_SHORT[c.use] ? `<span class="mm-use">${MM_USE_SHORT[c.use]}</span>` : ''}${c.hot ? '🔥 ' : ''}${esc(c.name)}</span>
+    <span class="mm-mt">${esc(mmMeta(c))}</span></span></button>`;
+}
+function mmMapHtml(list) {
+  const groups = {};
+  list.forEach((c) => (groups[c.sector] ||= []).push(c));
+  const order = Object.keys(groups).sort((a, b) => groups[b].length - groups[a].length);
+  return `<div class="mm-grid">${order.map((sec) => {
+    const [ua, en] = MM_SECTORS[sec] || [groups[sec][0].sectorLabel, ''];
+    return `<section class="mm-panel" style="--sc:${mmColor(sec)}">
+      <header><h3>${esc(ua)}</h3><span class="mm-en">${esc(en)}</span><span class="mm-n">${groups[sec].length}</span></header>
+      <div class="mm-tiles">${groups[sec].sort(mmSorter).map(mmTile).join('')}</div></section>`;
+  }).join('')}</div>`;
+}
+function mmTableHtml(list) {
+  const th = (k, l) => `<th><button data-mm-sort="${k}">${l}${mm.sort === k ? ' ↓' : ''}</button></th>`;
+  const rows = list.slice().sort(mmSorter).map((c) => `
+    <tr tabindex="0" data-mm-company="${esc(c.id)}">
+      <td><span class="mm-cname" style="--sc:${mmColor(c.sector)}"><span class="mm-mg" aria-hidden="true">${esc(c.mg)}</span>${c.hot ? '🔥 ' : ''}${esc(c.name)}</span></td>
+      <td>${esc(c.sectorLabel)}<br><span class="note">${esc(MM_USE[c.use])}</span></td><td>${esc(c.countryLabel)}</td>
+      <td><span class="pill">${esc(c.stage)}</span></td><td class="mm-num">${esc(c.latest || '—')}</td>
+      <td class="mm-num">${c.when ? `<span class="pill ${c.fresh ? 'mm-fresh' : ''}">${esc(c.when)}</span>` : '—'}</td>
+      <td class="mm-num">${esc(c.total || '—')}</td></tr>`).join('');
+  return `<div class="mm-tablebox"><table class="mm-table"><thead><tr>${th('name', 'Компанія')}<th>Сегмент</th><th>Країна</th><th>Стадія</th>
+    ${th('amount', 'Останній раунд')}${th('recent', 'Дата')}${th('total', 'Залучено всього')}</tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 function companyFiltersHtml() {
   const s = state.companies;
-  // сервер віддає списки як [{ id, label, count }]: id — для фільтра, label і count — для показу
   const opts = (list, cur, all) => `<option value="">${all}</option>` + list.map((o) =>
     `<option value="${esc(o.id)}" ${o.id === cur ? 'selected' : ''}>${esc(o.label)} (${o.count})</option>`).join('');
+  const sel = (id, label, html) => `<label><span class="filter-label">${label}</span><select id="${id}">${html}</select></label>`;
+  const own = (map, cur, all, count) => `<option value="">${all}</option>` + Object.entries(map).map(([k, l]) =>
+    `<option value="${k}" ${k === cur ? 'selected' : ''}>${esc(l)} (${count(k)})</option>`).join('');
+  const sectors = s.sectors.length ? s.sectors : Object.entries(mm.all.reduce((a, c) => ((a[c.sector] = (a[c.sector] || 0) + 1), a), {}))
+    .map(([id, count]) => ({ id, label: id, count }));
+  const sectorsUa = sectors.map((o) => ({ ...o, label: (MM_SECTORS[o.id] || [o.label])[0] }));
+  const maps = mmHas((c) => c.maps.includes('rob'))
+    ? sel('mm-map', 'Мапа', own(MM_MAPS, mm.map, 'Усі мапи', (k) => mm.all.filter((c) => c.maps.includes(k)).length)) : '';
   return `
-    <label><span class="filter-label">Країна</span>
-      <select id="company-country">${opts(s.countries, s.country, 'Усі країни')}</select></label>
-    <label><span class="filter-label">Категорія</span>
-      <select id="company-sector">${opts(s.sectors, s.sector, 'Усі категорії')}</select></label>`;
+    ${maps}
+    ${sel('company-country', 'Країна', opts(s.countries, s.country, 'Усі країни'))}
+    ${sel('company-sector', 'Сегмент', opts(sectorsUa, s.sector, 'Усі сегменти'))}
+    ${sel('mm-use', 'Призначення', own(MM_USE, mm.use, 'Будь-яке', (k) => mm.all.filter((c) => c.use === k).length))}
+    ${sel('mm-sort', 'Сортування', [['recent', 'Найсвіжіший раунд'], ['amount', 'Найбільший раунд'], ['total', 'Найбільше залучено'],
+      ...(mmHas((c) => c.signal != null) ? [['signal', 'Dealroom Signal']] : []), ['name', 'За назвою']]
+      .map(([k, l]) => `<option value="${k}" ${mm.sort === k ? 'selected' : ''}>${l}</option>`).join(''))}
+    ${mmHas((c) => c.hot) ? `<label class="mm-check"><input type="checkbox" id="mm-hot" ${mm.hot ? 'checked' : ''}> 🔥 Гарячі</label>` : ''}
+    <label class="mm-check"><input type="checkbox" id="mm-fresh" ${mm.fresh ? 'checked' : ''}> Раунд за 6 міс.</label>
+    <div class="segmented small" role="group" aria-label="Вигляд">
+      <button data-mm-view="map" class="${mm.view === 'map' ? 'on' : ''}">Мапа</button><button data-mm-view="table" class="${mm.view === 'table' ? 'on' : ''}">Таблиця</button>
+    </div>`;
 }
 
 function companiesHtml() {
   const s = state.companies;
   if (s.error) return `<p class="sub">${esc(s.error)}</p>`;
-  if (!s.items.length) return `<p class="sub">${s.loading ? 'Завантаження…' : 'Нічого не знайдено. Змініть пошук або фільтри.'}</p>`;
-  const more = s.items.length < s.total
-    ? `<button class="btn-outline companies-more" data-companies-more="1" ${s.loading ? 'disabled' : ''}>${s.loading ? 'Завантаження…' : 'Показати ще'}</button>` : '';
-  return `<div class="company-grid">${s.items.map(companyHtml).join('')}</div>${more}`;
+  if (!mm.loaded) return `<p class="sub">Завантаження…</p>`;
+  const list = mmFiltered();
+  const body = !list.length ? '<p class="sub">Нічого не знайдено. Змініть пошук або фільтри.</p>'
+    : mm.view === 'table' ? mmTableHtml(list) : mmMapHtml(list);
+  return `<div class="mm-kpis">${mmKpisHtml(list)}</div>${mmMixHtml(list)}${body}
+    <p class="note">Позначка <span class="mm-dot-inline"></span> — раунд за останні 6 місяців.
+    ${mmHas((c) => c.hot) ? '🔥 — за Dealroom: Signal понад 80 і залучено менше $40M (рання стадія, швидке зростання). ' : ''}
+    Призначення визначено автоматично за описом компанії і може помилятися. Сортування за сумою приблизне (у євро).</p>`;
 }
 
 function companiesCount() {
-  const s = state.companies;
-  return s.loading && !s.items.length ? '' : `Знайдено компаній: ${s.total}`;
+  if (!mm.loaded) return '';
+  const n = mmFiltered().length;
+  return n === mm.all.length ? `Компаній: ${n}` : `Показано ${n} з ${mm.all.length}`;
 }
 
 function companiesSectionHtml() {
-  const s = state.companies;
   return `
       <section class="companies">
         <div style="display:flex;flex-direction:column;gap:6px">
           <h2 class="h2">Оборонні компанії Європи</h2>
-        
+          <span class="sub">Мапа за сегментами: натисніть на компанію, щоб відкрити профіль.</span>
         </div>
         <div class="searchbox">
           ${ICON_SEARCH}
           <label for="company-search" class="sr-only">Пошук компаній</label>
-          <input id="company-search" value="${esc(s.q)}" autocomplete="off" placeholder="Назва, технологія, місто…">
+          <input id="company-search" value="${esc(state.companies.q)}" autocomplete="off" placeholder="Назва, технологія, місто, інвестор…">
         </div>
         <div class="company-filters" id="company-filters">${companyFiltersHtml()}</div>
         <span class="sub" id="companies-count">${companiesCount()}</span>
         <div id="companies">${companiesHtml()}</div>
+        <div id="mm-drawer-box">${mmDrawerHtml()}</div>
       </section>`;
 }
 
@@ -967,25 +1164,30 @@ function paintCompanies(filters) {
   if (f && filters) f.innerHTML = companyFiltersHtml();
 }
 
-let companiesLoad = 0;   // лише найновіша відповідь: швидкий набір у пошуку не покаже застарілий результат
-async function loadCompanies(append) {
+
+let companiesLoad = 0;
+async function loadCompanies() {
   const s = state.companies;
+  if (mm.loaded) return paintCompanies(true);       // уже є — лише перемалювати з новими фільтрами
   const mine = ++companiesLoad;
-  s.loading = true;
-  s.error = '';
+  s.loading = true; s.error = '';
   paintCompanies(false);
   try {
-    const r = await api.getCompanies({ q: s.q, country: s.country, sector: s.sector,
-      skip: append ? s.items.length : 0, limit: COMPANIES_PAGE });
-    if (mine !== companiesLoad) return;
-    s.items = append ? s.items.concat(r.items || []) : (r.items || []);
-    s.total = r.total || 0;
-    // списки країн і категорій перемальовуємо лише коли вони змінились: інакше select втратить фокус
-    const ids = (l) => (l || []).map((o) => o.id + ':' + o.count).join();
-    const facets = !!r.countries && (ids(r.countries) !== ids(s.countries) || ids(r.sectors) !== ids(s.sectors));
-    if (r.countries) { s.countries = r.countries; s.sectors = r.sectors || []; }
-    s.loading = false;
-    paintCompanies(facets);
+    let items = [], total = Infinity, first = null;
+    for (let page = 0; items.length < total && page < 30; page++) {
+      const r = await api.getCompanies({ skip: items.length, limit: MM_PAGE });
+      if (mine !== companiesLoad) return;
+      first ||= r;
+      total = r.total ?? 0;
+      if (!(r.items || []).length) break;
+      items = items.concat(r.items);
+    }
+    s.countries = first?.countries || [];
+    s.sectors = first?.sectors || [];
+    const labels = Object.fromEntries(s.countries.map((o) => [o.id, o.label]));
+    mm.all = items.map((c) => mmNorm(c, labels));
+    mm.loaded = true; s.loading = false; s.total = mm.all.length;
+    paintCompanies(true);
   } catch (e) {
     if (mine !== companiesLoad) return;
     s.loading = false;
@@ -998,8 +1200,103 @@ let companyTimer;
 function onCompanySearch(value) {
   state.companies.q = value;
   clearTimeout(companyTimer);
-  companyTimer = setTimeout(() => loadCompanies(false), 350);
+  companyTimer = setTimeout(() => paintCompanies(false), 200);
 }
+
+
+function mmDrawerHtml() {
+  const c = mm.open && mm.all.find((x) => x.id === mm.open);
+  if (!c) return '';
+  const [ua, en] = MM_SECTORS[c.sector] || [c.sectorLabel, ''];
+  const site = safeUrl(c.website);
+  const row = (k, v) => v ? `<dt>${k}</dt><dd>${v}</dd>` : '';
+  const srcs = c.sources.filter((s) => safeUrl(s.url)).map((s) =>
+    `<a href="${esc(safeUrl(s.url))}" target="_blank" rel="noopener noreferrer">${esc(String(s.url).replace(/^https?:\/\/(www\.)?/, '').slice(0, 70))}</a>`).join('');
+  return `
+    <div class="mm-shade" data-mm-close="1"></div>
+    <aside class="mm-drawer" role="dialog" aria-modal="true" aria-labelledby="mm-dname" style="--sc:${mmColor(c.sector)}">
+      <div class="mm-dhead"><span class="mm-mg big" aria-hidden="true">${esc(c.mg)}</span>
+        <div><h3 id="mm-dname">${c.hot ? '🔥 ' : ''}${esc(c.name)}</h3>
+          <div class="row"><span class="pill">${esc(ua)}</span><span class="pill">${esc(MM_USE[c.use])}</span><span class="pill">${esc(c.stage)}</span>
+          ${c.fresh ? '<span class="pill mm-fresh">свіжий раунд</span>' : ''}</div></div>
+        <button class="mm-close" data-mm-close="1" aria-label="Закрити">×</button></div>
+      ${c.desc ? `<p class="mm-desc">${esc(c.desc)}</p>` : ''}
+      <dl class="mm-dl">${row('Штаб-квартира', esc(c.loc || c.countryLabel))}${row('Заснована', esc(c.founded))}
+        ${row('Сайт', site ? `<a href="${esc(site)}" target="_blank" rel="noopener noreferrer">${esc(c.website)}</a>` : '')}
+        ${row('Останній раунд', esc([c.latest, c.sg === 'nd' ? '' : c.stage, c.dateText].filter(Boolean).join(' · ')))}
+        ${row('Залучено всього', esc(c.total))}${row('Інвестори', esc(c.investors))}${row('Перевірка', esc(c.conf))}
+        ${c.signal != null ? row('Dealroom', esc(`Signal ${c.signal}/100${c.drSegment ? ` · «${c.drSegment}»` : ''}`)) : ''}</dl>
+      ${c.hot ? '<p class="note">🔥 Dealroom вважає компанію гарячою: Signal понад 80 і залучено менше $40M.</p>' : ''}
+      ${c.why ? `<div><span class="section-label">Чому це важливо</span><p class="mm-desc">${esc(c.why)}</p></div>` : ''}
+      ${srcs ? `<div><span class="section-label">Джерела</span><div class="mm-srcs">${srcs}</div></div>` : ''}
+      ${safeUrl(c.profile) ? `<p class="note"><a href="${esc(safeUrl(c.profile))}" target="_blank" rel="noopener noreferrer">Профіль на europedefencetech.com</a>${en ? ' · ' + esc(en) : ''}</p>` : ''}
+      <button class="btn-outline" data-ask="${esc(mmAskText(c))}">Запитати аналітика про ${esc(c.name)}</button>
+    </aside>`;
+}
+// Питання до аналітика: з усім, що ми знаємо про компанію, щоб він не плутав її з тезками
+// і одразу шукав і в базі, і в інтернеті, а не перепитував.
+function mmAskText(c) {
+  const facts = [
+    `країна: ${c.loc || c.countryLabel}`,
+    `сегмент: ${c.sectorLabel}`,
+    c.website && `сайт: ${c.website}`,
+    c.founded && `заснована: ${c.founded}`,
+    c.sg !== 'nd' && `стадія: ${c.stage}`,
+    c.latest && `останній раунд: ${[c.latest, c.dateText].filter(Boolean).join(', ')}`,
+    c.total && `залучено всього: ${c.total}`,
+    c.investors && `інвестори: ${c.investors}`,
+  ].filter(Boolean).join('; ');
+  return `Оборонна компанія ${c.name} (${facts}).` + (c.desc ? ` Що вона робить: ${c.desc}` : '') +
+    `\nЗбери про неї коротку довідку: продукти й технології, раунди та інвестори, контракти й замовники, ` +
+    `новини за останні 30 днів. Спершу пошукай у нашій базі постів (за 30 днів, за назвою компанії та її продуктами), ` +
+    `потім одразу зроби веб-пошук, не перепитуючи. Шукай саме цю компанію (за сайтом і країною), не тезок. ` +
+    `Дай посилання на джерела; якщо свіжих новин немає — так і скажи.`;
+}
+function mmOpen(id) {
+  mm.open = id;
+  const box = document.getElementById('mm-drawer-box');
+  if (box) box.innerHTML = mmDrawerHtml();
+  const close = box && box.querySelector('.mm-close');
+  if (close) close.focus();
+}
+
+// Події мапи (окремо від загальних обробників: ті лише кличуть loadCompanies для країни/сегмента)
+$main.addEventListener('click', (e) => {
+  if (state.screen !== 'map') return;
+  const t = e.target.closest('[data-mm-company],[data-mm-stage],[data-mm-view],[data-mm-sort],[data-mm-close]');
+  if (!t) return;
+  const d = t.dataset;
+  if (d.mmCompany) return mmOpen(d.mmCompany);
+  if (d.mmClose) return mmOpen(null);
+  if (d.mmStage) { mm.stages.has(d.mmStage) ? mm.stages.delete(d.mmStage) : mm.stages.add(d.mmStage); return paintCompanies(false); }
+  if (d.mmSort) { mm.sort = d.mmSort; return paintCompanies(true); }
+  if (d.mmView) { mm.view = d.mmView; try { localStorage.setItem('mmView', mm.view); } catch (err) { /* не критично */ } return paintCompanies(true); }
+});
+$main.addEventListener('change', (e) => {
+  if (state.screen !== 'map') return;
+  const id = e.target.id;
+  if (id === 'mm-map') mm.map = e.target.value;
+  else if (id === 'mm-use') mm.use = e.target.value;
+  else if (id === 'mm-sort') mm.sort = e.target.value;
+  else if (id === 'mm-hot') mm.hot = e.target.checked;
+  else if (id === 'mm-fresh') mm.fresh = e.target.checked;
+  else return;
+  paintCompanies(false);
+});
+$main.addEventListener('keydown', (e) => {
+  if (state.screen !== 'map') return;
+  if (e.key === 'Escape' && mm.open) return mmOpen(null);
+  const row = e.target.closest && e.target.closest('tr[data-mm-company]');
+  if (row && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); mmOpen(row.dataset.mmCompany); }
+});
+
+const safeUrl = (u) => {
+  const v = String(u || '').trim();
+  if (!v) return '';
+  if (/^https?:\/\//i.test(v)) return v;
+  return /^[\w.-]+\.[a-z]{2,}(\/|$)/i.test(v) ? 'https://' + v : '';   // «fieldmade.com» → https://fieldmade.com
+};
+
 // ---------- Агенти (лише для адміністраторів) ----------
 const RUN_STATUS = { done: 'готово', failed: 'помилка', skipped: 'пропущено', expired: 'обірвано', running: 'працює', queued: 'у черзі' };
 const KIND_NAME = { goal: 'цілі', topic: 'теми', advice: 'поради' };
@@ -1144,8 +1441,7 @@ $main.addEventListener('click', async (e) => {
 
   if (d.action === 'stop') return stopAnswer();
   if (d.mapActivate) { el.hidden = true; return; }
-  if (d.companiesMore) return loadCompanies(true);
-  if (d.chatDelete) {
+    if (d.chatDelete) {
     if (d.chatDelete === 'yes') return deleteChat();
     state.chat.confirmDelete = d.chatDelete === 'ask';
     state.chat.deleteError = '';
@@ -1161,6 +1457,7 @@ $main.addEventListener('click', async (e) => {
   if (d.fullText) return toggleFullText(d.fullText);
   if (d.go) return go(d.go);
   if (d.ask) {
+    if (typeof mm !== 'undefined') mm.open = null;
     let item = null;
     try { item = d.item ? JSON.parse(d.item) : null; } catch (err) { item = null; }
     if (item && !state.chat.loading) newChat();   // питання про пункт дайджесту — нова тема: без історії іншого чату
@@ -1184,8 +1481,10 @@ $main.addEventListener('click', async (e) => {
   }
   if (d.prefsMentions) return profileAction(() => api.setPrefs({ mentions: d.prefsMentions === '1' }), 'Збережено.');
   if (d.push) return setPush(d.push === '1');
-  if (d.investDigest) { state.digest.side = 'both'; state.digest.unseen = false; state.digest.jump = 'invest'; return go('digests'); }
-  if (d.unseenDigest) { state.digest.unseen = d.unseenDigest === '1'; return loadDigest(); }
+  if (d.investDigest) { state.digest.side = 'both'; state.digest.unseen = false; state.digest.week = false; state.digest.jump = 'invest'; return go('digests'); }
+  // «Лише нове за сьогодні» and «За тиждень» exclude each other: «нове» is about today's digest
+  if (d.unseenDigest) { state.digest.unseen = d.unseenDigest === '1'; if (state.digest.unseen) state.digest.week = false; return loadDigest(); }
+  if (d.weekDigest) { state.digest.week = d.weekDigest === '1'; if (state.digest.week) state.digest.unseen = false; return loadDigest(); }
   if (d.sideDigest) { state.digest.side = d.sideDigest; return loadDigest(); }
   if (d.searchSide) { state.search.side = d.searchSide; render(); return loadSearch(); }
   if (d.days) { state.search.days = +d.days; render(); return loadSearch(); }
@@ -1197,7 +1496,7 @@ $main.addEventListener('toggle', (e) => {
   try { localStorage.setItem('mapOpen', mapOpen ? '1' : '0'); } catch (err) { /* не критично */ }
 }, true);
 
-// ---------- Старт ----------
+
 loadMe();
 loadRecent();
 api.getProposals().then((r) => setBadge((r.proposals || []).length)).catch(() => {});

@@ -49,9 +49,9 @@ def _expect(name: str, r, status: int, **more) -> Check:
 
 async def web_checks(c: httpx2.AsyncClient, base: str) -> list[Check]:
     base = base.rstrip("/")
-    health, page, sw, manifest, me = await asyncio.gather(
+    health, page, sw, manifest, me, companies = await asyncio.gather(
         _get(c, f"{base}/api/health"), _get(c, f"{base}/"), _get(c, f"{base}/sw.js"),
-        _get(c, f"{base}/manifest.webmanifest"), _get(c, f"{base}/api/me"))
+        _get(c, f"{base}/manifest.webmanifest"), _get(c, f"{base}/api/me"), _get(c, f"{base}/api/companies"))
     ui = _expect("web: the UI and its screens", page, 200)
     if ui.problem is None and (missing := [s for s in SCREENS if f'data-screen="{s}"' not in page.text]):
         ui.problem = f"no screen {', '.join(missing)}"
@@ -62,6 +62,7 @@ async def web_checks(c: httpx2.AsyncClient, base: str) -> list[Check]:
         _expect("web: the manifest", manifest, 200,
                 not_a_manifest=lambda r: "manifest+json" in r.headers.get("content-type", "")),
         _expect("web: /api/me needs a sign-in", me, 401),
+        _expect("web: /api/companies is there (needs a sign-in)", companies, 401),      # 404: an older deploy
     ]
 
 

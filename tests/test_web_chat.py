@@ -96,7 +96,7 @@ async def db(test_db):
 def app_with(db, fake, **overrides):
     settings = make_settings(DEV_USER_ID=DEV_UID, **overrides)
     svc = Services(settings=settings, repos=Repos(db), audit=AuditLog(db), token=lambda: None)
-    backend = AnthropicBackend(svc.audit, settings, client=fake, model=settings.web_chat_model) if fake else None
+    backend = AnthropicBackend(svc.audit, settings, client=fake, model=settings.chat_model()) if fake else None
     return create_app(settings, svc, backend=backend)
 
 
