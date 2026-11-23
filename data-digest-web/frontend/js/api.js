@@ -155,6 +155,17 @@ window.api = {
     return http('/goals', { method: 'POST', body: JSON.stringify({ action, text }) });
   },
 
+  // POST /goals/edit { old, text } -> { goals: [..] }  (нове формулювання цілі)
+  async editGoal(old, text) {
+    return http('/goals/edit', { method: 'POST', body: JSON.stringify({ old, text }) });
+  },
+
+  // POST /profile/edit { field: summary|preferences|known|avoid|interests, action: set|add|edit|remove, text?, old? }
+  // -> { editable: { summary, preferences, known, avoid, interests } }  (те, що система склала про користувача)
+  async editProfile(field, action, text, old) {
+    return http('/profile/edit', { method: 'POST', body: JSON.stringify({ field, action, text: text ?? null, old: old ?? null }) });
+  },
+
   // POST /topics { name, action: follow|stop } -> { topic, confirmation }  (follow — продовжити ще на 30 днів)
   async setTopic(name, action) {
     return http('/topics', { method: 'POST', body: JSON.stringify({ name, action }) });

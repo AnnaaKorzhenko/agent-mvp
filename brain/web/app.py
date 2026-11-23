@@ -34,7 +34,9 @@ from brain.config import Settings, get_settings
 from brain.db.client import get_db
 from brain.db.repositories import Repos, user_key
 from brain.domain import feedback as feedback_domain
+from brain.domain import profile_edits
 from brain.domain import proposals as proposals_domain
+from brain.domain.errors import DomainError, NotFound
 from brain.domain.identity import IdentityError, UserContext, resolve_user
 from brain.integrations.backends import AnthropicBackend, OpenAIBackend, chat_backend
 from brain.tools import catalog
@@ -80,6 +82,18 @@ class GoalIn(BaseModel):
 class TopicIn(BaseModel):
     name: str = Field(min_length=2, max_length=80)
     action: Literal["follow", "stop"]                 # follow: renew a topic the user already follows
+
+
+class ProfileEditIn(BaseModel):
+    field: Literal["summary", "preferences", "known", "avoid", "interests"]
+    action: Literal["set", "add", "edit", "remove"]
+    text: str | None = Field(None, max_length=700)
+    old: str | None = Field(None, max_length=700)
+
+
+class GoalEditIn(BaseModel):
+    old: str = Field(min_length=1, max_length=300)
+    text: str = Field(min_length=1, max_length=300)
 
 
 class NotInterestedIn(BaseModel):
@@ -338,8 +352,21 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
     @app.get("/api/profile")
     async def profile(user: WebUser = Depends(web_user)):
         result = await tool(user, "get_profile", {}, "відкрив профіль")
-        p = await proposals_domain.prefs_of(svc.repos, (await context(user)).user_id)
-        return {**result, "agent_prefs": {"cards": p.cards, "off": p.off, "mentions": p.mentions}}
+        ctx = await context(user)
+        p = await proposals_domain.prefs_of(svc.repos, ctx.user_id)
+        mine = await profile_edits.editable(svc.repos, ctx)
+        return {**result, "agent_prefs": {"cards": p.cards, "off": p.off, "mentions": p.mentions},
+                "editable": mine.as_dict() if mine else None}
+
+    @app.post("/api/profile/edit")
+    async def edit_profile(body: ProfileEditIn, user: WebUser = Depends(web_user)):
+        """The user's own change to their learned profile (brain/domain/profile_edits.py)."""
+        try:
+            mine = await profile_edits.edit(svc.repos, await context(user), body.field, body.action, body.text,
+                                            body.old)
+        except DomainError as e:
+            raise HTTPException(404 if isinstance(e, NotFound) else 400, str(e)) from None
+        return {"editable": mine.as_dict()}
 
     # ---- direct actions: the buttons ------------------------------------------------------------------------
 
@@ -357,6 +384,13 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
     async def goal(body: GoalIn, user: WebUser = Depends(web_user)):
         did = ("додав ціль" if body.action == "add" else "прибрав ціль") + f" «{short(body.text)}»"
         return await tool(user, "set_goal", body.model_dump(), did)
+
+    @app.post("/api/goals/edit")
+    async def edit_goal(body: GoalEditIn, user: WebUser = Depends(web_user)):
+        """A goal's new wording: the old one removed, the new one added (set_goal has no edit)."""
+        await tool(user, "set_goal", {"action": "add", "text": body.text},
+                   f"змінив ціль «{short(body.old)}» на «{short(body.text)}»")
+        return await tool(user, "set_goal", {"action": "remove", "text": body.old}, f"прибрав ціль «{short(body.old)}»")
 
     @app.post("/api/topics")
     async def topic(body: TopicIn, user: WebUser = Depends(web_user)):

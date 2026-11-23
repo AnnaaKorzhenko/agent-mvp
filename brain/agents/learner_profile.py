@@ -108,6 +108,9 @@ You get the previous profile (may be empty) and the user's new activity: their o
 of news items and answers (with reasons and comments), and things they shared or that were detected about them \
 (insights, with a kind). Update the profile:
 - Merge new evidence with the previous profile. When statements conflict, the newer one wins.
+- An insight whose text starts with «Зміна профілю:» is the user's own edit of this profile (the previous profile \
+already has it): keep it exactly, and never bring back what they removed or changed unless newer activity asks \
+for it in so many words.
 - preferences: how they want answers and news (length, format, language, what to include or skip).
 - interests: lasting topics they care about, weight 1-5 by how strong and repeated the evidence is (ratings and \
 repeated questions count more than one mention). Drop topics with only weak, old evidence. Also infer interests \

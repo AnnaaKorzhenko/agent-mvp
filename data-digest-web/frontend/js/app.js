@@ -7,6 +7,7 @@ const state = {
   proposals: { items: [], loading: false, error: '', answered: {}, reasonFor: null },
   profile: null,
   profileNote: '',
+  profileEditing: null,     // 'goal:2', 'preferences:0', 'summary:0': рядок профілю, який зараз змінюють
   push: { checked: false, key: null, on: false, busy: false, note: '' },
   agents: { days: 7, data: null, error: '', note: '' },
   ratings: {},
@@ -27,7 +28,7 @@ const ICON_SEARCH = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none"
 
 function go(screen) {
   state.screen = screen;
-  if (screen === 'profile') state.profileNote = '';
+  if (screen === 'profile') { state.profileNote = ''; state.profileEditing = null; }
   document.querySelectorAll('.nav-item').forEach((b) => b.classList.toggle('active', b.dataset.screen === screen));
   render();
   if (screen === 'digests') loadDigest();
@@ -721,10 +722,60 @@ function listHtml(items, empty) {
   return items.length ? `<ul class="plain">${items.map((t) => `<li>${esc(t)}</li>`).join('')}</ul>` : `<span class="sub">${esc(empty)}</span>`;
 }
 
+// Що з профілю, який склала система, можна змінити самому (brain/domain/profile_edits.py), у порядку на екрані
+const EDIT_LISTS = [
+  ['interests', 'Інтереси', 'Новий інтерес, наприклад: морські дрони', 80],
+  ['preferences', 'Як ви хочете отримувати новини', 'Наприклад: коротко, з посиланнями на джерела', 300],
+  ['known', 'Що ви вже знаєте', 'Наприклад: як влаштований Brave1', 300],
+  ['avoid', 'Чого уникати', 'Наприклад: новини про космос', 120],
+];
+const EDITED_KINDS = new Set(['summary', 'interest', 'preference', 'known', 'avoid']);   // показані з editable
+const EDIT_NOTE = 'Зміна профілю:';          // власні зміни користувача: лише для системи, на екрані не дублюємо
+
+function editValue(field, i) {
+  const p = state.profile || {};
+  if (field === 'goal') return (p.goals || [])[i];
+  if (field === 'summary') return p.editable?.summary || '';
+  return (p.editable?.[field] || [])[i];
+}
+
+function editFormHtml(key, value, max, multiline) {
+  const input = multiline
+    ? `<textarea name="text" maxlength="${max}" rows="4" aria-label="Новий текст">${esc(value)}</textarea>`
+    : `<input name="text" maxlength="${max}" autocomplete="off" value="${esc(value)}" aria-label="Новий текст">`;
+  return `<form class="inline-form" data-form="edit" data-edit="${key}">${input}
+    <button class="btn-outline" type="submit">Зберегти</button>
+    <button class="btn-text" type="button" data-edit-cancel="1">Скасувати</button></form>`;
+}
+
+function editableRows(field, items, max) {
+  return items.map((t, i) => state.profileEditing === `${field}:${i}` ? `<li>${editFormHtml(`${field}:${i}`, t, max)}</li>` : `
+    <li><span>${esc(t)}</span><span class="row-actions">
+      <button class="btn-text" data-edit-start="${field}:${i}">Змінити</button>
+      <button class="btn-text" data-edit-remove="${field}:${i}">Прибрати</button></span></li>`).join('');
+}
+
+function editableListHtml(field, items, placeholder, max) {
+  return `
+    ${items.length ? `<ul class="plain editable">${editableRows(field, items, max)}</ul>` : '<span class="sub">Поки порожньо.</span>'}
+    <form class="inline-form" data-form="edit" data-edit="${field}:new">
+      <input name="text" maxlength="${max}" autocomplete="off" placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}">
+      <button class="btn-outline" type="submit">Додати</button>
+    </form>`;
+}
+
+function summaryHtml(text) {
+  if (state.profileEditing === 'summary:0') return editFormHtml('summary:0', text, 700, true);
+  return `${text ? `<p>${esc(text)}</p>` : '<span class="sub">Ще нічого. Напишіть, хто ви і що вам потрібно від сервісу.</span>'}
+    <div class="row"><button class="btn-text" data-edit-start="summary:0">${text ? 'Змінити' : 'Написати'}</button></div>`;
+}
+
 function goalsHtml(goals) {
   return `
-    ${goals.length ? `<ul class="plain editable">${goals.map((g) => `
-      <li><span>${esc(g)}</span><button class="btn-text" data-goal-remove="${esc(g)}">Прибрати</button></li>`).join('')}</ul>`
+    ${goals.length ? `<ul class="plain editable">${goals.map((g, i) => state.profileEditing === `goal:${i}` ? `<li>${editFormHtml(`goal:${i}`, g, 300)}</li>` : `
+      <li><span>${esc(g)}</span><span class="row-actions">
+        <button class="btn-text" data-edit-start="goal:${i}">Змінити</button>
+        <button class="btn-text" data-goal-remove="${esc(g)}">Прибрати</button></span></li>`).join('')}</ul>`
       : '<span class="sub">Цілей ще немає.</span>'}
     <form class="inline-form" data-form="goal">
       <label for="goal-new" class="sr-only">Нова ціль</label>
@@ -734,13 +785,19 @@ function goalsHtml(goals) {
 }
 
 function topicsHtml(topics) {
-  if (!topics.length) return '<span class="sub">Ви ще нічого не відстежуєте. Тему можна додати з пропозицій або попросити аналітика.</span>';
+  const add = `
+    <form class="inline-form" data-form="topic">
+      <label for="topic-new" class="sr-only">Нова тема</label>
+      <input id="topic-new" name="name" minlength="2" maxlength="80" autocomplete="off" placeholder="Нова тема, наприклад: Спектр-К">
+      <button class="btn-outline" type="submit">Відстежувати</button>
+    </form>`;
+  if (!topics.length) return '<span class="sub">Ви ще нічого не відстежуєте.</span>' + add;
   return `<ul class="plain editable">${topics.map((t) => {
     const until = t.expires_at && t.status === 'active' ? ' до ' + esc(new Date(t.expires_at).toLocaleDateString('uk-UA')) : '';
     const btn = t.status === 'active' ? `<button class="btn-text" data-topic="${esc(t.name)}" data-topic-action="stop">Припинити</button>`
       : t.status === 'expired' ? `<button class="btn-text" data-topic="${esc(t.name)}" data-topic-action="follow">Продовжити на 30 днів</button>` : '';
     return `<li><span><b>${esc(t.name)}</b> <span class="sub">· ${esc(TOPIC_STATUS[t.status] || t.status)}${until}</span></span>${btn}</li>`;
-  }).join('')}</ul>`;
+  }).join('')}</ul>` + add;
 }
 
 function aboutHtml(kind, texts) {
@@ -768,7 +825,10 @@ function renderProfile() {
   if (!p) return '<div class="page"><div class="page-inner narrow"><p class="sub">Завантаження…</p></div></div>';
   if (p.error) return `<div class="page"><div class="page-inner narrow"><p class="sub">${esc(p.error)}</p></div></div>`;
   const topics = (p.topics || []).filter((t) => t.status !== 'stopped');
-  const about = Object.entries(p.about_user || {}).filter(([k]) => k !== 'tracked' && k !== 'goal');
+  const mine = p.editable;          // null: профіль не можна змінити тут (дані вище за дозволене цьому клієнту)
+  const about = Object.entries(p.about_user || {})
+    .filter(([k]) => k !== 'tracked' && k !== 'goal' && !(mine && EDITED_KINDS.has(k)))
+    .map(([k, texts]) => [k, texts.filter((t) => !t.startsWith(EDIT_NOTE))]).filter(([, texts]) => texts.length);
   return `
     <div class="page"><div class="page-inner narrow">
       <div style="display:flex;flex-direction:column;gap:6px">
@@ -780,10 +840,20 @@ function renderProfile() {
         <h2>Цілі</h2>
         ${goalsHtml(p.goals || [])}
       </section>
+      ${mine ? `
+      <section class="card">
+        <h2>Коротко про вас</h2>
+        ${summaryHtml(mine.summary)}
+      </section>` : ''}
       <section class="card">
         <h2>Теми, які ви відстежуєте</h2>
         ${topicsHtml(topics)}
       </section>
+      ${mine ? EDIT_LISTS.map(([field, title, placeholder, max]) => `
+      <section class="card">
+        <h2>${esc(title)}</h2>
+        ${editableListHtml(field, mine[field] || [], placeholder, max)}
+      </section>`).join('') : ''}
       ${about.map(([kind, texts]) => `
         <section class="card">
           <h2>${esc(ABOUT_LABEL[kind] || kind)}</h2>
@@ -882,6 +952,7 @@ async function loadProfile() {
 
 async function profileAction(run, note) {
   state.profileNote = 'Зберігаю…';
+  state.profileEditing = null;
   render();
   try { const r = await run(); state.profileNote = typeof note === 'function' ? note(r) : note; }
   catch (e) { state.profileNote = 'Не вдалося: ' + e.message; }
@@ -1419,7 +1490,24 @@ $main.addEventListener('submit', (e) => {
     const text = form.text.value.trim();
     if (text) profileAction(() => api.setGoal('add', text), `Ціль додано: «${text}».`);
   }
+  if (form.dataset.form === 'topic') {
+    const name = form.name.value.trim();
+    if (name.length >= 2) profileAction(() => api.setTopic(name, 'follow'), (r) => r.confirmation || `Тему «${name}» додано.`);
+  }
+  if (form.dataset.form === 'edit') return onProfileEdit(form.dataset.edit, form.text.value.trim());
 });
+
+// Збереження рядка профілю: нова ціль-формулювання, опис, пункт списку (додати або змінити)
+function onProfileEdit(key, text) {
+  const [field, at] = key.split(':');
+  if (field === 'summary') return profileAction(() => api.editProfile('summary', 'set', text), 'Опис збережено.');
+  if (!text) return;
+  if (at === 'new') return profileAction(() => api.editProfile(field, 'add', text), `Додано: «${text}».`);
+  const old = editValue(field, +at);
+  if (old === text) { state.profileEditing = null; return render(); }
+  if (field === 'goal') return profileAction(() => api.editGoal(old, text), `Ціль змінено: «${text}».`);
+  return profileAction(() => api.editProfile(field, 'edit', text, old), `Змінено: «${text}».`);
+}
 
 // $main.addEventListener('input', (e) => {
 //   if (e.target.id === 'post-search') onSearchInput(e.target.value);
@@ -1470,6 +1558,18 @@ $main.addEventListener('click', async (e) => {
   if (d.cancelReason) { state.proposals.reasonFor = null; return render(); }
 
   // профіль
+  if (d.editStart) {
+    state.profileEditing = d.editStart;
+    render();
+    $main.querySelector(`[data-edit="${d.editStart}"] [name="text"]`)?.focus();
+    return;
+  }
+  if (d.editCancel) { state.profileEditing = null; return render(); }
+  if (d.editRemove) {
+    const [field, at] = d.editRemove.split(':');
+    const old = editValue(field, +at);
+    return profileAction(() => api.editProfile(field, 'remove', null, old), `Прибрано: «${old}».`);
+  }
   if (d.goalRemove) return profileAction(() => api.setGoal('remove', d.goalRemove), `Ціль прибрано: «${d.goalRemove}».`);
   if (d.topic) return profileAction(() => api.setTopic(d.topic, d.topicAction), (r) => r.confirmation || 'Збережено.');
   if (d.notMe) return profileAction(() => api.notInterested(d.notMe), correctedNote);
