@@ -289,10 +289,11 @@ def create_app(settings: Settings | None = None, svc: Services | None = None,
 
     @app.get("/api/digest")
     async def digest(side: Literal["ua", "ru", "world", "video", "youtube", "topics", "both"] = "both",
-                     date: str | None = None, unseen_only: bool = False, user: WebUser = Depends(web_user)):
-        args = {"side": side, "date": date} | ({"unseen_only": True} if unseen_only else {})
-        result = await tool(user, "get_digest", args,
-                            f"відкрив дайджест ({side}{', лише нове' if unseen_only else ''})")
+                     date: str | None = None, unseen_only: bool = False, period: Literal["day", "week"] = "day",
+                     user: WebUser = Depends(web_user)):
+        args = {"side": side, "date": date, "period": period} | ({"unseen_only": True} if unseen_only else {})
+        did = ", лише нове" if unseen_only else ", за тиждень" if period == "week" else ""
+        result = await tool(user, "get_digest", args, f"відкрив дайджест ({side}{did})")
         mine = await earlier(user)
         for d in result.get("digests") or []:
             for section in d.get("sections") or []:

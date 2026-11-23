@@ -25,6 +25,7 @@ from brain.domain import posts as posts_domain
 from brain.domain import profile as profile_domain
 from brain.domain import proposals as proposals_domain
 from brain.domain import topics as topics_domain
+from brain.domain.errors import InvalidInput
 from brain.domain.identity import UserContext
 from brain.mcp_server import schemas as out
 from brain.mcp_server import widgets
@@ -38,7 +39,7 @@ logger = logging.getLogger("brain.tools")
 def _digest_out(res: digests_domain.DigestResultView, cls: type[out.DigestResult] = out.DigestResult,
                 **extra) -> out.DigestResult:
     refs = itertools.count(1)       # one numbering across both sides: «третя» is unambiguous
-    return cls(date=res.date, missing_sides=res.missing_sides, **extra, digests=[
+    return cls(date=res.date, period=res.period, missing_sides=res.missing_sides, **extra, digests=[
         out.DigestOut(
             side=v.side, side_note=v.side_note, digest_id=v.digest.id,
             created_at=v.digest.created_at.isoformat(), period_start=v.digest.period_start,
@@ -164,20 +165,23 @@ DEEP_DIVE_STEPS = (
 # ---- the handlers -----------------------------------------------------------------------------------------
 
 async def get_digest(call: Call, side: str = "both", date: str | None = None, as_text: bool = False,
-                     unseen_only: bool = False):
+                     unseen_only: bool = False, period: str = "day"):
     svc = call.svc
     widget = not as_text and call.origin.widgets()
 
     async def body(ctx: UserContext) -> CallToolResult:
+        if unseen_only and period != "day":
+            raise InvalidInput("unseen_only works for the daily digest only")
         day = digests_domain.unseen_day(date) if unseen_only else date
         await topics_domain.sync_if_due(svc.repos)
-        res = await digests_domain.get_digests(svc.repos, ctx, side, day)
+        res = await digests_domain.get_digests(svc.repos, ctx, side, day, period)
         found = bool(res.digests)
         if unseen_only:
             await digests_domain.drop_seen(svc.repos, ctx, res)
         result = _digest_out(res)
         if not found:
-            result.note = "No digest found for this date. Say so; do not invent news."
+            result.note = ("No weekly digest found" if period == "week" else "No digest found for this date") + \
+                ". Say so; do not invent news."
         elif not result.digests:
             result.note = digests_domain.ALL_SEEN_NOTE
         result.shown_in_widget = widget and bool(result.digests)

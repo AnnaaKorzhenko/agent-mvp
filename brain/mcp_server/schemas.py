@@ -140,6 +140,8 @@ class ProposalAnswer(MemoryOut):
 
 class DigestResult(MemoryOut):
     date: str | None = Field(description="Kyiv date of the digests (YYYY-MM-DD)")
+    period: Literal["day", "week"] = Field("day", description=(
+        "day: the daily digests; week: the weekly ones (each digest's period_start / period_end is its week)"))
     proposals: list[ProposalOut] = Field(default_factory=list, description=(
         "The system's suggestions for the user (goals it noticed, topics to follow, advice on what changed). In the "
         "widget they show as cards with Так / Не цікаво buttons; otherwise mention them in one line each and, on "

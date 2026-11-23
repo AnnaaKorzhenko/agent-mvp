@@ -193,10 +193,12 @@ class DigestsRepo:
 
     TOPICS_DIGEST = {"$or": [{"side": "interests"}, {"trigger": "topics"}]}
 
-    async def latest_topics(self, start: datetime | None = None, end: datetime | None = None) -> DigestDoc | None:
-        """The latest daily digest of users' topics and interests: side "interests" (the pipeline since 2026-10-31;
-        it names the keyword record in `interest`), or trigger "topics" (the first agreement)."""
-        query: dict = {**self.TOPICS_DIGEST, "period": "day"}
+    async def latest_topics(self, start: datetime | None = None, end: datetime | None = None,
+                            period: str = "day") -> DigestDoc | None:
+        """The latest digest of users' topics and interests (daily, or the weekly one): side "interests" (the
+        pipeline since 2026-10-31; it names the keyword record in `interest`), or trigger "topics" (the first
+        agreement)."""
+        query: dict = {**self.TOPICS_DIGEST, "period": period}
         if start or end:
             query["created_at"] = {**({"$gte": start} if start else {}), **({"$lt": end} if end else {})}
         async for doc in self.col.find(query).sort("created_at", -1).limit(5):

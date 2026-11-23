@@ -2,7 +2,7 @@ const state = {
   screen: 'chat',
   chat: { id: null, title: 'Новий чат', messages: [], loading: false },
   // digest: { side: 'both', data: null, loading: false, error: '' },
-  digest: { side: 'both', unseen: false, data: null, loading: false, error: '', jump: null, jumpNote: '' },
+  digest: { side: 'both', unseen: false, week: false, data: null, loading: false, error: '', jump: null, jumpNote: '' },
   search: { q: '', side: 'all', days: 7, items: [], note: '', error: '', loading: false },
   proposals: { items: [], loading: false, error: '', answered: {}, reasonFor: null },
   profile: null,
@@ -485,7 +485,21 @@ function digestHtml(data) {
   const n = (data.proposals || []).length;
   const offer = n ? `<button class="notice" data-go="proposals">Система має для вас пропозицій: ${n}. Переглянути</button>` : '';
   if (data.proposals) setBadge(n);
-  return offer + notes + (blocks || '<p class="sub">Дайджесту за цей день немає.</p>');
+  const empty = data.period === 'week' ? 'Тижневого дайджесту ще немає.' : 'Дайджесту за цей день немає.';
+  return offer + notes + (blocks || `<p class="sub">${empty}</p>`);
+}
+
+// The weekly digest's week, e.g. «16.11–23.11», from its period_start / period_end
+function weekText(data) {
+  const d = (data?.digests || []).find((x) => x.period_start && x.period_end);
+  if (!d) return '';
+  const day = (iso) => new Date(iso).toLocaleDateString('uk-UA', { day: '2-digit', month: '2-digit', timeZone: 'Europe/Kyiv' });
+  return `${day(d.period_start)}–${day(d.period_end)}`;
+}
+
+function digestSubtitle(data) {
+  if (data?.period === 'week') return 'Тиждень' + (weekText(data) ? ' ' + weekText(data) : '') + ' · ';
+  return data?.date ? data.date + ' · ' : '';
 }
 
 function renderDigests() {
@@ -497,12 +511,13 @@ function renderDigests() {
       <div class="head-row">
         <div>
           <h1 class="h1">Дайджест</h1>
-          <span class="sub">${d.data?.date ? esc(d.data.date) + ' · ' : ''}упорядковано за вашими цілями та інтересами</span>
+          <span class="sub">${esc(digestSubtitle(d.data))}упорядковано за вашими цілями та інтересами</span>
         </div>
       </div>
       <div class="row">
         <div class="segmented" role="group" aria-label="Джерела">${seg}</div>
         <button class="chip ${d.unseen ? 'on' : ''}" role="switch" aria-checked="${d.unseen}" data-unseen-digest="${d.unseen ? '0' : '1'}">Лише нове за сьогодні</button>
+        <button class="chip ${d.week ? 'on' : ''}" role="switch" aria-checked="${d.week}" data-week-digest="${d.week ? '0' : '1'}">За тиждень</button>
       </div>
       ${d.loading ? '<p class="sub">Завантаження…</p>' : d.error ? `<p class="sub">${esc(d.error)}</p>` : digestHtml(d.data)}
     </div></div>`;
@@ -513,7 +528,7 @@ async function loadDigest() {
   state.digest.error = '';
   if (state.screen === 'digests') render();
   try {
-    state.digest.data = await api.getDigest(state.digest.side, null, state.digest.unseen);
+    state.digest.data = await api.getDigest(state.digest.side, null, state.digest.unseen, state.digest.week ? 'week' : 'day');
     (state.digest.data.digests || []).forEach((d) => (d.sections || []).forEach((sec) => (sec.items || []).forEach((it) => {
       if (it.my_reaction) state.ratings[`d:${d.digest_id}/${it.n}`] = it.my_reaction;
     })));
@@ -1466,8 +1481,10 @@ $main.addEventListener('click', async (e) => {
   }
   if (d.prefsMentions) return profileAction(() => api.setPrefs({ mentions: d.prefsMentions === '1' }), 'Збережено.');
   if (d.push) return setPush(d.push === '1');
-  if (d.investDigest) { state.digest.side = 'both'; state.digest.unseen = false; state.digest.jump = 'invest'; return go('digests'); }
-  if (d.unseenDigest) { state.digest.unseen = d.unseenDigest === '1'; return loadDigest(); }
+  if (d.investDigest) { state.digest.side = 'both'; state.digest.unseen = false; state.digest.week = false; state.digest.jump = 'invest'; return go('digests'); }
+  // «Лише нове за сьогодні» and «За тиждень» exclude each other: «нове» is about today's digest
+  if (d.unseenDigest) { state.digest.unseen = d.unseenDigest === '1'; if (state.digest.unseen) state.digest.week = false; return loadDigest(); }
+  if (d.weekDigest) { state.digest.week = d.weekDigest === '1'; if (state.digest.week) state.digest.unseen = false; return loadDigest(); }
   if (d.sideDigest) { state.digest.side = d.sideDigest; return loadDigest(); }
   if (d.searchSide) { state.search.side = d.searchSide; render(); return loadSearch(); }
   if (d.days) { state.search.days = +d.days; render(); return loadSearch(); }

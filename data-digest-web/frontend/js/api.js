@@ -32,16 +32,18 @@ window.api = {
     return http('/me');
   },
 
-  // GET /digest?side=both|ua|ru|topics[&date=YYYY-MM-DD][&unseen_only=1] (unseen_only: today's items not seen yet)
-  // -> { date, digests: [{ side, side_note, digest_id, sections: [{ category, title, items: [
+  // GET /digest?side=both|ua|ru|topics[&date=YYYY-MM-DD][&unseen_only=1][&period=week] (unseen_only: today's items
+  // not seen yet; period=week: the weekly digest)
+  // -> { date, period, digests: [{ side, side_note, digest_id, sections: [{ category, title, items: [
   //        { ref, n, text, source_urls, source_post_ids, is_russian_source_claim, why: [..], relevance,
   //        my_reaction: useful | not_useful | neutral | null }] }] }],
   //      missing_sides, note, proposals: [...], topics_to_renew: [...] }
-  async getDigest(side, date, unseenOnly) {
+  async getDigest(side, date, unseenOnly, period) {
     if (USE_MOCK) { await delay(150); return { date: null, digests: [], missing_sides: [], note: 'Демо-режим' }; }
     const p = new URLSearchParams({ side });
     if (date) p.set('date', date);
     if (unseenOnly) p.set('unseen_only', '1');
+    if (period === 'week') p.set('period', 'week');
     return http(`/digest?${p}`);
   },
 

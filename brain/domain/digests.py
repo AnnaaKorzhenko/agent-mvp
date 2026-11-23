@@ -79,6 +79,7 @@ class DigestView:
 @dataclass
 class DigestResultView:
     date: str | None
+    period: str = "day"
     digests: list[DigestView] = field(default_factory=list)
     missing_sides: list[str] = field(default_factory=list)
 
@@ -118,10 +119,17 @@ def order_sections(sections: list[DigestSectionDoc], profile: UserProfileDoc | N
     return [sections[i] for i in idx]
 
 
-async def get_digests(repos: Repos, ctx: UserContext, side: str = "both", day: str | None = None) -> DigestResultView:
+PERIODS = ("day", "week")
+
+
+async def get_digests(repos: Repos, ctx: UserContext, side: str = "both", day: str | None = None,
+                      period: str = "day") -> DigestResultView:
     """both: the user's tracked-topics items first (if any), then ua, ru, world and video (the last two only when
     the pipeline made them: they are never missing); ua / ru / world / video: that side only; topics: the
-    tracked-topics items only."""
+    tracked-topics items only. period: the daily digests, or the weekly ones (the pipeline makes them on Mondays);
+    with day, the ones made that day."""
+    if period not in PERIODS:
+        raise InvalidInput("period must be 'day' or 'week'")
     side = SIDE_NAMES.get(side, side)
     both = side in ("both", "all", None)
     sides = list(SIDES) if both else [] if side == TOPICS else [side]
@@ -131,16 +139,16 @@ async def get_digests(repos: Repos, ctx: UserContext, side: str = "both", day: s
     start, end = kyiv_day_bounds(wanted) if wanted else (None, None)
     profile = await repos.users.get_profile(ctx.user_id)
     prefs = await relevance.load(repos, ctx, profile)
-    result = DigestResultView(date=wanted.isoformat() if wanted else None)
+    result = DigestResultView(date=wanted.isoformat() if wanted else None, period=period)
     # The most specific first: a name inside an interest («Рассвет») before a whole interest sentence.
     interests = sorted((t for t in prefs.topics if t.label.startswith(INTEREST_LABEL)), key=lambda t: len(t.patterns))
     if (both or side == TOPICS) and (prefs.tracked or interests):
-        digest = await repos.digests.latest_topics(start, end)
+        digest = await repos.digests.latest_topics(start, end, period)
         if digest is not None and sensitivity.is_allowed(digest.sensitivity, ctx.max_sensitivity):
             if view := await _topics_view(repos, ctx, digest, prefs.tracked, interests):
                 result.digests.append(view)
     for s in sides:
-        digest = await repos.digests.latest(s, "day", start, end)
+        digest = await repos.digests.latest(s, period, start, end)
         if digest is None or not sensitivity.is_allowed(digest.sensitivity, ctx.max_sensitivity):
             if s in REQUIRED_SIDES or not both:
                 result.missing_sides.append(s)
@@ -160,8 +168,11 @@ def seen_key(digest_id: str, n: int) -> str:
 
 async def mark_seen(repos: Repos, ctx: UserContext, res: DigestResultView, today: date | None = None) -> int:
     """Remembers the returned items of today's (Kyiv) digests as shown to the user, in any channel; a past day's
-    digest marks nothing. Returns how many keys were sent."""
+    digest marks nothing, nor does a weekly one (its items would crowd the day's out of SEEN_MAX). Returns how many
+    keys were sent."""
     today = today or kyiv_today()
+    if res.period != "day":
+        return 0
     keys = [seen_key(v.digest.id, v.number(i)) for v in res.digests
             if v.digest.created_at.astimezone(KYIV).date() == today
             for _, items in v.sections for i in items]

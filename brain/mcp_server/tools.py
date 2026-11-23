@@ -107,6 +107,9 @@ def register_tools(mcp: MCPServer, svc: Services) -> dict[str, ToolSpec]:
         unseen_only: Annotated[bool, Field(description=(
             "true: only today's items the user hasn't been shown yet, in any app («що нового», «що я ще не бачив»); "
             "today only, so omit date"))] = False,
+        period: Annotated[Literal["day", "week"], Field(description=(
+            "day: the daily digest (the default); week: the weekly digest, the week's main news («за тиждень», "
+            "«тижневий дайджест»), made on Mondays"))] = "day",
         signals: Signals = None,
     ) -> Annotated[CallToolResult, out.DigestResult]:
         """Get the user's daily news digest: sections ordered by the user's interests, every item with its
